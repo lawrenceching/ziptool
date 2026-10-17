@@ -49,6 +49,8 @@ enum Command {
         #[arg(short, long)]
         password: Option<String>,
     },
+    /// 打印应用运行环境状态(后端工具是否可用)
+    Doctor,
 }
 
 fn main() -> ExitCode {
@@ -124,6 +126,22 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Command::Doctor => {
+            let c = zip_tool_core::doctor::check_backend_tool();
+            match (&c.path, &c.probe) {
+                (Some(p), Ok(Some(line))) => {
+                    println!("[ok] {}: {} ({line})", c.program, p.display())
+                }
+                (Some(p), Ok(None)) => println!("[ok] {}: {}", c.program, p.display()),
+                (Some(p), Err(e)) => println!("[FAIL] {}: {} ({e})", c.program, p.display()),
+                (None, _) => println!("[FAIL] {}: not found in PATH", c.program),
+            }
+            if c.is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
     }
 }
 

@@ -62,6 +62,9 @@ zip-tool compress -i D:\data -o E:\out --split 2g -p 密码 --random-name
 
 # 解压 (支持 .zip 与 .zip.001 分卷)
 zip-tool extract -i E:\out\zt_xxx.zip.001 -o D:\restore -p 密码
+
+# 环境自检: 定位并试运行后端工具, 打印路径与可用性 (全部正常时退出码 0)
+zip-tool doctor
 ```
 
 ## 构建桌面应用

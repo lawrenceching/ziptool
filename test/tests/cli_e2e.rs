@@ -89,17 +89,25 @@ fn fill(path: &Path, len: usize, seed: u8) {
 
 struct Run {
     ok: bool,
+    stdout: String,
     stderr: String,
 }
 
 fn run_tool(args: &[&str]) -> Run {
-    let out = Command::new(tool_binary())
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("无法启动 zip-tool");
+    run_with(|cmd| {
+        cmd.args(args);
+    })
+}
+
+/// 自定义子进程构造(如清空环境变量做负向测试)
+fn run_with(f: impl FnOnce(&mut Command)) -> Run {
+    let mut cmd = Command::new(tool_binary());
+    cmd.stdin(Stdio::null());
+    f(&mut cmd);
+    let out = cmd.output().expect("无法启动 zip-tool");
     Run {
         ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
 }
@@ -337,9 +345,34 @@ fn split_password_random_roundtrip() {
         &inp.join("media/clip.bin"),
         &fx.root.join("restore/media/clip.bin"),
     );
-    assert_file_eq(
-        &inp.join("media/clip.bin"),
-        &fx.root.join("restore/media/clip.bin"),
-    );
     assert_file_eq(&inp.join("photo.jpg"), &fx.root.join("restore/photo.jpg"));
+}
+
+#[test]
+fn doctor_reports_backend_tool_availability() {
+    let program = if cfg!(windows) { "7z" } else { "zip" };
+
+    // 正常环境: 定位到工具且试运行成功
+    let r = run_tool(&["doctor"]);
+    assert!(r.ok, "doctor 应成功:\n{}", r.stderr);
+    assert!(
+        r.stdout.contains(&format!("[ok] {program}")),
+        "stdout: {}",
+        r.stdout
+    );
+
+    // PATH 清空: 定位不到工具, 应 FAIL 且退出码非 0
+    let bad = run_with(|cmd| {
+        cmd.args(["doctor"]).env_remove("PATH");
+    });
+    assert!(
+        !bad.ok,
+        "PATH 清空后 doctor 应失败, stdout: {}",
+        bad.stdout
+    );
+    assert!(
+        bad.stdout.contains(&format!("[FAIL] {program}")),
+        "stdout: {}",
+        bad.stdout
+    );
 }

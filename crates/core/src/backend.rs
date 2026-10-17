@@ -25,7 +25,8 @@ impl Backend {
         }
     }
 
-    fn program(&self) -> &'static str {
+    /// 后端对应的外部命令名(zip / 7z;doctor 自检也要用)
+    pub fn program(&self) -> &'static str {
         match self {
             Backend::Zip => "zip",
             Backend::SevenZip => "7z",

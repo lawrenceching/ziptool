@@ -22,6 +22,7 @@
 
 pub mod backend;
 pub mod compress;
+pub mod doctor;
 pub mod extract;
 pub mod naming;
 pub mod progress;
