@@ -37,9 +37,9 @@ enum Command {
         #[arg(short, long)]
         random_name: bool,
     },
-    /// 解压/合并分包
+    /// 解压/合并分包(单包或整个目录批量)
     Extract {
-        /// 压缩包或第一个分卷(.zip / .zip.001)
+        /// 压缩包、第一个分卷(.zip / .zip.001)或包含压缩包的目录
         #[arg(short, long)]
         input: PathBuf,
         /// 解压目标目录
@@ -48,6 +48,9 @@ enum Command {
         /// 解压密码
         #[arg(short, long)]
         password: Option<String>,
+        /// 目标已有同名文件时覆盖(默认拒绝, 防旧半成品冒充结果)
+        #[arg(long)]
+        force: bool,
     },
     /// 打印应用运行环境状态(后端工具是否可用)
     Doctor,
@@ -92,6 +95,9 @@ fn main() -> ExitCode {
                         };
                         eprint!("\r[{}/{}] {}{}        ", p.done, p.total, p.entry, size);
                     }
+                    Phase::Extracting => {
+                        eprint!("\r[extract {}/{}] {}        ", p.done, p.total, p.entry);
+                    }
                 }
                 ControlFlow::Continue(())
             }) {
@@ -119,13 +125,44 @@ fn main() -> ExitCode {
             input,
             output,
             password,
-        } => match extract(&input, &output, password.as_deref()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
+            force,
+        } => {
+            match extract(
+                &input,
+                &output,
+                password.as_deref(),
+                force,
+                &|p: &Progress| {
+                    if let Phase::Extracting = p.phase {
+                        eprint!("\r[extract {}/{}] {}        ", p.done, p.total, p.entry);
+                    }
+                    ControlFlow::Continue(())
+                },
+            ) {
+                Ok(report) => {
+                    eprintln!();
+                    for w in &report.warnings {
+                        eprintln!("warning: {w}");
+                    }
+                    for g in &report.groups {
+                        match &g.original {
+                            Some(o) => println!("{} [{}] {} files", g.entry, o, g.files),
+                            None => println!("{}: {} files", g.entry, g.files),
+                        }
+                    }
+                    if report.cancelled {
+                        eprintln!("cancelled, {} of groups done", report.groups.len());
+                        return ExitCode::from(130);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!();
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
         Command::Doctor => {
             let c = zip_tool_core::doctor::check_backend_tool();
             match (&c.path, &c.probe) {

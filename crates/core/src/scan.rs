@@ -4,8 +4,8 @@
 use std::fs;
 use std::path::Path;
 
-use crate::progress::{Phase, Progress};
 use crate::Result;
+use crate::progress::{Phase, Progress};
 
 /// 一个待压缩的顶层条目(Step 1 产出, Step 2 补全 dst, Step 3 消费)
 #[derive(Debug, Clone)]

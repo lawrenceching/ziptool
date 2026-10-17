@@ -14,7 +14,7 @@ use tauri::ipc::Channel;
 use job::CancelFlag;
 use zip_tool_core::{Phase, Progress};
 
-/// 全局状态:当前任务(压缩)的取消旗标
+/// 全局状态:当前任务(压缩/解压)的取消旗标
 #[derive(Default)]
 struct AppState {
     current: Mutex<Option<CancelFlag>>,
@@ -38,6 +38,7 @@ impl From<&Progress> for ProgressEvent {
             phase: match p.phase {
                 Phase::Scanning => "scanning".into(),
                 Phase::Compressing => "compressing".into(),
+                Phase::Extracting => "extracting".into(),
             },
             done: p.done,
             total: p.total,
@@ -121,22 +122,67 @@ async fn compress(
     })
 }
 
-/// 解压 .zip 或第一个分卷(.zip.001)
+/// 解压结果:input 为目录时含多组(批量);单包恰好一组
+#[derive(Serialize)]
+struct ExtractedGroupInfo {
+    entry: String,
+    original: Option<String>,
+    files: usize,
+}
+
+#[derive(Serialize)]
+struct ExtractResult {
+    cancelled: bool,
+    groups: Vec<ExtractedGroupInfo>,
+}
+
+/// 解压 .zip / 第一个分卷(.zip.001)或整个目录(批量)。
+/// 默认拒绝覆盖目标已有文件, force = true 才覆盖。
 #[tauri::command]
 async fn extract_archive(
     input: String,
     output: String,
     password: Option<String>,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        zip_tool_core::extract(Path::new(&input), Path::new(&output), password.as_deref())
+    force: bool,
+    on_progress: Channel<ProgressEvent>,
+    state: State<'_, AppState>,
+) -> Result<ExtractResult, String> {
+    let flag = CancelFlag::new();
+    *state
+        .current
+        .lock()
+        .map_err(|_| "state poisoned".to_string())? = Some(flag.clone());
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        zip_tool_core::extract(
+            Path::new(&input),
+            Path::new(&output),
+            password.as_deref(),
+            force,
+            &flag.into_callback(|p| {
+                let _ = on_progress.send(ProgressEvent::from(p));
+            }),
+        )
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    let report = result.map_err(|e| e.to_string())?;
+    Ok(ExtractResult {
+        cancelled: report.cancelled,
+        groups: report
+            .groups
+            .into_iter()
+            .map(|g| ExtractedGroupInfo {
+                entry: g.entry,
+                original: g.original,
+                files: g.files,
+            })
+            .collect(),
+    })
 }
 
-/// 取消当前压缩任务(在当前条目完成后生效)
+/// 取消当前任务(在当前条目/组完成后生效)
 #[tauri::command]
 fn cancel_current(state: State<'_, AppState>) {
     if let Ok(current) = state.current.lock() {

@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zip_tool_core::{Options, compress_dir, extract};
+use zip_tool_core::{Options, Progress, compress_dir, extract};
 
 static TMP_N: AtomicU64 = AtomicU64::new(0);
 
@@ -18,6 +18,10 @@ fn tmp_dir(tag: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
+}
+
+fn noop(_: &Progress) -> ControlFlow<()> {
+    ControlFlow::Continue(())
 }
 
 /// LCG 生成不可压缩的伪随机字节(压缩比≈1,分卷测试稳定)
@@ -37,15 +41,23 @@ fn round_trip_plain() {
     fs::create_dir_all(root.join("in/Novel")).unwrap();
     fs::write(root.join("in/Novel/a.txt"), "alpha").unwrap();
 
-    let report = compress_dir(&root.join("in"), &root.join("out"), &Options::default(), &|_| {
-        ControlFlow::Continue(())
-    })
+    let report = compress_dir(
+        &root.join("in"),
+        &root.join("out"),
+        &Options::default(),
+        &|_| ControlFlow::Continue(()),
+    )
     .unwrap();
 
     let dest = root.join("dest");
-    extract(&report.entries[0].archive, &dest, None).unwrap();
+    let report = extract(&report.entries[0].archive, &dest, None, false, &noop).unwrap();
+    assert_eq!(report.groups.len(), 1, "单包输入恰好一组");
+    assert_eq!(report.groups[0].files, 1);
 
-    assert_eq!(fs::read_to_string(dest.join("Novel/a.txt")).unwrap(), "alpha");
+    assert_eq!(
+        fs::read_to_string(dest.join("Novel/a.txt")).unwrap(),
+        "alpha"
+    );
 }
 
 #[test]
@@ -73,7 +85,7 @@ fn round_trip_split_volumes() {
     assert!(volumes >= 2, "200KB/64KB 应产生多个分卷,实际 {volumes}");
 
     let dest = root.join("dest");
-    extract(archive, &dest, None).unwrap();
+    extract(archive, &dest, None, false, &noop).unwrap();
     assert_eq!(
         fs::read(dest.join("Big/b.bin")).unwrap(),
         pseudo_random_bytes(200 * 1024)
@@ -96,7 +108,14 @@ fn round_trip_with_password() {
     .unwrap();
 
     let dest = root.join("dest");
-    extract(&report.entries[0].archive, &dest, Some("pw123")).unwrap();
+    extract(
+        &report.entries[0].archive,
+        &dest,
+        Some("pw123"),
+        false,
+        &noop,
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(dest.join("Secret/s.txt")).unwrap(),
         "top secret"
@@ -105,9 +124,25 @@ fn round_trip_with_password() {
     // 错误密码必须失败
     let bad = root.join("dest-bad");
     assert!(
-        extract(&report.entries[0].archive, &bad, Some("wrong")).is_err(),
+        extract(
+            &report.entries[0].archive,
+            &bad,
+            Some("wrong"),
+            false,
+            &noop
+        )
+        .is_err(),
         "错误密码不应解压成功"
     );
     // 不给密码也必须失败
-    assert!(extract(&report.entries[0].archive, &root.join("dest-none"), None).is_err());
+    assert!(
+        extract(
+            &report.entries[0].archive,
+            &root.join("dest-none"),
+            None,
+            false,
+            &noop
+        )
+        .is_err()
+    );
 }

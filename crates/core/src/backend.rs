@@ -2,7 +2,7 @@
 //! - [`Backend::Zip`]:Linux 系统 `zip` 命令,分包 `-s`(B.z01..B.zip)
 //! - [`Backend::SevenZip`]:`7z` 命令(Windows),分包 `-v` + `-tzip`(B.zip.001..)
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{CoreError, Options, Result};
@@ -32,7 +32,6 @@ impl Backend {
             Backend::SevenZip => "7z",
         }
     }
-
 
     /// 执行外部命令,非零退出视为失败(7z 的 1=warning 视为失败,后续有需要再放宽)
     pub(crate) fn run(&self, cmd: &mut Command) -> Result<()> {
@@ -82,8 +81,11 @@ impl Backend {
                     cmd.arg("-P").arg(pw);
                 }
                 // zip 无 -- 分隔符, "-" 开头的名字 ./ 化防被当参数
-                let src =
-                    if name.starts_with('-') { format!("./{name}") } else { name.to_string() };
+                let src = if name.starts_with('-') {
+                    format!("./{name}")
+                } else {
+                    name.to_string()
+                };
                 cmd.arg(out_zip).arg(src);
             }
             Backend::SevenZip => {
@@ -127,6 +129,105 @@ impl Backend {
             }
         }
         cmd
+    }
+
+    /// 解压端程序名与压缩端不同:zip 的解压端是 unzip
+    pub(crate) fn extract_program(&self) -> &'static str {
+        match self {
+            Backend::Zip => "unzip",
+            Backend::SevenZip => "7z",
+        }
+    }
+
+    /// 构造"列包内条目清单"的命令(机器可读输出, 见 extract.md 5.1):
+    /// unzip 用 -Z1(zipinfo 模式, 每行一个名字), 7z 用 l -ba -slt(取 Path = 行)。
+    /// zip 格式不加密文件名, 列清单不需要密码。
+    pub(crate) fn list_command(&self, entry: &Path) -> Command {
+        match self {
+            Backend::Zip => {
+                let mut c = Command::new("unzip");
+                c.arg("-Z1").arg(entry);
+                c
+            }
+            Backend::SevenZip => {
+                let mut c = Command::new("7z");
+                c.args(["l", "-ba", "-slt", "--"]).arg(entry);
+                c
+            }
+        }
+    }
+}
+
+/// 解压后端抽象: 生产为 [`RealExtract`](外部命令 unzip/7z), 编排测试可注入假后端。
+/// 方法都带 kind 参数: 一个注入对象可同时服务 zip / 7z 形态的组。
+pub(crate) trait ExtractBackend {
+    /// 解压端程序名(unzip / 7z), 用于执行前定位(缺失报 ToolMissing)
+    fn program(&self, kind: Backend) -> &'static str;
+    /// 列入口卷内的条目清单
+    fn list(&self, kind: Backend, entry: &Path) -> Result<ArchiveListing>;
+    /// 把入口卷解到 dest(冲突判断在编排层, 覆盖开关恒带)
+    fn extract(
+        &self,
+        kind: Backend,
+        entry: &Path,
+        dest: &Path,
+        password: Option<&str>,
+    ) -> Result<()>;
+}
+
+/// 生产解压后端:行为只由 kind(Backend 枚举)决定, 程序先定位后执行。
+pub(crate) struct RealExtract {
+    /// 测试注入:覆盖解压端程序名(生产用 None, 按 kind 取 unzip / 7z)
+    pub program_override: Option<&'static str>,
+}
+
+impl ExtractBackend for RealExtract {
+    fn program(&self, kind: Backend) -> &'static str {
+        self.program_override
+            .unwrap_or_else(|| kind.extract_program())
+    }
+
+    fn list(&self, kind: Backend, entry: &Path) -> Result<ArchiveListing> {
+        let program = self.program(kind);
+        locate_extract_tool(program)?;
+        let out = kind
+            .list_command(entry)
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        if !out.status.success() {
+            let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
+            if text.trim().is_empty() {
+                text = String::from_utf8_lossy(&out.stdout).into_owned();
+            }
+            return Err(crate::CoreError::BackendFailed {
+                program: program.into(),
+                status: out.status.to_string(),
+                output: last_lines(&text, 5),
+            });
+        }
+        Ok(parse_listing(&kind, &String::from_utf8_lossy(&out.stdout)))
+    }
+
+    fn extract(
+        &self,
+        kind: Backend,
+        entry: &Path,
+        dest: &Path,
+        password: Option<&str>,
+    ) -> Result<()> {
+        locate_extract_tool(self.program(kind))?;
+        let mut cmd = kind.extract_command(entry, dest, password);
+        kind.run(&mut cmd)
+    }
+}
+
+/// 在 PATH 里定位解压程序, 缺失报 ToolMissing(而不是 spawn 失败的 os error 2)
+fn locate_extract_tool(program: &str) -> Result<()> {
+    let dirs: Vec<PathBuf> =
+        std::env::split_paths(std::env::var_os("PATH").as_deref().unwrap_or_default()).collect();
+    match crate::doctor::locate_tool(program, &dirs) {
+        Some(_) => Ok(()),
+        None => Err(crate::CoreError::ToolMissing(program.into())),
     }
 }
 
@@ -196,6 +297,56 @@ fn last_lines(text: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// 包内条目清单(解压预检的数据源, 见 _docs/extract.md 5.1)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArchiveListing {
+    /// 全部条目的包内相对路径(含目录), 分隔符归一为 `/`, 目录名以 `/` 结尾
+    pub names: Vec<String>,
+    /// 非目录条目数
+    pub files: usize,
+}
+
+/// 解析 list 命令的机器可读输出:
+/// - unzip `-Z1`(zipinfo 模式): 每行一个名字, 目录以 / 结尾
+/// - 7z `l -ba -slt`: 空行分隔的条目块, `Path =` 行取名字, `Folder = +` 表示目录
+pub(crate) fn parse_listing(backend: &Backend, text: &str) -> ArchiveListing {
+    let mut names: Vec<String> = Vec::new();
+    match backend {
+        Backend::Zip => {
+            for line in text.lines() {
+                let name = line.replace('\\', "/");
+                if !name.trim().is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+        Backend::SevenZip => {
+            let mut cur: Option<(String, bool)> = None;
+            let flush = |cur: &mut Option<(String, bool)>, names: &mut Vec<String>| {
+                if let Some((path, is_dir)) = cur.take() {
+                    names.push(if is_dir { format!("{path}/") } else { path });
+                }
+            };
+            for line in text.lines() {
+                let line = line.trim_end();
+                if let Some(v) = line.strip_prefix("Path = ") {
+                    flush(&mut cur, &mut names);
+                    cur = Some((v.trim().replace('\\', "/"), false));
+                } else if line == "Folder = +" {
+                    if let Some((_, is_dir)) = &mut cur {
+                        *is_dir = true;
+                    }
+                } else if line.is_empty() {
+                    flush(&mut cur, &mut names);
+                }
+            }
+            flush(&mut cur, &mut names);
+        }
+    }
+    let files = names.iter().filter(|n| !n.ends_with('/')).count();
+    ArchiveListing { names, files }
+}
+
 /// 解析 "2g"/"500m"/"64k"/"65536" 形式的分包大小为字节;0 或非法格式报错
 pub fn parse_size(s: &str) -> std::result::Result<u64, String> {
     const BAD: &str = "expected a size like 2g / 500m / 64k / 65536";
@@ -209,12 +360,54 @@ pub fn parse_size(s: &str) -> std::result::Result<u64, String> {
         'g' | 'G' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
         _ => (s, 1),
     };
-    let n: u64 = digits.trim().parse().map_err(|_| format!("{BAD}, got {s:?}"))?;
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("{BAD}, got {s:?}"))?;
     if n == 0 {
         return Err("size must be > 0".into());
     }
     n.checked_mul(mult)
         .ok_or_else(|| format!("size too large: {s:?}"))
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+
+    #[test]
+    fn parses_unzip_z1_names_with_trailing_slash_dirs() {
+        let text = "Novel/\nNovel/book.txt\nmedia/\nmedia/clip.bin\nphoto.jpg\n";
+        let l = parse_listing(&Backend::Zip, text);
+        assert_eq!(
+            l.names,
+            [
+                "Novel/",
+                "Novel/book.txt",
+                "media/",
+                "media/clip.bin",
+                "photo.jpg"
+            ]
+        );
+        assert_eq!(l.files, 3);
+    }
+
+    #[test]
+    fn parses_7z_slt_blocks_and_normalizes_separators() {
+        let text = "Path = Novel\nFolder = +\nSize = 0\nPacked Size = 0\n\n\
+                    Path = Novel\\book.txt\nFolder = -\nSize = 2500000\nPacked Size = 300000\n\n\
+                    Path = photo.jpg\nFolder = -\nSize = 200000\nPacked Size = 190000";
+        let l = parse_listing(&Backend::SevenZip, text);
+        assert_eq!(l.names, ["Novel/", "Novel/book.txt", "photo.jpg"]);
+        assert_eq!(l.files, 2);
+    }
+
+    #[test]
+    fn empty_listing_text_yields_empty() {
+        let l = parse_listing(&Backend::Zip, "");
+        assert!(l.names.is_empty());
+        assert_eq!(l.files, 0);
+    }
 }
 
 #[cfg(test)]
@@ -258,7 +451,9 @@ mod tests {
     }
 
     fn args_of(cmd: &Command) -> Vec<String> {
-        cmd.get_args().map(|s| s.to_string_lossy().into_owned()).collect()
+        cmd.get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
@@ -295,7 +490,12 @@ mod tests {
     #[test]
     fn zip_compress_command_runs_in_work_dir_with_relative_name() {
         let cmd = Backend::Zip
-            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &opts(None, None))
+            .compress_command(
+                Path::new("/in"),
+                "A",
+                Path::new("/out/A.zip"),
+                &opts(None, None),
+            )
             .unwrap();
         assert_eq!(cmd.get_program(), "zip");
         assert_eq!(args_of(&cmd), ["-r", "/out/A.zip", "A"]);
@@ -318,7 +518,8 @@ mod tests {
 
     #[test]
     fn zip_extract_command_with_password() {
-        let cmd = Backend::Zip.extract_command(Path::new("/out/B.zip"), Path::new("/dest"), Some("pw"));
+        let cmd =
+            Backend::Zip.extract_command(Path::new("/out/B.zip"), Path::new("/dest"), Some("pw"));
         assert_eq!(cmd.get_program(), "unzip");
         assert_eq!(
             args_of(&cmd),
@@ -328,12 +529,10 @@ mod tests {
 
     #[test]
     fn sevenzip_extract_command_on_first_volume() {
-        let cmd = Backend::SevenZip.extract_command(Path::new("B.zip.001"), Path::new("D:\\d"), None);
+        let cmd =
+            Backend::SevenZip.extract_command(Path::new("B.zip.001"), Path::new("D:\\d"), None);
         assert_eq!(cmd.get_program(), "7z");
-        assert_eq!(
-            args_of(&cmd),
-            ["x", "-aoa", "-oD:\\d", "--", "B.zip.001"]
-        );
+        assert_eq!(args_of(&cmd), ["x", "-aoa", "-oD:\\d", "--", "B.zip.001"]);
     }
 
     #[test]

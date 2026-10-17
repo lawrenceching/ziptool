@@ -38,9 +38,11 @@ fn tool_binary() -> &'static PathBuf {
             "构建 zip-tool-cli 失败:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let bin = target
-            .join("debug")
-            .join(if cfg!(windows) { "zip-tool.exe" } else { "zip-tool" });
+        let bin = target.join("debug").join(if cfg!(windows) {
+            "zip-tool.exe"
+        } else {
+            "zip-tool"
+        });
         assert!(bin.exists(), "未找到 CLI 二进制: {}", bin.display());
         bin
     })
@@ -158,7 +160,10 @@ fn extract_archive(archive: &Path, dest: &Path, password: Option<&str>) {
         let stem = archive.file_stem().unwrap().to_string_lossy().into_owned();
         let z01 = archive.with_file_name(format!("{stem}.z01"));
         let effective: PathBuf = if z01.exists() {
-            let merged = archive.parent().unwrap().join(format!("{stem}.unsplit.zip"));
+            let merged = archive
+                .parent()
+                .unwrap()
+                .join(format!("{stem}.unsplit.zip"));
             let out = Command::new("zip")
                 .arg("-s")
                 .arg("0")
@@ -365,14 +370,199 @@ fn doctor_reports_backend_tool_availability() {
     let bad = run_with(|cmd| {
         cmd.args(["doctor"]).env_remove("PATH");
     });
-    assert!(
-        !bad.ok,
-        "PATH 清空后 doctor 应失败, stdout: {}",
-        bad.stdout
-    );
+    assert!(!bad.ok, "PATH 清空后 doctor 应失败, stdout: {}", bad.stdout);
     assert!(
         bad.stdout.contains(&format!("[FAIL] {program}")),
         "stdout: {}",
         bad.stdout
     );
+}
+
+/// 断言 restore 树与 in 原树逐字节一致(三个顶层条目)
+fn assert_tree_matches_input(fx: &Fixture) {
+    let inp = fx.root.join("in");
+    let restore = fx.root.join("restore");
+    assert_file_eq(&inp.join("Novel/book.txt"), &restore.join("Novel/book.txt"));
+    assert_file_eq(&inp.join("media/clip.bin"), &restore.join("media/clip.bin"));
+    assert_file_eq(&inp.join("photo.jpg"), &restore.join("photo.jpg"));
+}
+
+fn compress_fixture(fx: &Fixture, extra: &[&str]) {
+    let r = run_tool(
+        &[
+            "compress",
+            "-i",
+            fx.root.join("in").to_str().unwrap(),
+            "-o",
+            fx.root.join("out").to_str().unwrap(),
+        ]
+        .iter()
+        .chain(extra)
+        .copied()
+        .collect::<Vec<_>>(),
+    );
+    assert!(r.ok, "压缩失败:\n{}", r.stderr);
+}
+
+#[test]
+fn extract_single_package_roundtrip() {
+    let fx = fixture("ext-single");
+    compress_fixture(&fx, &[]);
+
+    let restore = fx.root.join("restore");
+    let r = run_tool(&[
+        "extract",
+        "-i",
+        fx.root.join("out/Novel.zip").to_str().unwrap(),
+        "-o",
+        restore.to_str().unwrap(),
+    ]);
+    assert!(r.ok, "extract 失败:\n{}\n{}", r.stderr, r.stdout);
+    assert!(
+        r.stdout.contains("Novel.zip"),
+        "报告应含入口卷名: {}",
+        r.stdout
+    );
+    assert_file_eq(
+        &fx.root.join("in/Novel/book.txt"),
+        &restore.join("Novel/book.txt"),
+    );
+}
+
+#[test]
+fn extract_batch_directory_restores_input_tree() {
+    let fx = fixture("ext-batch");
+    compress_fixture(&fx, &[]);
+
+    // out 目录本身作为输入(含 3 个包) → restore 恢复 in 的整棵树
+    let r = run_tool(&[
+        "extract",
+        "-i",
+        fx.root.join("out").to_str().unwrap(),
+        "-o",
+        fx.root.join("restore").to_str().unwrap(),
+    ]);
+    assert!(r.ok, "批量 extract 失败:\n{}\n{}", r.stderr, r.stdout);
+    assert_tree_matches_input(&fx);
+}
+
+#[test]
+fn extract_rejects_existing_files_then_force_overrides() {
+    let fx = fixture("ext-force");
+    compress_fixture(&fx, &[]);
+
+    let restore = fx.root.join("restore");
+    let ok = run_tool(&[
+        "extract",
+        "-i",
+        fx.root.join("out").to_str().unwrap(),
+        "-o",
+        restore.to_str().unwrap(),
+    ]);
+    assert!(ok.ok);
+
+    // 第二次解压: 目标已有文件, 默认拒绝
+    let again = run_tool(&[
+        "extract",
+        "-i",
+        fx.root.join("out").to_str().unwrap(),
+        "-o",
+        restore.to_str().unwrap(),
+    ]);
+    assert!(!again.ok, "重复解压应失败(防旧半成品冒充结果)");
+    assert!(
+        again.stderr.contains("use --force"),
+        "错误应提示 --force: {}",
+        again.stderr
+    );
+
+    // --force 显式覆盖后成功
+    let forced = run_tool(&[
+        "extract",
+        "-i",
+        fx.root.join("out").to_str().unwrap(),
+        "-o",
+        restore.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(
+        forced.ok,
+        "--force 解压失败:\n{}\n{}",
+        forced.stderr, forced.stdout
+    );
+    assert_tree_matches_input(&fx);
+}
+
+#[test]
+fn extract_wrong_password_fails() {
+    let fx = fixture("ext-pw");
+    compress_fixture(&fx, &["-p", "secret123"]);
+
+    let r = run_tool(&[
+        "extract",
+        "-i",
+        fx.root.join("out").to_str().unwrap(),
+        "-o",
+        fx.root.join("restore").to_str().unwrap(),
+        "-p",
+        "WRONG",
+    ]);
+    assert!(!r.ok, "错误密码不应解压成功:\n{}", r.stdout);
+}
+
+#[test]
+fn extract_member_volume_resolves_entry_volume() {
+    let fx = fixture("ext-member");
+    compress_fixture(&fx, &["--split", "1m"]);
+
+    // 找 media 的一个成员卷(Windows: .zip.002;Linux: .z01), 用它解压应自动归一到入口卷
+    let member = if cfg!(windows) {
+        "out/media.zip.002"
+    } else {
+        "out/media.z01"
+    };
+    let member = fx.root.join(member);
+    assert!(member.exists(), "media 应存在成员卷: {}", member.display());
+
+    let restore = fx.root.join("restore");
+    let r = run_tool(&[
+        "extract",
+        "-i",
+        member.to_str().unwrap(),
+        "-o",
+        restore.to_str().unwrap(),
+    ]);
+    assert!(r.ok, "成员卷 extract 失败:\n{}\n{}", r.stderr, r.stdout);
+    assert_file_eq(
+        &fx.root.join("in/media/clip.bin"),
+        &restore.join("media/clip.bin"),
+    );
+}
+
+#[test]
+fn extract_batch_random_names_restores_original_tree() {
+    let fx = fixture("ext-random");
+    compress_fixture(&fx, &["--split", "1m", "-p", "secret123", "--random-name"]);
+
+    // 旗舰场景: 包名全随机且无原名信息(除 mapping.csv), 解 out 整目录应还原原树
+    let r = run_tool(&[
+        "extract",
+        "-i",
+        fx.root.join("out").to_str().unwrap(),
+        "-o",
+        fx.root.join("restore").to_str().unwrap(),
+        "-p",
+        "secret123",
+    ]);
+    assert!(r.ok, "随机名批量 extract 失败:\n{}\n{}", r.stderr, r.stdout);
+    assert_tree_matches_input(&fx);
+
+    // 报告里应给出 mapping.csv 记录的原条目名
+    for orig in ["Novel", "media", "photo.jpg"] {
+        assert!(
+            r.stdout.contains(&format!("[{orig}]")),
+            "报告应含原条目名 {orig}: {}",
+            r.stdout
+        );
+    }
 }

@@ -50,7 +50,9 @@ mod tests {
     fn forwards_progress_until_cancelled() {
         let flag = CancelFlag::new();
         let seen = RefCell::new(Vec::new());
-        let cb = flag.clone().into_callback(|p| seen.borrow_mut().push(p.done));
+        let cb = flag
+            .clone()
+            .into_callback(|p| seen.borrow_mut().push(p.done));
 
         let p = |done, entry: &str| Progress {
             phase: Phase::Compressing,

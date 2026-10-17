@@ -44,11 +44,10 @@ fn compresses_each_entry_into_its_own_archive() {
     make_fixture(&root);
     let out = root.join("out");
 
-    let report =
-        compress_dir(&root.join("in"), &out, &Options::default(), &|_| {
-            ControlFlow::Continue(())
-        })
-        .unwrap();
+    let report = compress_dir(&root.join("in"), &out, &Options::default(), &|_| {
+        ControlFlow::Continue(())
+    })
+    .unwrap();
 
     assert!(!report.cancelled);
     assert_eq!(report.entries.len(), 3);
@@ -63,14 +62,17 @@ fn reports_one_progress_event_per_completed_entry() {
     let out = root.join("out");
 
     let events = std::cell::RefCell::new(Vec::new());
-    compress_dir(&root.join("in"), &out, &Options::default(), &|p: &Progress| {
-        if p.phase == zip_tool_core::Phase::Compressing {
-            events
-                .borrow_mut()
-                .push((p.done, p.total, p.entry.clone()));
-        }
-        ControlFlow::Continue(())
-    })
+    compress_dir(
+        &root.join("in"),
+        &out,
+        &Options::default(),
+        &|p: &Progress| {
+            if p.phase == zip_tool_core::Phase::Compressing {
+                events.borrow_mut().push((p.done, p.total, p.entry.clone()));
+            }
+            ControlFlow::Continue(())
+        },
+    )
     .unwrap();
 
     let events = events.into_inner();
@@ -116,9 +118,12 @@ fn random_names_hide_originals_and_mapping_csv_records_them() {
         ..Default::default()
     };
 
-    let report = compress_dir(&root.join("in"), &out, &opts, &|_| {
-        ControlFlow::Continue(())
-    })
+    let report = compress_dir(
+        &root.join("in"),
+        &out,
+        &opts,
+        &|_| ControlFlow::Continue(()),
+    )
     .unwrap();
 
     assert_eq!(report.entries.len(), 3);
@@ -142,7 +147,10 @@ fn random_names_hide_originals_and_mapping_csv_records_them() {
 
     let csv = fs::read_to_string(out.join("mapping.csv")).unwrap();
     for orig in ["A", "B", "C.jpg"] {
-        assert!(csv.contains(&format!(",{orig}\n")), "mapping.csv 应含 {orig}:\n{csv}");
+        assert!(
+            csv.contains(&format!(",{orig}\n")),
+            "mapping.csv 应含 {orig}:\n{csv}"
+        );
     }
 }
 
@@ -150,14 +158,24 @@ fn random_names_hide_originals_and_mapping_csv_records_them() {
 fn missing_or_empty_input_is_an_error() {
     let root = tmp_dir("err");
 
-    assert!(compress_dir(&root.join("nope"), &root.join("o1"), &Options::default(), &|_| {
-        ControlFlow::Continue(())
-    })
-    .is_err());
+    assert!(
+        compress_dir(
+            &root.join("nope"),
+            &root.join("o1"),
+            &Options::default(),
+            &|_| { ControlFlow::Continue(()) }
+        )
+        .is_err()
+    );
 
     fs::create_dir_all(root.join("empty")).unwrap();
-    assert!(compress_dir(&root.join("empty"), &root.join("o2"), &Options::default(), &|_| {
-        ControlFlow::Continue(())
-    })
-    .is_err());
+    assert!(
+        compress_dir(
+            &root.join("empty"),
+            &root.join("o2"),
+            &Options::default(),
+            &|_| { ControlFlow::Continue(()) }
+        )
+        .is_err()
+    );
 }

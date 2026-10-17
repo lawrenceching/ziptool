@@ -14,7 +14,9 @@ pub fn random_name() -> String {
         .unwrap_or(0);
     let n = nanos
         ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        ^ COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9);
     // splitmix64
     let mut z = n.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

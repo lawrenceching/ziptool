@@ -29,10 +29,8 @@ impl ToolCheck {
 /// 检查当前平台后端工具(从 PATH 定位 + 试运行)
 pub fn check_backend_tool() -> ToolCheck {
     let program = Backend::native().program().to_string();
-    let dirs: Vec<PathBuf> = std::env::split_paths(
-        std::env::var_os("PATH").as_deref().unwrap_or_default(),
-    )
-    .collect();
+    let dirs: Vec<PathBuf> =
+        std::env::split_paths(std::env::var_os("PATH").as_deref().unwrap_or_default()).collect();
     check_tool(&program, &dirs)
 }
 
@@ -123,7 +121,11 @@ mod tests {
     fn locate_tool_skips_directories_and_returns_none_when_absent() {
         let d = unique_temp("doctor-dir");
         fs::create_dir_all(d.join(exe_name("mytool"))).unwrap();
-        assert_eq!(locate_tool("mytool", &[d.clone()]), None, "同名目录不算工具");
+        assert_eq!(
+            locate_tool("mytool", &[d.clone()]),
+            None,
+            "同名目录不算工具"
+        );
         fs::remove_dir_all(&d).unwrap();
     }
 

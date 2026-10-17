@@ -30,7 +30,7 @@ pub mod scan;
 
 pub use backend::parse_size;
 pub use compress::{CompressedEntry, Report, compress_dir};
-pub use extract::extract;
+pub use extract::{ExtractReport, extract};
 pub use progress::{Phase, Progress};
 pub use scan::{Entry, EntryKind, scan_dir};
 
@@ -55,6 +55,32 @@ pub enum CoreError {
     OutputExists(PathBuf),
     /// 输出目录位于输入目录内(或与输入相同)
     OutInsideInput(PathBuf),
+    /// 解压:传了非入口卷且同目录找不到对应入口卷(如只有 .z01 没有 .zip)
+    EntryVolumeMissing {
+        /// 传入的路径
+        got: PathBuf,
+        /// 应存在的入口卷路径
+        expected: PathBuf,
+    },
+    /// 解压:扩展名不是 zip 系四种形态(.zip / .zNN / .zip.001 / .zip.NNN)
+    UnsupportedArchive(PathBuf),
+    /// 解压:入口卷不存在
+    ArchiveNotFound(PathBuf),
+    /// 解压:目标路径已存在但是普通文件
+    DestNotADirectory(PathBuf),
+    /// 解压:包内清单含路径逃逸条目(绝对路径或 .. 段)
+    UnsafeArchive {
+        /// 违规条目名
+        path: String,
+        /// 违规原因
+        reason: String,
+    },
+    /// 解压:目标目录已有同名文件, 不覆盖(提示 --force)
+    ExtractConflict(Vec<String>),
+    /// 解压:解压程序(unzip / 7z)不在 PATH
+    ToolMissing(String),
+    /// 解压:输入目录里没有任何压缩包组
+    NoArchives(PathBuf),
     /// 后端命令非零退出
     BackendFailed {
         program: String,
@@ -74,14 +100,55 @@ impl fmt::Display for CoreError {
             CoreError::InputNotFound(p) => write!(f, "input directory not found: {}", p.display()),
             CoreError::NoEntries(p) => write!(f, "no entries to compress in: {}", p.display()),
             CoreError::DuplicateDst(names) => {
-                write!(f, "duplicate archive names (case-insensitive): {}", names.join(", "))
+                write!(
+                    f,
+                    "duplicate archive names (case-insensitive): {}",
+                    names.join(", ")
+                )
             }
             CoreError::OutputExists(p) => {
-                write!(f, "archive already exists, not overwriting: {}", p.display())
+                write!(
+                    f,
+                    "archive already exists, not overwriting: {}",
+                    p.display()
+                )
             }
             CoreError::OutInsideInput(p) => {
-                write!(f, "output directory is inside input directory: {}", p.display())
+                write!(
+                    f,
+                    "output directory is inside input directory: {}",
+                    p.display()
+                )
             }
+            CoreError::EntryVolumeMissing { got, expected } => write!(
+                f,
+                "missing entry volume: {} (needed by {})",
+                expected.display(),
+                got.display()
+            ),
+            CoreError::UnsupportedArchive(p) => write!(
+                f,
+                "unsupported archive type: {} (expected .zip / .zNN / .zip.001 / .zip.NNN)",
+                p.display()
+            ),
+            CoreError::ArchiveNotFound(p) => write!(f, "archive not found: {}", p.display()),
+            CoreError::DestNotADirectory(p) => write!(
+                f,
+                "destination exists but is not a directory: {}",
+                p.display()
+            ),
+            CoreError::UnsafeArchive { path, reason } => {
+                write!(f, "unsafe archive entry {path:?}: {reason}")
+            }
+            CoreError::ExtractConflict(paths) => write!(
+                f,
+                "destination already has files, not overwriting (use --force): {}",
+                paths.join(", ")
+            ),
+            CoreError::ToolMissing(program) => {
+                write!(f, "required tool {program:?} not found in PATH")
+            }
+            CoreError::NoArchives(p) => write!(f, "no archives found in: {}", p.display()),
             CoreError::BackendFailed {
                 program,
                 status,

@@ -1,12 +1,14 @@
 //! 进度载荷:扫描与压缩两阶段共用,经 `on_progress` 回调上报给外壳(CLI / Tauri)。
 
-/// 压缩流程的阶段
+/// 压缩/解压流程的阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// Step 1 扫描(统计条目与大小)
     Scanning,
     /// Step 3 逐条目压缩
     Compressing,
+    /// 解压(单包或批量;组/条目级粒度, 组内无增量)
+    Extracting,
 }
 
 /// 单条进度(条目级粒度, 见技术文档 _docs/compress.md 第 7 节)

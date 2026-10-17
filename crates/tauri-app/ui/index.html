@@ -62,10 +62,11 @@
     </section>
 
     <section>
-      <h2>解压</h2>
-      <label>压缩包 <input id="ein" placeholder="xxx.zip 或 xxx.zip.001(支持密码分卷)" /></label>
+      <h2>解压(单包或批量目录)</h2>
+      <label>输入 <input id="ein" placeholder="xxx.zip / xxx.zip.001 或包含压缩包的目录" /></label>
       <label>目标目录 <input id="eout" placeholder="D:\restore" /></label>
       <label>密码 <input id="epw" type="password" /></label>
+      <label><input id="eforce" type="checkbox" /> 覆盖目标已有文件(默认拒绝)</label>
       <button id="ego">解压</button>
       <pre id="eres"></pre>
     </section>
@@ -113,17 +114,27 @@
       $("cancel").addEventListener("click", () => invoke("cancel_current"));
 
       $("ego").addEventListener("click", async () => {
-        $("eres").textContent = "解压中…";
+        $("ego").disabled = true;
+        $("eres").textContent = "";
+        const onProgress = new Channel();
+        onProgress.onmessage = (m) => {
+          $("eres").textContent = `[${m.done}/${m.total}] ${m.entry}`;
+        };
         try {
-          await invoke("extract_archive", {
+          const r = await invoke("extract_archive", {
             input: $("ein").value,
             output: $("eout").value,
             password: $("epw").value || null,
+            force: $("eforce").checked,
+            onProgress,
           });
-          $("eres").textContent = "完成";
+          const title = r.cancelled ? "已取消,已完成部分:" : "完成:";
+          $("eres").textContent =
+            title + "\n" + r.groups.map((g) => `${g.entry}: ${g.files} 个文件`).join("\n");
         } catch (e) {
           $("eres").textContent = "出错: " + e;
         }
+        $("ego").disabled = false;
       });
     </script>
   </body>

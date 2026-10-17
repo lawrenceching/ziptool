@@ -171,7 +171,9 @@ fn cleanup_partial(out_dir: &Path, dst: &str) {
 /// Step 2: 生成每个条目的压缩包基础名(不带扩展名)。
 /// 随机名 = "zt_" + 64 bit 随机量(16 hex); 非随机 = 原条目名。
 fn assign_dsts(entries: &mut [Entry], out_dir: &Path, random: bool) -> Result<()> {
-    assign_dsts_with(entries, out_dir, random, &mut || format!("zt_{}", random_name()))
+    assign_dsts_with(entries, out_dir, random, &mut || {
+        format!("zt_{}", random_name())
+    })
 }
 
 /// 带可注入名字生成器的版本(测试用); next_name 返回完整的随机候选名。
@@ -207,7 +209,9 @@ fn assign_dsts_with(
             }
         } else {
             if target_exists(out_dir, &e.name) {
-                return Err(CoreError::OutputExists(out_dir.join(format!("{}.zip", e.name))));
+                return Err(CoreError::OutputExists(
+                    out_dir.join(format!("{}.zip", e.name)),
+                ));
             }
             e.name.clone()
         };
@@ -217,8 +221,7 @@ fn assign_dsts_with(
 
 /// 该 dst 的压缩包(不分卷 .zip, 或 7z 分卷首卷 .zip.001)是否已存在
 fn target_exists(out_dir: &Path, dst: &str) -> bool {
-    out_dir.join(format!("{dst}.zip")).exists()
-        || out_dir.join(format!("{dst}.zip.001")).exists()
+    out_dir.join(format!("{dst}.zip")).exists() || out_dir.join(format!("{dst}.zip.001")).exists()
 }
 
 /// 相对路径转为绝对路径(基于当前工作目录)。
@@ -267,7 +270,11 @@ mod dst_tests {
             .iter()
             .map(|n| Entry {
                 name: n.to_string(),
-                kind: if n.contains('.') { EntryKind::File } else { EntryKind::Dir },
+                kind: if n.contains('.') {
+                    EntryKind::File
+                } else {
+                    EntryKind::Dir
+                },
                 size: 1,
                 dst: String::new(),
                 format: "zip".into(),
@@ -330,7 +337,10 @@ mod dst_tests {
         // 生产路径的闭包无法定向撞名, 这里直接测带生成器的内部版本
         let mut candidates = ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"].iter();
         let err_free = assign_dsts_with(&mut es, &root.join("out"), true, &mut || {
-            candidates.next().map(|c| format!("zt_{c}")).unwrap_or_else(random_name)
+            candidates
+                .next()
+                .map(|c| format!("zt_{c}"))
+                .unwrap_or_else(random_name)
         });
         err_free.unwrap();
         assert_eq!(es[0].dst, "zt_bbbbbbbbbbbbbbbb", "撞名候选应被跳过");
@@ -500,10 +510,7 @@ mod fake_tests {
             (1, 3, 7),
             "A 完成后应为 3/7 字节"
         );
-        assert_eq!(
-            (ev[3].done, ev[3].done_bytes, ev[3].total_bytes),
-            (2, 7, 7)
-        );
+        assert_eq!((ev[3].done, ev[3].done_bytes, ev[3].total_bytes), (2, 7, 7));
 
         // mapping.csv:表头 + 按完成顺序逐条追加
         let csv = fs::read_to_string(root.join("out/mapping.csv")).unwrap();
@@ -560,20 +567,15 @@ mod fake_tests {
     fn cancel_break_stops_before_next_entry() {
         let root = two_entries_fixture("cancel");
         let fb = FakeBackend::new(&[]);
-        let report = compress_with_backend(
-            &fb,
-            &root.join("in"),
-            &root.join("out"),
-            &rnd(),
-            &|p| {
+        let report =
+            compress_with_backend(&fb, &root.join("in"), &root.join("out"), &rnd(), &|p| {
                 if p.phase == Phase::Compressing && p.done >= 1 {
                     ControlFlow::Break(())
                 } else {
                     ControlFlow::Continue(())
                 }
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         assert!(report.cancelled);
         assert_eq!(*fb.attempted.borrow(), ["A"], "取消后 B 不应开始");

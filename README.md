@@ -60,8 +60,14 @@ cargo build --release -p zip-tool-cli
 # 批量压缩: 分包 2g + 密码 + 随机包名
 zip-tool compress -i D:\data -o E:\out --split 2g -p 密码 --random-name
 
-# 解压 (支持 .zip 与 .zip.001 分卷)
+# 解压 (支持 .zip 与 .zip.001 分卷; 传成员卷 .zNN / .zip.NNN 自动归一到入口卷)
 zip-tool extract -i E:\out\zt_xxx.zip.001 -o D:\restore -p 密码
+
+# 批量解压: 输入传目录, 恢复压缩前的整棵树 (随机包名经 mapping.csv 还原原名)
+zip-tool extract -i E:\out -o D:\restore -p 密码
+
+# 默认拒绝覆盖目标已有文件; 确认后用 --force 覆盖
+zip-tool extract -i E:\out -o D:\restore --force
 
 # 环境自检: 定位并试运行后端工具, 打印路径与可用性 (全部正常时退出码 0)
 zip-tool doctor
