@@ -1,0 +1,12 @@
+[package]
+name = "zip-tool-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zip-tool-core = { workspace = true }
+clap = { workspace = true }
+
+[[bin]]
+name = "zip-tool"
+path = "src/main.rs"

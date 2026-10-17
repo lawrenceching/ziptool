@@ -1,0 +1,16 @@
+[package]
+name = "zip-tool-tauri"
+version.workspace = true
+edition.workspace = true
+
+# lib 独立命名,避免 Windows 上与 bin 同名导致链接冲突(Tauri 模板惯例)
+[lib]
+name = "zip_tool_tauri_lib"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+tauri = { workspace = true }
+zip-tool-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }

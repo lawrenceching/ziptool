@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Zip Tool</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0 auto;
+        max-width: 640px;
+        padding: 16px;
+        background: #f6f7f9;
+        color: #24292f;
+      }
+      @media (prefers-color-scheme: dark) {
+        body { background: #1c2128; color: #e6edf3; }
+        input { background: #0d1117 !important; color: #e6edf3 !important; border-color: #30363d !important; }
+      }
+      h1 { font-size: 20px; }
+      section {
+        background: inherit;
+        border: 1px solid #d0d7de44;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+      }
+      h2 { font-size: 15px; margin: 4px 0 10px; }
+      label { display: block; margin: 8px 0; font-size: 13px; }
+      input:not([type="checkbox"]) {
+        width: 100%; box-sizing: border-box;
+        padding: 6px 8px; margin-top: 3px;
+        border: 1px solid #d0d7de; border-radius: 6px;
+        background: #fff; color: inherit; font-size: 13px;
+      }
+      button {
+        padding: 6px 18px; margin: 8px 8px 0 0;
+        font-size: 13px; cursor: pointer;
+        border: 1px solid #d0d7de; border-radius: 6px; background: #f3f4f6;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      pre {
+        min-height: 20px; font-size: 12px; white-space: pre-wrap;
+        word-break: break-all; background: #00000008; padding: 8px; border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Zip Tool</h1>
+
+    <section>
+      <h2>批量压缩(每个目录一个包)</h2>
+      <label>输入目录 <input id="in" placeholder="D:\data" /></label>
+      <label>输出目录 <input id="out" placeholder="E:\out" /></label>
+      <label>分包大小 <input id="split" placeholder="2g(留空不分包)" /></label>
+      <label>密码 <input id="pw" type="password" placeholder="留空不加密" /></label>
+      <label><input id="rand" type="checkbox" /> 随机包名(生成 mapping.csv 记录对应关系)</label>
+      <button id="go">开始压缩</button>
+      <button id="cancel" disabled>取消</button>
+      <pre id="progress"></pre>
+      <pre id="result"></pre>
+    </section>
+
+    <section>
+      <h2>解压</h2>
+      <label>压缩包 <input id="ein" placeholder="xxx.zip 或 xxx.zip.001(支持密码分卷)" /></label>
+      <label>目标目录 <input id="eout" placeholder="D:\restore" /></label>
+      <label>密码 <input id="epw" type="password" /></label>
+      <button id="ego">解压</button>
+      <pre id="eres"></pre>
+    </section>
+
+    <script>
+      const { invoke } = window.__TAURI__.core;
+      const { Channel } = window.__TAURI__.ipc;
+      const $ = (id) => document.getElementById(id);
+
+      $("go").addEventListener("click", async () => {
+        $("go").disabled = true;
+        $("cancel").disabled = false;
+        $("progress").textContent = "";
+        $("result").textContent = "";
+        const onProgress = new Channel();
+        onProgress.onmessage = (m) => {
+          $("progress").textContent = `[${m.done}/${m.total}] ${m.entry}`;
+        };
+        try {
+          const r = await invoke("compress", {
+            input: $("in").value,
+            output: $("out").value,
+            splitSize: $("split").value.trim() || null,
+            password: $("pw").value || null,
+            randomName: $("rand").checked,
+            onProgress,
+          });
+          const title = r.cancelled ? "已取消,已完成部分:" : "完成:";
+          $("result").textContent =
+            title + "\n" + r.entries.map((e) => `${e.original} -> ${e.archive}`).join("\n");
+        } catch (e) {
+          $("result").textContent = "出错: " + e;
+        }
+        $("go").disabled = false;
+        $("cancel").disabled = true;
+      });
+
+      $("cancel").addEventListener("click", () => invoke("cancel_current"));
+
+      $("ego").addEventListener("click", async () => {
+        $("eres").textContent = "解压中…";
+        try {
+          await invoke("extract_archive", {
+            input: $("ein").value,
+            output: $("eout").value,
+            password: $("epw").value || null,
+          });
+          $("eres").textContent = "完成";
+        } catch (e) {
+          $("eres").textContent = "出错: " + e;
+        }
+      });
+    </script>
+  </body>
+</html>

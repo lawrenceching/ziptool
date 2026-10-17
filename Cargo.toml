@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "crates/tauri-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+zip-tool-core = { path = "crates/core" }
+clap = { version = "4", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
