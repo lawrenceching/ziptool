@@ -1,0 +1,12 @@
+{
+  "name": "zip-tool-tauri-ui",
+  "private": true,
+  "description": "仅用于把 Tailwind 编译成静态 ui/app.css(运行时不依赖 node,产物已提交)",
+  "scripts": {
+    "css": "tailwindcss -i tailwind/input.css -o ui/app.css --minify",
+    "css:watch": "tailwindcss -i tailwind/input.css -o ui/app.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4"
+  }
+}

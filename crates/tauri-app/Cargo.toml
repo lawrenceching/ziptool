@@ -14,3 +14,4 @@ tauri-build = { workspace = true }
 tauri = { workspace = true }
 zip-tool-core = { workspace = true }
 serde = { version = "1", features = ["derive"] }
+tauri-plugin-dialog = "2.8.3"

@@ -81,6 +81,12 @@ zip-tool doctor
 cargo run -p zip-tool-tauri
 ```
 
+UI 样式用 Tailwind 预编译成静态 `ui/app.css`(运行时离线, 无前端打包器)。改动界面类名后重新生成:
+
+```
+cd crates/tauri-app && npm install && npm run css
+```
+
 正式打包:
 
 ```

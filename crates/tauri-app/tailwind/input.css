@@ -1,0 +1,3 @@
+/* Tailwind 入口:只扫描 index.html,产出按需裁剪的静态 CSS */
+@import "tailwindcss";
+@source "../ui/index.html";

@@ -1,29 +1,57 @@
 //! Tauri 外壳:把 `zip-tool-core` 的能力通过 `#[tauri::command]` 暴露给前端。
-//! 命令在 `spawn_blocking` 中调用 core,进度经 `tauri::ipc::Channel` 推给前端;
-//! UI 的"取消"按钮经 `CancelFlag` 在条目间生效。
+//! 交互规格见 _docs/ui-backend.md, 命令面 4 个:
+//! - `scan`: 只扫描不执行, 结果缓存在外壳([`ScanContext`] 保鲜)
+//! - `compress` / `extract_archive`: 按勾选名单筛选缓存结果, 走 core 分阶段 API
+//!   (plan + compress_entries / extract_prepared), **不重复扫描**
+//! - `cancel_current`: 取消当前任务(条目间/组间生效)
+//!
+//! 命令在 `spawn_blocking` 中调 core, 进度经 `tauri::ipc::Channel` 推给前端;
+//! scan/compress/extract 单任务互斥, 任务结束释放忙闲标志并清空取消旗标。
 
 mod job;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Channel;
 
 use job::CancelFlag;
-use zip_tool_core::{Phase, Progress};
+use zip_tool_core::{
+    Entry, EntryKind, ExtractGroup, ExtractScan, Options, Phase, Progress, ScanReport,
+};
 
-/// 全局状态:当前任务(压缩/解压)的取消旗标
+const POISONED: &str = "state poisoned";
+const EXPIRED: &str = "扫描结果已过期, 请重新选择源文件夹";
+
+/// 全局状态:当前任务取消旗标 + 任务互斥 + 扫描结果缓存
 #[derive(Default)]
 struct AppState {
+    /// 运行中任务(压缩/解压)的取消旗标; 任务结束清空
     current: Mutex<Option<CancelFlag>>,
+    /// 任务互斥(scan/compress/extract 互斥): Some(kind) = 忙
+    busy: Mutex<Option<&'static str>>,
+    /// 最近一次 scan 的结果(保鲜: 确认时校验 mode + src, 名单严格匹配)
+    scan: Mutex<Option<ScanContext>>,
+}
+
+/// scan 命令缓存的扫描结果(mode + src 匹配才可用)
+struct ScanContext {
+    mode: &'static str,
+    src: PathBuf,
+    data: ScanData,
+}
+
+enum ScanData {
+    Compress(ScanReport),
+    Extract(ExtractScan),
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ProgressEvent {
-    /// "scanning" / "compressing"
+    /// "scanning" / "compressing" / "extracting"
     phase: String,
     done: usize,
     total: usize,
@@ -49,56 +77,339 @@ impl From<&Progress> for ProgressEvent {
     }
 }
 
+/// scan 返回的一个表格行(状态语义: pending 可勾选 / meta 元数据 / warning 告警)
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanItem {
+    name: String,
+    /// "file" | "dir"
+    kind: String,
+    size: u64,
+    status: String,
+    /// extract: mapping.csv 原名; compress: None
+    original: Option<String>,
+    /// warning 原因 / meta 附注; 展示文案由前端决定
+    detail: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanResult {
+    mode: String,
+    items: Vec<ScanItem>,
+    /// compress 子树级告警(状态栏汇总); extract 的告警走 items(warning 行)
+    warnings: Vec<String>,
+    total_bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompressOptions {
+    /// "2g"/"500m"/字节数; None = 不分包
+    split_size: Option<String>,
+    /// 空串按 None(不加密)
+    password: Option<String>,
+    random_name: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractOptionsDto {
+    /// 空串按 None(不加密)
+    password: Option<String>,
+    force: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ArchiveInfo {
     archive: String,
     original: String,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CompressResult {
     cancelled: bool,
     entries: Vec<ArchiveInfo>,
+    warnings: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractedGroupInfo {
+    entry: String,
+    original: Option<String>,
+    files: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractResult {
+    cancelled: bool,
+    groups: Vec<ExtractedGroupInfo>,
+    warnings: Vec<String>,
+}
+
+/// 任务互斥: 已有任务在跑则拒绝, 否则占住 kind(3.5 忙闲守卫)
+fn acquire_busy(busy: &Mutex<Option<&'static str>>, kind: &'static str) -> Result<(), String> {
+    let mut b = busy.lock().map_err(|_| POISONED.to_string())?;
+    if b.is_some() {
+        return Err("已有任务在运行".into());
+    }
+    *b = Some(kind);
+    Ok(())
+}
+
+fn release_busy(busy: &Mutex<Option<&'static str>>) {
+    if let Ok(mut b) = busy.lock() {
+        *b = None;
+    }
+}
+
+/// 任务收尾: 释放忙闲标志并清空取消旗标(成功/失败/取消都要走)
+fn finish_job(state: &AppState) {
+    release_busy(&state.busy);
+    if let Ok(mut c) = state.current.lock() {
+        *c = None;
+    }
+}
+
+/// 空串(或纯空白)按 None 处理
+fn non_empty(p: Option<String>) -> Option<String> {
+    p.filter(|s| !s.trim().is_empty())
+}
+
+fn kind_str(k: EntryKind) -> &'static str {
+    match k {
+        EntryKind::Dir => "dir",
+        EntryKind::File => "file",
+    }
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// 从缓存的压缩扫描结果中按名单严格筛选;
+/// mode/src 失配或名单含未知名 = 扫描过期(宁停不错, 5.4)
+fn select_compress(
+    scan: Option<&ScanContext>,
+    src: &str,
+    entries: &[String],
+) -> Result<Vec<Entry>, String> {
+    let ctx = match scan {
+        Some(c) if c.mode == "compress" && c.src == Path::new(src) => c,
+        _ => return Err(EXPIRED.into()),
+    };
+    let report = match &ctx.data {
+        ScanData::Compress(r) => r,
+        _ => return Err(EXPIRED.into()),
+    };
+    let selected: Vec<Entry> = report
+        .entries
+        .iter()
+        .filter(|e| entries.iter().any(|n| n == &e.name))
+        .cloned()
+        .collect();
+    if selected.len() != entries.len() {
+        return Err(EXPIRED.into());
+    }
+    Ok(selected)
+}
+
+/// 从缓存的解压扫描结果中按名单严格筛选(名单 = 入口卷文件名)
+fn select_extract(
+    scan: Option<&ScanContext>,
+    src: &str,
+    entries: &[String],
+) -> Result<Vec<ExtractGroup>, String> {
+    let ctx = match scan {
+        Some(c) if c.mode == "extract" && c.src == Path::new(src) => c,
+        _ => return Err(EXPIRED.into()),
+    };
+    let s = match &ctx.data {
+        ScanData::Extract(s) => s,
+        _ => return Err(EXPIRED.into()),
+    };
+    let selected: Vec<ExtractGroup> = s
+        .groups
+        .iter()
+        .filter(|g| entries.iter().any(|n| n == &file_name(&g.resolved.path)))
+        .cloned()
+        .collect();
+    if selected.len() != entries.len() {
+        return Err(EXPIRED.into());
+    }
+    Ok(selected)
+}
+
+fn compress_scan_dto(r: &ScanReport) -> ScanResult {
+    ScanResult {
+        mode: "compress".into(),
+        total_bytes: r.total_bytes,
+        warnings: r.warnings.clone(),
+        items: r
+            .entries
+            .iter()
+            .map(|e| ScanItem {
+                name: e.name.clone(),
+                kind: kind_str(e.kind).into(),
+                size: e.size,
+                status: "pending".into(),
+                original: None,
+                detail: None,
+            })
+            .collect(),
+    }
+}
+
+fn extract_scan_dto(s: &ExtractScan) -> ScanResult {
+    let mut items: Vec<ScanItem> = s
+        .groups
+        .iter()
+        .map(|g| ScanItem {
+            name: file_name(&g.resolved.path),
+            kind: "file".into(),
+            size: g.size,
+            status: "pending".into(),
+            original: g.original.clone(),
+            detail: None,
+        })
+        .collect();
+    if let Some(m) = &s.meta {
+        items.push(ScanItem {
+            name: m.name.clone(),
+            kind: "file".into(),
+            size: m.size,
+            status: "meta".into(),
+            original: None,
+            detail: Some(format!("{} 行", m.rows)),
+        });
+    }
+    for i in &s.issues {
+        items.push(ScanItem {
+            name: i.name.clone(),
+            kind: "file".into(),
+            size: 0,
+            status: "warning".into(),
+            original: None,
+            detail: Some(i.message.clone()),
+        });
+    }
+    ScanResult {
+        mode: "extract".into(),
+        total_bytes: s.groups.iter().map(|g| g.size).sum(),
+        warnings: Vec::new(),
+        items,
+    }
+}
+
+/// 只扫描不执行(3.1): 选源后渲染表格。compress 递归统计大小(Scanning 进度),
+/// extract 顶层分组(量小, 无进度)。结果缓存在外壳, 供确认命令筛选使用。
 #[tauri::command]
-fn ping() -> String {
-    "pong".into()
+async fn scan(
+    mode: String,
+    path: String,
+    on_progress: Channel<ProgressEvent>,
+    state: State<'_, AppState>,
+) -> Result<ScanResult, String> {
+    let mode: &'static str = match mode.as_str() {
+        "compress" => "compress",
+        "extract" => "extract",
+        other => return Err(format!("未知模式: {other}")),
+    };
+    let p = PathBuf::from(&path);
+    let src_for_ctx = p.clone();
+    acquire_busy(&state.busy, "scan")?;
+
+    let result = tauri::async_runtime::spawn_blocking(move || match mode {
+        "compress" => zip_tool_core::scan_dir(&p, &|prog| {
+            let _ = on_progress.send(ProgressEvent::from(prog));
+        })
+        .map(ScanData::Compress),
+        _ => zip_tool_core::scan_groups(&p).map(ScanData::Extract),
+    })
+    .await
+    .map_err(|e| e.to_string());
+
+    let data = match result {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => {
+            release_busy(&state.busy);
+            return Err(e.to_string());
+        }
+        Err(e) => {
+            release_busy(&state.busy);
+            return Err(e);
+        }
+    };
+
+    let dto = match &data {
+        ScanData::Compress(r) => compress_scan_dto(r),
+        ScanData::Extract(s) => extract_scan_dto(s),
+    };
+    // 扫描成功才覆盖缓存(失败保留旧值, 但确认命令会因 src/mode 校验拒绝误用)
+    *state.scan.lock().map_err(|_| POISONED.to_string())? = Some(ScanContext {
+        mode,
+        src: src_for_ctx,
+        data,
+    });
+    release_busy(&state.busy);
+    Ok(dto)
 }
 
-/// 批量压缩:input 下每个顶层条目各压缩为一个包。
-/// split_size 传 "2g"/"500m"/"65536",null 表示不分包。
+/// 批量压缩(3.2): src 必须与最近一次 scan(compress) 的源一致,
+/// entries = 勾选名单(scan 返回的原样条目名), 执行 = plan + compress_entries。
 #[tauri::command]
 async fn compress(
-    input: String,
-    output: String,
-    split_size: Option<String>,
-    password: Option<String>,
-    random_name: bool,
+    src: String,
+    dst: String,
+    entries: Vec<String>,
+    options: CompressOptions,
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
 ) -> Result<CompressResult, String> {
-    let split_size = match split_size.as_deref().map(zip_tool_core::parse_size) {
+    let split_size = match options.split_size.as_deref().map(zip_tool_core::parse_size) {
         Some(Ok(v)) => Some(v),
         Some(Err(e)) => return Err(e),
         None => None,
     };
+    let opts = Options {
+        split_size,
+        password: non_empty(options.password),
+        random_name: options.random_name,
+    };
+
+    acquire_busy(&state.busy, "compress")?;
+    // ScanContext 校验与筛选(纯内存; 锁在 await 前释放)
+    let selected = {
+        let scan = state.scan.lock().map_err(|_| POISONED.to_string())?;
+        select_compress(scan.as_ref(), &src, &entries)
+    };
+    let selected = match selected {
+        Ok(v) => v,
+        Err(e) => {
+            release_busy(&state.busy);
+            return Err(e);
+        }
+    };
 
     let flag = CancelFlag::new();
-    *state
-        .current
-        .lock()
-        .map_err(|_| "state poisoned".to_string())? = Some(flag.clone());
-
+    if let Ok(mut c) = state.current.lock() {
+        *c = Some(flag.clone());
+    }
+    let src_path = PathBuf::from(&src);
+    let dst_path = PathBuf::from(&dst);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let opts = zip_tool_core::Options {
-            split_size,
-            password,
-            random_name,
-        };
-        zip_tool_core::compress_dir(
-            Path::new(&input),
-            Path::new(&output),
+        let mut selected = selected;
+        zip_tool_core::plan(&src_path, &dst_path, &mut selected, &opts)?;
+        zip_tool_core::compress_entries(
+            &src_path,
+            &dst_path,
+            &selected,
             &opts,
             &flag.into_callback(|p| {
                 let _ = on_progress.send(ProgressEvent::from(p));
@@ -106,11 +417,13 @@ async fn compress(
         )
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string());
 
-    let report = result.map_err(|e| e.to_string())?;
+    finish_job(&state);
+    let report = result?.map_err(|e| e.to_string())?;
     Ok(CompressResult {
         cancelled: report.cancelled,
+        warnings: report.warnings,
         entries: report
             .entries
             .into_iter()
@@ -122,41 +435,41 @@ async fn compress(
     })
 }
 
-/// 解压结果:input 为目录时含多组(批量);单包恰好一组
-#[derive(Serialize)]
-struct ExtractedGroupInfo {
-    entry: String,
-    original: Option<String>,
-    files: usize,
-}
-
-#[derive(Serialize)]
-struct ExtractResult {
-    cancelled: bool,
-    groups: Vec<ExtractedGroupInfo>,
-}
-
-/// 解压 .zip / 第一个分卷(.zip.001)或整个目录(批量)。
-/// 默认拒绝覆盖目标已有文件, force = true 才覆盖。
+/// 批量解压(3.3): src 必须与最近一次 scan(extract) 的源一致,
+/// entries = 勾选名单(scan 返回的原样入口卷名), 执行 = extract_prepared(B2 预检 + B3)。
 #[tauri::command]
 async fn extract_archive(
-    input: String,
-    output: String,
-    password: Option<String>,
-    force: bool,
+    src: String,
+    dst: String,
+    entries: Vec<String>,
+    options: ExtractOptionsDto,
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
 ) -> Result<ExtractResult, String> {
-    let flag = CancelFlag::new();
-    *state
-        .current
-        .lock()
-        .map_err(|_| "state poisoned".to_string())? = Some(flag.clone());
+    let password = non_empty(options.password);
+    let force = options.force;
+    acquire_busy(&state.busy, "extract")?;
+    let selected = {
+        let scan = state.scan.lock().map_err(|_| POISONED.to_string())?;
+        select_extract(scan.as_ref(), &src, &entries)
+    };
+    let selected = match selected {
+        Ok(v) => v,
+        Err(e) => {
+            release_busy(&state.busy);
+            return Err(e);
+        }
+    };
 
+    let flag = CancelFlag::new();
+    if let Ok(mut c) = state.current.lock() {
+        *c = Some(flag.clone());
+    }
+    let dst_path = PathBuf::from(&dst);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        zip_tool_core::extract(
-            Path::new(&input),
-            Path::new(&output),
+        zip_tool_core::extract_prepared(
+            &selected,
+            &dst_path,
             password.as_deref(),
             force,
             &flag.into_callback(|p| {
@@ -165,11 +478,13 @@ async fn extract_archive(
         )
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string());
 
-    let report = result.map_err(|e| e.to_string())?;
+    finish_job(&state);
+    let report = result?.map_err(|e| e.to_string())?;
     Ok(ExtractResult {
         cancelled: report.cancelled,
+        warnings: report.warnings,
         groups: report
             .groups
             .into_iter()
@@ -182,7 +497,7 @@ async fn extract_archive(
     })
 }
 
-/// 取消当前任务(在当前条目/组完成后生效)
+/// 取消当前任务(在当前条目/组完成后生效); 无任务时为 no-op
 #[tauri::command]
 fn cancel_current(state: State<'_, AppState>) {
     if let Ok(current) = state.current.lock() {
@@ -195,9 +510,11 @@ fn cancel_current(state: State<'_, AppState>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 系统文件夹选择对话框(点击源/目标输入框时弹出)
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
-            ping,
+            scan,
             compress,
             extract_archive,
             cancel_current
@@ -209,6 +526,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(name: &str, size: u64, kind: EntryKind) -> Entry {
+        Entry {
+            name: name.into(),
+            kind,
+            size,
+            dst: String::new(),
+            format: "zip".into(),
+        }
+    }
+
+    fn compress_ctx(src: &str) -> ScanContext {
+        ScanContext {
+            mode: "compress",
+            src: PathBuf::from(src),
+            data: ScanData::Compress(ScanReport {
+                entries: vec![
+                    entry("A", 1, EntryKind::Dir),
+                    entry("b.txt", 2, EntryKind::File),
+                ],
+                total_bytes: 3,
+                warnings: vec!["warn1".into()],
+            }),
+        }
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
 
     #[test]
     fn progress_event_maps_phase_and_bytes() {
@@ -224,5 +570,135 @@ mod tests {
         assert_eq!(e.phase, "compressing");
         assert_eq!(e.done_bytes, 30);
         assert_eq!(e.total_bytes, 100);
+    }
+
+    #[test]
+    fn select_compress_filters_by_names_and_rejects_mismatch() {
+        let ctx = compress_ctx("C:\\s");
+        // 正常筛选
+        let sel = select_compress(Some(&ctx), "C:\\s", &s(&["A"])).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].name, "A");
+        // 未知名 = 过期
+        assert!(select_compress(Some(&ctx), "C:\\s", &s(&["X"])).is_err());
+        // 重复名 = 过期(严格长度校验)
+        assert!(select_compress(Some(&ctx), "C:\\s", &s(&["A", "A"])).is_err());
+        // src 失配 / 模式失配 / 无缓存
+        assert!(select_compress(Some(&ctx), "C:\\other", &s(&["A"])).is_err());
+        assert!(select_extract(Some(&ctx), "C:\\s", &s(&["A"])).is_err());
+        assert!(select_compress(None, "C:\\s", &s(&["A"])).is_err());
+    }
+
+    #[test]
+    fn select_extract_filters_by_entry_volume_names() {
+        let ctx = ScanContext {
+            mode: "extract",
+            src: PathBuf::from("C:\\s"),
+            data: ScanData::Extract(ExtractScan {
+                groups: vec![ExtractGroup {
+                    resolved: zip_tool_core::extract::ResolvedArchive {
+                        path: PathBuf::from("C:\\s\\Novel.zip"),
+                        backend: zip_tool_core::backend::Backend::native(),
+                    },
+                    original: Some("Novel".into()),
+                    size: 10,
+                }],
+                meta: None,
+                issues: Vec::new(),
+            }),
+        };
+        let sel = select_extract(Some(&ctx), "C:\\s", &s(&["Novel.zip"])).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert!(select_extract(Some(&ctx), "C:\\s", &s(&["zt_x.zip"])).is_err());
+    }
+
+    #[test]
+    fn busy_mutex_is_exclusive() {
+        let busy: Mutex<Option<&'static str>> = Mutex::new(None);
+        acquire_busy(&busy, "scan").unwrap();
+        assert!(acquire_busy(&busy, "compress").is_err(), "忙时应拒绝");
+        release_busy(&busy);
+        acquire_busy(&busy, "compress").unwrap();
+    }
+
+    #[test]
+    fn compress_scan_dto_maps_items_and_warnings() {
+        let report = ScanReport {
+            entries: vec![
+                entry("Novel", 7, EntryKind::Dir),
+                entry("a.jpg", 1, EntryKind::File),
+            ],
+            total_bytes: 8,
+            warnings: vec!["no permission".into()],
+        };
+        let dto = compress_scan_dto(&report);
+        assert_eq!(dto.mode, "compress");
+        assert_eq!(dto.total_bytes, 8);
+        assert_eq!(dto.warnings, ["no permission"]);
+        assert_eq!(dto.items.len(), 2);
+        assert_eq!(dto.items[0].kind, "dir");
+        assert_eq!(dto.items[0].status, "pending");
+        assert_eq!(dto.items[1].kind, "file");
+    }
+
+    #[test]
+    fn extract_scan_dto_maps_meta_and_issues() {
+        let scan = ExtractScan {
+            groups: vec![ExtractGroup {
+                resolved: zip_tool_core::extract::ResolvedArchive {
+                    path: PathBuf::from("C:\\s\\Novel.zip"),
+                    backend: zip_tool_core::backend::Backend::native(),
+                },
+                original: Some("Novel".into()),
+                size: 150,
+            }],
+            meta: Some(zip_tool_core::MetaFile {
+                name: "mapping.csv".into(),
+                size: 30,
+                rows: 1,
+            }),
+            issues: vec![zip_tool_core::ScanIssue {
+                name: "notes.txt".into(),
+                message: "skipped non-archive file".into(),
+            }],
+        };
+        let dto = extract_scan_dto(&scan);
+        assert_eq!(dto.mode, "extract");
+        assert_eq!(dto.total_bytes, 150);
+        assert!(dto.warnings.is_empty(), "extract 告警走 warning 行");
+        assert_eq!(dto.items.len(), 3);
+        // 组行: 显示名信息在 original, name = 入口卷
+        assert_eq!(dto.items[0].name, "Novel.zip");
+        assert_eq!(dto.items[0].original.as_deref(), Some("Novel"));
+        assert_eq!(dto.items[0].size, 150);
+        // 元数据行
+        assert_eq!(dto.items[1].status, "meta");
+        assert_eq!(dto.items[1].name, "mapping.csv");
+        assert_eq!(dto.items[1].size, 30);
+        assert!(dto.items[1].detail.as_deref().unwrap().contains('1'));
+        // 告警行
+        assert_eq!(dto.items[2].status, "warning");
+        assert_eq!(dto.items[2].name, "notes.txt");
+        assert!(
+            dto.items[2]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("non-archive")
+        );
+    }
+
+    #[test]
+    fn non_empty_treats_blank_as_none() {
+        assert_eq!(non_empty(None), None);
+        assert_eq!(non_empty(Some("  ".into())), None);
+        assert_eq!(non_empty(Some("pw".into())), Some("pw".to_string()));
+    }
+
+    /// 枚举两分支各持自己的扫描类型(保鲜上下文按分支取数)
+    #[test]
+    fn scan_data_enum_holds_both_kinds() {
+        let ctx = compress_ctx("x");
+        assert!(matches!(ctx.data, ScanData::Compress(_)));
     }
 }
