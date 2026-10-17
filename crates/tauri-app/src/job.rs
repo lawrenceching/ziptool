@@ -44,6 +44,7 @@ impl CancelFlag {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use zip_tool_core::Phase;
 
     #[test]
     fn forwards_progress_until_cancelled() {
@@ -51,12 +52,21 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         let cb = flag.clone().into_callback(|p| seen.borrow_mut().push(p.done));
 
-        assert!(matches!(cb(&Progress { done: 1, total: 3, entry: "A".into() }), ControlFlow::Continue(())));
-        assert!(matches!(cb(&Progress { done: 2, total: 3, entry: "B".into() }), ControlFlow::Continue(())));
+        let p = |done, entry: &str| Progress {
+            phase: Phase::Compressing,
+            done,
+            total: 3,
+            done_bytes: 0,
+            total_bytes: 0,
+            entry: entry.into(),
+        };
+
+        assert!(matches!(cb(&p(1, "A")), ControlFlow::Continue(())));
+        assert!(matches!(cb(&p(2, "B")), ControlFlow::Continue(())));
 
         flag.cancel();
 
-        assert!(matches!(cb(&Progress { done: 3, total: 3, entry: "C".into() }), ControlFlow::Break(())));
+        assert!(matches!(cb(&p(3, "C")), ControlFlow::Break(())));
         assert_eq!(*seen.borrow(), [1, 2, 3], "取消前的每次进度都应转发");
     }
 }

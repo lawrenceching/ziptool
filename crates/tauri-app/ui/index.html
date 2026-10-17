@@ -74,6 +74,8 @@
       const { invoke } = window.__TAURI__.core;
       const { Channel } = window.__TAURI__.ipc;
       const $ = (id) => document.getElementById(id);
+      const fmtBytes = (n) =>
+        n >= 1024 ** 3 ? (n / 1024 ** 3).toFixed(1) + "GB" : Math.round(n / 1024 ** 2) + "MB";
 
       $("go").addEventListener("click", async () => {
         $("go").disabled = true;
@@ -82,7 +84,12 @@
         $("result").textContent = "";
         const onProgress = new Channel();
         onProgress.onmessage = (m) => {
-          $("progress").textContent = `[${m.done}/${m.total}] ${m.entry}`;
+          const tag = m.phase === "scanning" ? "扫描 " : "";
+          const size =
+            m.phase === "compressing" && m.totalBytes > 0
+              ? ` (${fmtBytes(m.doneBytes)}/${fmtBytes(m.totalBytes)})`
+              : "";
+          $("progress").textContent = `${tag}[${m.done}/${m.total}] ${m.entry}${size}`;
         };
         try {
           const r = await invoke("compress", {

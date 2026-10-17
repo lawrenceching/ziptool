@@ -12,7 +12,7 @@ use tauri::State;
 use tauri::ipc::Channel;
 
 use job::CancelFlag;
-use zip_tool_core::Progress;
+use zip_tool_core::{Phase, Progress};
 
 /// 全局状态:当前任务(压缩)的取消旗标
 #[derive(Default)]
@@ -21,17 +21,28 @@ struct AppState {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ProgressEvent {
+    /// "scanning" / "compressing"
+    phase: String,
     done: usize,
     total: usize,
+    done_bytes: u64,
+    total_bytes: u64,
     entry: String,
 }
 
 impl From<&Progress> for ProgressEvent {
     fn from(p: &Progress) -> Self {
         Self {
+            phase: match p.phase {
+                Phase::Scanning => "scanning".into(),
+                Phase::Compressing => "compressing".into(),
+            },
             done: p.done,
             total: p.total,
+            done_bytes: p.done_bytes,
+            total_bytes: p.total_bytes,
             entry: p.entry.clone(),
         }
     }
@@ -147,4 +158,25 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_event_maps_phase_and_bytes() {
+        let p = Progress {
+            phase: Phase::Compressing,
+            done: 2,
+            total: 5,
+            done_bytes: 30,
+            total_bytes: 100,
+            entry: "B".into(),
+        };
+        let e = ProgressEvent::from(&p);
+        assert_eq!(e.phase, "compressing");
+        assert_eq!(e.done_bytes, 30);
+        assert_eq!(e.total_bytes, 100);
+    }
 }

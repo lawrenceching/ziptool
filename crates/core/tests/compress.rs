@@ -52,7 +52,8 @@ fn compresses_each_entry_into_its_own_archive() {
 
     assert!(!report.cancelled);
     assert_eq!(report.entries.len(), 3);
-    assert_eq!(archive_names(&out), ["A.zip", "B.zip", "C.zip"]);
+    // dst = 原名 + ".zip"(追加而非替换扩展名, 保住 "C.jpg" 的完整原名且避免多点名冲突)
+    assert_eq!(archive_names(&out), ["A.zip", "B.zip", "C.jpg.zip"]);
 }
 
 #[test]
@@ -63,9 +64,11 @@ fn reports_one_progress_event_per_completed_entry() {
 
     let events = std::cell::RefCell::new(Vec::new());
     compress_dir(&root.join("in"), &out, &Options::default(), &|p: &Progress| {
-        events
-            .borrow_mut()
-            .push((p.done, p.total, p.entry.clone()));
+        if p.phase == zip_tool_core::Phase::Compressing {
+            events
+                .borrow_mut()
+                .push((p.done, p.total, p.entry.clone()));
+        }
         ControlFlow::Continue(())
     })
     .unwrap();

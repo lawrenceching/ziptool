@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use zip_tool_core::{Options, compress_dir, extract, parse_size};
+use zip_tool_core::{Options, Phase, Progress, compress_dir, extract, parse_size};
 
 #[derive(Parser)]
 #[command(
@@ -73,12 +73,31 @@ fn main() -> ExitCode {
                 password,
                 random_name,
             };
-            match compress_dir(&input, &output, &opts, &|p| {
-                eprint!("\r[{}/{}] {}        ", p.done, p.total, p.entry);
+            match compress_dir(&input, &output, &opts, &|p: &Progress| {
+                match p.phase {
+                    Phase::Scanning => {
+                        eprint!("\r[scan {}/{}] {}        ", p.done, p.total, p.entry);
+                    }
+                    Phase::Compressing => {
+                        let size = if p.total_bytes > 0 {
+                            format!(
+                                " ({}/{})",
+                                format_bytes(p.done_bytes),
+                                format_bytes(p.total_bytes)
+                            )
+                        } else {
+                            String::new()
+                        };
+                        eprint!("\r[{}/{}] {}{}        ", p.done, p.total, p.entry, size);
+                    }
+                }
                 ControlFlow::Continue(())
             }) {
                 Ok(report) => {
                     eprintln!();
+                    for w in &report.warnings {
+                        eprintln!("warning: {w}");
+                    }
                     for e in &report.entries {
                         println!("{} -> {}", e.original, e.archive.display());
                     }
@@ -105,5 +124,32 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+/// 字节数的人类可读形式: >= 1GiB 用 GB(一位小数), 否则 MB(取整)
+fn format_bytes(n: u64) -> String {
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let n = n as f64;
+    if n >= GB {
+        format!("{:.1}GB", n / GB)
+    } else {
+        format!("{:.0}MB", n / MB)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_bytes;
+
+    #[test]
+    fn formats_bytes_as_gb_or_mb() {
+        assert_eq!(format_bytes(0), "0MB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5MB");
+        assert_eq!(
+            format_bytes(2 * 1024 * 1024 * 1024 + 300 * 1024 * 1024),
+            "2.3GB"
+        );
     }
 }

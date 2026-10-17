@@ -24,10 +24,17 @@ pub mod backend;
 pub mod compress;
 pub mod extract;
 pub mod naming;
+pub mod progress;
+pub mod scan;
 
 pub use backend::parse_size;
-pub use compress::{CompressedEntry, Progress, Report, compress_dir};
+pub use compress::{CompressedEntry, Report, compress_dir};
 pub use extract::extract;
+pub use progress::{Phase, Progress};
+pub use scan::{Entry, EntryKind, scan_dir};
+
+#[cfg(test)]
+mod testutil;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -41,6 +48,12 @@ pub enum CoreError {
     InputNotFound(PathBuf),
     /// 输入目录里没有可压缩的条目
     NoEntries(PathBuf),
+    /// 非随机命名下, 条目名在大小写不敏感比较后重复(输出盘可能是 NTFS)
+    DuplicateDst(Vec<String>),
+    /// 输出目录已有同名压缩包, 不覆盖
+    OutputExists(PathBuf),
+    /// 输出目录位于输入目录内(或与输入相同)
+    OutInsideInput(PathBuf),
     /// 后端命令非零退出
     BackendFailed {
         program: String,
@@ -59,6 +72,15 @@ impl fmt::Display for CoreError {
             }
             CoreError::InputNotFound(p) => write!(f, "input directory not found: {}", p.display()),
             CoreError::NoEntries(p) => write!(f, "no entries to compress in: {}", p.display()),
+            CoreError::DuplicateDst(names) => {
+                write!(f, "duplicate archive names (case-insensitive): {}", names.join(", "))
+            }
+            CoreError::OutputExists(p) => {
+                write!(f, "archive already exists, not overwriting: {}", p.display())
+            }
+            CoreError::OutInsideInput(p) => {
+                write!(f, "output directory is inside input directory: {}", p.display())
+            }
             CoreError::BackendFailed {
                 program,
                 status,

@@ -32,6 +32,7 @@ impl Backend {
         }
     }
 
+
     /// 执行外部命令,非零退出视为失败(7z 的 1=warning 视为失败,后续有需要再放宽)
     pub(crate) fn run(&self, cmd: &mut Command) -> Result<()> {
         let out = cmd.output()?;
@@ -57,15 +58,18 @@ impl Backend {
         }
     }
 
-    /// 构造"把 src 压缩为 out_base 压缩包"的命令。
-    /// out_base 不带扩展名;产物为 out_base.zip 或其原生分卷。
+    /// 构造"把 work_dir 下名为 name 的条目压缩为 out_zip"的命令。
+    /// 子进程工作目录设为 work_dir(= input), 命令行用相对条目名:
+    /// 两后端的包内路径都只有条目名本身
+    /// (zip 传全路径会把父目录链存进包, 7z 只存末段, 全路径会导致两平台解压布局不一致)。
+    /// out_zip 必须是绝对路径(工作目录切换后相对路径失效), 形如 <out>/<dst>.zip。
     pub fn compress_command(
         &self,
-        out_base: &Path,
-        src: &Path,
+        work_dir: &Path,
+        name: &str,
+        out_zip: &Path,
         opts: &Options,
     ) -> Result<Command> {
-        let out_zip = out_base.with_extension("zip");
         let mut cmd = Command::new(self.program());
         match self {
             Backend::Zip => {
@@ -76,7 +80,10 @@ impl Backend {
                 if let Some(pw) = &opts.password {
                     cmd.arg("-P").arg(pw);
                 }
-                cmd.arg(&out_zip).arg(src);
+                // zip 无 -- 分隔符, "-" 开头的名字 ./ 化防被当参数
+                let src =
+                    if name.starts_with('-') { format!("./{name}") } else { name.to_string() };
+                cmd.arg(out_zip).arg(src);
             }
             Backend::SevenZip => {
                 cmd.arg("a").arg("-tzip");
@@ -86,9 +93,10 @@ impl Backend {
                 if let Some(pw) = &opts.password {
                     cmd.arg(format!("-p{pw}"));
                 }
-                cmd.arg("--").arg(&out_zip).arg(src);
+                cmd.arg("--").arg(out_zip).arg(name);
             }
         }
+        cmd.current_dir(work_dir);
         Ok(cmd)
     }
 
@@ -118,6 +126,39 @@ impl Backend {
             }
         }
         cmd
+    }
+}
+
+/// 后端命令抽象: 生产为 [`Backend`](外部命令), 编排测试可注入假后端。
+pub(crate) trait CommandBackend {
+    fn compress_command(
+        &self,
+        work_dir: &Path,
+        name: &str,
+        out_zip: &Path,
+        opts: &Options,
+    ) -> Result<Command>;
+    fn run(&self, cmd: &mut Command) -> Result<()>;
+    fn check_split_size(&self, size: Option<u64>) -> Result<()>;
+}
+
+impl CommandBackend for Backend {
+    fn compress_command(
+        &self,
+        work_dir: &Path,
+        name: &str,
+        out_zip: &Path,
+        opts: &Options,
+    ) -> Result<Command> {
+        Backend::compress_command(self, work_dir, name, out_zip, opts)
+    }
+
+    fn run(&self, cmd: &mut Command) -> Result<()> {
+        Backend::run(self, cmd)
+    }
+
+    fn check_split_size(&self, size: Option<u64>) -> Result<()> {
+        Backend::check_split_size(self, size)
     }
 }
 
@@ -220,39 +261,58 @@ mod tests {
     }
 
     #[test]
-    fn sevenzip_compress_command_basic() {
+    fn sevenzip_compress_command_runs_in_work_dir_with_relative_name() {
         let cmd = Backend::SevenZip
-            .compress_command(Path::new("/out/A"), Path::new("/in/A"), &opts(None, None))
+            .compress_command(
+                Path::new("D:/data"),
+                "A",
+                Path::new("E:/out/A.zip"),
+                &opts(None, None),
+            )
             .unwrap();
         assert_eq!(cmd.get_program(), "7z");
-        assert_eq!(
-            args_of(&cmd),
-            ["a", "-tzip", "--", "/out/A.zip", "/in/A"]
-        );
+        assert_eq!(args_of(&cmd), ["a", "-tzip", "--", "E:/out/A.zip", "A"]);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("D:/data")));
     }
 
     #[test]
     fn sevenzip_compress_command_with_password_and_split() {
         let cmd = Backend::SevenZip
             .compress_command(
-                Path::new("B"),
-                Path::new("D:/data/B"),
+                Path::new("D:/data"),
+                "B",
+                Path::new("E:/out/B.zip"),
                 &opts(Some(2 * 1024 * 1024 * 1024), Some("pw")),
             )
             .unwrap();
         assert_eq!(
             args_of(&cmd),
-            ["a", "-tzip", "-v2g", "-ppw", "--", "B.zip", "D:/data/B"]
+            ["a", "-tzip", "-v2g", "-ppw", "--", "E:/out/B.zip", "B"]
         );
     }
 
     #[test]
-    fn zip_compress_command_basic() {
+    fn zip_compress_command_runs_in_work_dir_with_relative_name() {
         let cmd = Backend::Zip
-            .compress_command(Path::new("/out/A"), Path::new("/in/A"), &opts(None, None))
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &opts(None, None))
             .unwrap();
         assert_eq!(cmd.get_program(), "zip");
-        assert_eq!(args_of(&cmd), ["-r", "/out/A.zip", "/in/A"]);
+        assert_eq!(args_of(&cmd), ["-r", "/out/A.zip", "A"]);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/in")));
+    }
+
+    #[test]
+    fn zip_compress_command_prefixes_dash_leading_names() {
+        // zip 没有 -- 分隔符, "-" 开头的条目名要 ./ 化防被当参数
+        let cmd = Backend::Zip
+            .compress_command(
+                Path::new("/in"),
+                "-weird",
+                Path::new("/out/w.zip"),
+                &opts(None, None),
+            )
+            .unwrap();
+        assert_eq!(args_of(&cmd), ["-r", "/out/w.zip", "./-weird"]);
     }
 
     #[test]
@@ -279,14 +339,15 @@ mod tests {
     fn zip_compress_command_with_password_and_split() {
         let cmd = Backend::Zip
             .compress_command(
-                Path::new("/out/B"),
-                Path::new("/in/B"),
+                Path::new("/in"),
+                "B",
+                Path::new("/out/B.zip"),
                 &opts(Some(500 * 1024 * 1024), Some("pw")),
             )
             .unwrap();
         assert_eq!(
             args_of(&cmd),
-            ["-r", "-s", "500m", "-P", "pw", "/out/B.zip", "/in/B"]
+            ["-r", "-s", "500m", "-P", "pw", "/out/B.zip", "B"]
         );
     }
 
