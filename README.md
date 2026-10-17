@@ -45,3 +45,45 @@ cargo test                             # 测试
 cargo run -p zip-tool-cli -- --help    # 命令行
 cargo run -p zip-tool-tauri            # 桌面应用
 ```
+
+## 构建 CLI
+
+```
+cargo build --release -p zip-tool-cli
+```
+
+产物: `target/release/zip-tool.exe` (Linux 下为 `zip-tool`), 单文件可直接复制使用.
+
+```
+# 批量压缩: 分包 2g + 密码 + 随机包名
+zip-tool compress -i D:\data -o E:\out --split 2g -p 密码 --random-name
+
+# 解压 (支持 .zip 与 .zip.001 分卷)
+zip-tool extract -i E:\out\zt_xxx.zip.001 -o D:\restore -p 密码
+```
+
+## 构建桌面应用
+
+日常调试:
+
+```
+cargo run -p zip-tool-tauri
+```
+
+正式打包:
+
+```
+npm install -g @tauri-apps/cli      # 或: cargo install tauri-cli --version "^2"
+cargo tauri build
+```
+
+产物:
+- Windows 安装包: `target/release/bundle/msi/*.msi` 与 `nsis/*.exe`
+- Linux 包: `target/release/bundle/deb|rpm|appimage/`
+- 独立可执行文件: `target/release/zip-tool-tauri.exe` (前端资源已内嵌, 可单独分发)
+
+## 环境要求
+
+- 构建: Rust 1.85+ (edition 2024); Windows 需 MSVC Build Tools; 打包桌面应用需 tauri-cli
+- 桌面应用运行: Windows 10/11 自带 WebView2, 无需额外安装
+- 压缩/解压通过外部命令完成 (见"压缩后端"): Windows 需 7z (7-Zip 或 NanaZip 均可), Linux 需系统 zip / unzip
