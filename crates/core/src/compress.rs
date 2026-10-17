@@ -54,38 +54,91 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
     if !input.is_dir() {
         return Err(CoreError::InputNotFound(input.to_path_buf()));
     }
+    // 保持现状: 分包下限在扫描前快速失败
+    backend.check_split_size(opts.split_size)?;
 
+    // Step 1: 扫描(进度 Phase::Scanning;扫描阶段不支持取消, 回调返回值在此忽略)
+    let scan = scan_dir(input, &|p| {
+        let _ = on_progress(p);
+    })?;
+    let mut entries = scan.entries;
+
+    // Step 2/3 经分阶段 API 组合(行为与历史实现逐项一致)
+    plan(input, out_dir, &mut entries, opts)?;
+    let mut report =
+        compress_entries_with_backend(backend, input, out_dir, &entries, opts, on_progress)?;
+    report.warnings = scan.warnings;
+    Ok(report)
+}
+
+/// Step 2(独立阶段, _docs/ui-backend.md 6): 输出目录校验 + 生成 dst + 全部预检,
+/// 在任何压缩开始之前。UI 分阶段入口: 外壳缓存扫描结果, 确认时对筛选后的条目
+/// 先调本函数、再调 [`compress_entries`], 不重复扫描。
+/// 筛选后为空 → `NoEntries`(条目存在性复核在 compress_entries)。
+pub fn plan(input: &Path, out_dir: &Path, entries: &mut Vec<Entry>, opts: &Options) -> Result<()> {
+    if !input.is_dir() {
+        return Err(CoreError::InputNotFound(input.to_path_buf()));
+    }
     // 输出目录不得是输入目录自身或其子目录(边压边把半成品扫进包里, 产物不可预期)
     let input_abs = absolutize(input);
     let out_abs = absolutize(out_dir);
     if path_within(&out_abs, &input_abs) {
         return Err(CoreError::OutInsideInput(out_dir.to_path_buf()));
     }
-    backend.check_split_size(opts.split_size)?;
     fs::create_dir_all(&out_abs)?;
-
-    // Step 1: 扫描(进度 Phase::Scanning;扫描阶段不支持取消, 回调返回值在此忽略)
-    let scan = scan_dir(input, &|p| {
-        let _ = on_progress(p);
-    })?;
-    if scan.entries.is_empty() {
+    if entries.is_empty() {
         return Err(CoreError::NoEntries(input.to_path_buf()));
     }
 
-    // Step 2: 生成 dst + 预检, 全部在任何压缩开始之前
-    let mut entries = scan.entries;
-    assign_dsts(&mut entries, &out_abs, opts.random_name)?;
+    // 生成 dst + 预检(DuplicateDst / OutputExists), 全部在任何压缩开始之前
+    assign_dsts(entries, &out_abs, opts.random_name)
+}
 
-    // Step 3: 逐条目压缩(顺序执行; 随机命名时 mapping.csv 逐条目追加, 中断不丢)
+/// Step 3(独立阶段): 逐条目压缩, 开始前对每个条目做顶层存在性复核 ——
+/// 扫描到确认之间条目可能被删, 缺失即整批不开始(宁停不错, `EntryMissing`)。
+pub fn compress_entries(
+    input: &Path,
+    out_dir: &Path,
+    entries: &[Entry],
+    opts: &Options,
+    on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
+) -> Result<Report> {
+    compress_entries_with_backend(
+        &Backend::native(),
+        input,
+        out_dir,
+        entries,
+        opts,
+        on_progress,
+    )
+}
+
+pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
+    backend: &B,
+    input: &Path,
+    out_dir: &Path,
+    entries: &[Entry],
+    opts: &Options,
+    on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
+) -> Result<Report> {
+    backend.check_split_size(opts.split_size)?;
+    let input_abs = absolutize(input);
+    let out_abs = absolutize(out_dir);
+    for e in entries {
+        if fs::symlink_metadata(input_abs.join(&e.name)).is_err() {
+            return Err(CoreError::EntryMissing {
+                name: e.name.clone(),
+            });
+        }
+    }
+
+    // 逐条目压缩(顺序执行; 随机命名时 mapping.csv 逐条目追加, 中断不丢)
     if opts.random_name {
         mapping_create(&out_abs)?;
     }
     let total = entries.len();
-    let mut report = Report {
-        entries: Vec::new(),
-        cancelled: false,
-        warnings: scan.warnings,
-    };
+    let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
+    let mut report = Report::default();
     let mut done_bytes = 0u64;
 
     for (i, e) in entries.iter().enumerate() {
@@ -118,7 +171,7 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
             done: i + 1,
             total,
             done_bytes,
-            total_bytes: scan.total_bytes,
+            total_bytes,
             entry: e.name.clone(),
         }) {
             report.cancelled = true;
@@ -580,6 +633,191 @@ mod fake_tests {
         assert!(report.cancelled);
         assert_eq!(*fb.attempted.borrow(), ["A"], "取消后 B 不应开始");
         assert_eq!(report.entries.len(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// 分阶段 API 测试(_docs/ui-backend.md 5.3/6): scan → plan → compress_entries
+/// 与 compress_dir 整体调用等价; plan 在任何压缩开始前完成全部预检。
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+    use crate::backend::CommandBackend;
+    use crate::scan::{Entry, EntryKind, scan_dir};
+    use crate::testutil::unique_temp;
+    use std::cell::RefCell;
+    use std::process::Command;
+
+    fn entry(name: &str, size: u64) -> Entry {
+        Entry {
+            name: name.into(),
+            kind: EntryKind::Dir,
+            size,
+            dst: String::new(),
+            format: "zip".into(),
+        }
+    }
+
+    fn opts() -> Options {
+        Options {
+            split_size: None,
+            password: None,
+            random_name: false,
+        }
+    }
+
+    fn noop(_: &Progress) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
+    /// in/A/(1 字节) 与 in/B/(4 字节)
+    fn fixture(tag: &str) -> PathBuf {
+        let root = unique_temp(tag);
+        fs::create_dir_all(root.join("in/A")).unwrap();
+        fs::create_dir_all(root.join("in/B")).unwrap();
+        fs::write(root.join("in/A/a.txt"), "a").unwrap();
+        fs::write(root.join("in/B/b.txt"), "bbbb").unwrap();
+        root
+    }
+
+    /// 记录型假后端:成功时写出 {dst}.zip
+    struct Recorder {
+        attempted: RefCell<Vec<String>>,
+    }
+
+    impl Recorder {
+        fn new() -> Self {
+            Self {
+                attempted: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandBackend for Recorder {
+        fn compress_command(
+            &self,
+            _work: &Path,
+            name: &str,
+            out_zip: &Path,
+            _opts: &Options,
+        ) -> Result<Command> {
+            self.attempted.borrow_mut().push(name.to_string());
+            let stem = out_zip.file_stem().unwrap().to_string_lossy().into_owned();
+            let dir = out_zip.parent().unwrap().to_path_buf();
+            fs::write(dir.join(format!("{stem}.zip")), b"fake").unwrap();
+            Ok(Command::new("fake-unused"))
+        }
+
+        fn run(&self, _cmd: &mut Command) -> Result<()> {
+            Ok(())
+        }
+
+        fn check_split_size(&self, _size: Option<u64>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn plan_rejects_empty_entry_set_as_no_entries() {
+        // UI 勾选筛选后为空 → 在 plan 处报错(整批不开始)
+        let root = fixture("plan-empty");
+        let mut es: Vec<Entry> = Vec::new();
+        let err = plan(&root.join("in"), &root.join("out"), &mut es, &opts()).unwrap_err();
+        assert!(matches!(err, CoreError::NoEntries(_)));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn plan_rejects_out_inside_input_and_fills_dst_when_ok() {
+        let root = fixture("plan-basic");
+
+        let mut es = vec![entry("A", 1)];
+        let err = plan(&root.join("in"), &root.join("in/out"), &mut es, &opts()).unwrap_err();
+        assert!(matches!(err, CoreError::OutInsideInput(_)));
+
+        let mut es = vec![entry("A", 1)];
+        plan(&root.join("in"), &root.join("out"), &mut es, &opts()).unwrap();
+        assert_eq!(es[0].dst, "A", "plan 应生成 dst");
+        assert!(root.join("out").exists(), "plan 应创建输出目录");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn compress_entries_reports_missing_entry_before_any_backend_call() {
+        // 扫描到确认之间条目被删: 顶层存在性复核拦下, 整批不开始(宁停不错)
+        let root = fixture("missing");
+        let fb = Recorder::new();
+        let es = vec![entry("A", 1), entry("gone", 1)];
+        let err = compress_entries_with_backend(
+            &fb,
+            &root.join("in"),
+            &root.join("out"),
+            &es,
+            &opts(),
+            &noop,
+        )
+        .unwrap_err();
+        match err {
+            CoreError::EntryMissing { name } => assert_eq!(name, "gone"),
+            o => panic!("应为 EntryMissing: {o:?}"),
+        }
+        assert!(fb.attempted.borrow().is_empty(), "复核应先于任何压缩");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn staged_scan_plan_execute_matches_compress_dir() {
+        let root = fixture("staged-equiv");
+
+        // 基准: 整体调用
+        let r1 = compress_with_backend(
+            &Recorder::new(),
+            &root.join("in"),
+            &root.join("out1"),
+            &opts(),
+            &noop,
+        )
+        .unwrap();
+
+        // 分阶段: scan → plan → compress_entries(事件应与整体一致)
+        let events = RefCell::new(Vec::new());
+        let scan = scan_dir(&root.join("in"), &|p| {
+            events.borrow_mut().push(p.clone());
+        })
+        .unwrap();
+        let mut es = scan.entries;
+        plan(&root.join("in"), &root.join("out2"), &mut es, &opts()).unwrap();
+        let r2 = compress_entries_with_backend(
+            &Recorder::new(),
+            &root.join("in"),
+            &root.join("out2"),
+            &es,
+            &opts(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+
+        // 报告等价: 完成的条目一致
+        let o1: Vec<&str> = r1.entries.iter().map(|e| e.original.as_str()).collect();
+        let o2: Vec<&str> = r2.entries.iter().map(|e| e.original.as_str()).collect();
+        assert_eq!(o1, o2);
+
+        // 事件等价: 分阶段 = Scanning*2 + Compressing*2, 字节加权一致
+        let ev = events.borrow();
+        let phases: Vec<_> = ev.iter().map(|p| p.phase).collect();
+        assert_eq!(
+            phases,
+            [
+                Phase::Scanning,
+                Phase::Scanning,
+                Phase::Compressing,
+                Phase::Compressing
+            ]
+        );
+        assert_eq!((ev[3].done, ev[3].done_bytes, ev[3].total_bytes), (2, 5, 5));
         fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -29,10 +29,13 @@ pub mod progress;
 pub mod scan;
 
 pub use backend::parse_size;
-pub use compress::{CompressedEntry, Report, compress_dir};
-pub use extract::{ExtractReport, extract};
+pub use compress::{CompressedEntry, Report, compress_dir, compress_entries, plan};
+pub use extract::{
+    ExtractGroup, ExtractReport, ExtractScan, MetaFile, ScanIssue, extract, extract_prepared,
+    scan_groups,
+};
 pub use progress::{Phase, Progress};
-pub use scan::{Entry, EntryKind, scan_dir};
+pub use scan::{Entry, EntryKind, ScanReport, scan_dir};
 
 #[cfg(test)]
 mod testutil;
@@ -81,6 +84,11 @@ pub enum CoreError {
     ToolMissing(String),
     /// 解压:输入目录里没有任何压缩包组
     NoArchives(PathBuf),
+    /// 压缩:条目在扫描之后、执行之前消失(分阶段 API 的存在性复核, 提示重新扫描)
+    EntryMissing {
+        /// 消失的条目名
+        name: String,
+    },
     /// 后端命令非零退出
     BackendFailed {
         program: String,
@@ -149,6 +157,10 @@ impl fmt::Display for CoreError {
                 write!(f, "required tool {program:?} not found in PATH")
             }
             CoreError::NoArchives(p) => write!(f, "no archives found in: {}", p.display()),
+            CoreError::EntryMissing { name } => write!(
+                f,
+                "entry disappeared after scan: {name} (rescan the source folder)"
+            ),
             CoreError::BackendFailed {
                 program,
                 status,

@@ -44,26 +44,59 @@ pub(crate) fn extract_with_backend<B: ExtractBackend + ?Sized>(
     force: bool,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<ExtractReport> {
-    let (groups, warnings) = if input.is_dir() {
+    let (groups, issues) = if input.is_dir() {
         // 目录 → 批量: Step B1 扫描分组
-        scan_groups(input)?
+        let scan = scan_groups(input)?;
+        (scan.groups, scan.issues)
     } else {
         // 文件 → 单包: Step 1 识别
         let resolved = resolve_archive(input)?;
+        let size = std::fs::symlink_metadata(&resolved.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         (
             vec![ExtractGroup {
                 resolved,
                 original: None,
+                size,
             }],
             Vec::new(),
         )
     };
+    // 组合路径的 issues 以字符串进报告(UI 分阶段路径直接持有结构化 issues)
+    let warnings = issues
+        .into_iter()
+        .map(|i| format!("{}: {}", i.name, i.message))
+        .collect();
     extract_groups(be, &groups, dest, password, force, warnings, on_progress)
+}
+
+/// 批量解压执行(独立阶段, _docs/ui-backend.md 6): 对给定的组做 B2 全量预检 + B3
+/// 逐组解压。UI 分阶段入口: groups 来自 [`scan_groups`] 的缓存结果(可按勾选筛选),
+/// 扫描 issues 由外壳直接持有, 不经过本函数。
+pub fn extract_prepared(
+    groups: &[ExtractGroup],
+    dest: &Path,
+    password: Option<&str>,
+    force: bool,
+    on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
+) -> Result<ExtractReport> {
+    extract_groups(
+        &crate::backend::RealExtract {
+            program_override: None,
+        },
+        groups,
+        dest,
+        password,
+        force,
+        Vec::new(),
+        on_progress,
+    )
 }
 
 /// Step 1 识别结果:入口卷路径 + 解压后端(见 _docs/extract.md 第 4 节)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedArchive {
+pub struct ResolvedArchive {
     /// 入口卷路径(.zip 或 .zip.001), Step 2/3 均以此为准
     pub path: PathBuf,
     /// .zip → 平台默认后端; .zip.001 → 强制 Backend::SevenZip
@@ -178,10 +211,44 @@ fn check_conflicts(names: &[String], dest: &Path) -> Result<()> {
 
 /// 一个待解压的组(单包模式恰好一个;批量模式来自扫描分组)
 #[derive(Debug, Clone)]
-pub(crate) struct ExtractGroup {
+pub struct ExtractGroup {
     pub resolved: ResolvedArchive,
     /// mapping.csv 提供的原条目名(无 mapping 时为 None), 用于进度与报告显示
     pub original: Option<String>,
+    /// 组内各卷(入口卷+成员卷)大小之和, UI 表格"大小"列用
+    pub size: u64,
+}
+
+/// 批量解压扫描结果(_docs/ui-backend.md 6): UI 分阶段入口 —— 外壳缓存本结果,
+/// 确认时按勾选名单筛选 groups 后调 [`extract_prepared`], 不重扫。
+#[derive(Debug, Default)]
+pub struct ExtractScan {
+    /// 包组, 已排序(mapping 行序优先, 否则按入口卷名)
+    pub groups: Vec<ExtractGroup>,
+    /// mapping.csv 元数据(展示用); 读取失败时为 None(问题记入 issues)
+    pub meta: Option<MetaFile>,
+    /// 孤儿卷 / 非包文件 / mapping 异常等非致命问题(有明确文件名, UI 渲染为告警行)
+    pub issues: Vec<ScanIssue>,
+}
+
+/// mapping.csv 元数据行(只展示不参与解压)
+#[derive(Debug, Clone)]
+pub struct MetaFile {
+    /// 实际文件名(通常 "mapping.csv")
+    pub name: String,
+    /// 文件大小
+    pub size: u64,
+    /// 数据行数(不含表头)
+    pub rows: usize,
+}
+
+/// 扫描中的非致命问题
+#[derive(Debug, Clone)]
+pub struct ScanIssue {
+    /// 关联的文件名(孤儿卷 / 非包文件 / mapping.csv)
+    pub name: String,
+    /// 具体原因(如 "missing b.zip")
+    pub message: String,
 }
 
 /// 一组解压完成的记录
@@ -318,12 +385,13 @@ fn file_name_of(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 7.3 Step B1 扫描分组: 输入目录顶层(不递归)分类出压缩包组。
+/// 7.3 Step B1 扫描分组: 输入目录顶层(不递归)分类出压缩包组(UI 分阶段入口)。
 /// `X.zip` / `X.zip.001` 是入口卷; `.zNN` / `.zip.NNN` 是成员卷(入口卷存在则静默,
-/// 否则为孤儿卷记 warning); `mapping.csv` 是元数据; 其余文件记 warning。
+/// 否则为孤儿卷记 issue); `mapping.csv` 是元数据; 其余文件记 issue。
 /// 排序: 有 mapping.csv 按 mapping 行序(= 原条目顺序), 否则按入口卷名排序。
-pub(crate) fn scan_groups(input: &Path) -> Result<(Vec<ExtractGroup>, Vec<String>)> {
-    let mut warnings = Vec::new();
+/// 每组补 size(组内各卷大小之和); 逐文件一次 stat, 顶层量级可忽略。
+pub fn scan_groups(input: &Path) -> Result<ExtractScan> {
+    let mut issues = Vec::new();
     let mut names: Vec<String> = std::fs::read_dir(input)?
         .collect::<std::io::Result<Vec<_>>>()?
         .into_iter()
@@ -332,24 +400,43 @@ pub(crate) fn scan_groups(input: &Path) -> Result<(Vec<ExtractGroup>, Vec<String
     names.sort_by_key(|n| n.clone());
 
     let mut mapping: Vec<(String, String)> = Vec::new();
+    let mut meta: Option<MetaFile> = None;
     let mut zip_entries: Vec<String> = Vec::new(); // X.zip(整包或 zip -s 末卷)
     let mut sev_entries: Vec<String> = Vec::new(); // X.zip.001(7z -v 首卷)
     let mut members: Vec<(String, String)> = Vec::new(); // (卷名, 期望的入口卷名, 小写)
     let mut others: Vec<String> = Vec::new(); // 非包文件
+    // 入口卷名(小写) → 组内各卷大小之和(成员卷按 expected 归组)
+    let mut sizes: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
     for name in &names {
         let lower = name.to_lowercase();
+        let size = std::fs::symlink_metadata(input.join(name))
+            .map(|m| m.len())
+            .unwrap_or(0);
         if lower == "mapping.csv" {
             match read_mapping(&input.join(name)) {
-                Ok(rows) => mapping = rows,
-                Err(e) => warnings.push(format!("mapping.csv: {e}")),
+                Ok(rows) => {
+                    meta = Some(MetaFile {
+                        name: name.clone(),
+                        size,
+                        rows: rows.len(),
+                    });
+                    mapping = rows;
+                }
+                Err(e) => issues.push(ScanIssue {
+                    name: name.clone(),
+                    message: e,
+                }),
             }
         } else if lower.ends_with(".zip") {
             zip_entries.push(name.clone());
+            *sizes.entry(lower).or_default() += size;
         } else if lower.ends_with(".zip.001") {
             sev_entries.push(name.clone());
+            *sizes.entry(lower).or_default() += size;
         } else if let Some(expected) = member_entry_volume(&lower) {
-            members.push((name.clone(), expected));
+            members.push((name.clone(), expected.clone()));
+            *sizes.entry(expected).or_default() += size;
         } else {
             others.push(name.clone());
         }
@@ -363,11 +450,17 @@ pub(crate) fn scan_groups(input: &Path) -> Result<(Vec<ExtractGroup>, Vec<String
         .collect();
     for (vol, expected) in &members {
         if !entries_lower.contains(expected) {
-            warnings.push(format!("orphan volume: {vol} (missing {expected})"));
+            issues.push(ScanIssue {
+                name: vol.clone(),
+                message: format!("missing {expected}"),
+            });
         }
     }
     for f in others {
-        warnings.push(format!("skipped non-archive file: {f}"));
+        issues.push(ScanIssue {
+            name: f,
+            message: "skipped non-archive file".into(),
+        });
     }
 
     // 组装组(入口卷 = 主卷文件名, 与 mapping.csv 的 archive 列一致)
@@ -378,12 +471,14 @@ pub(crate) fn scan_groups(input: &Path) -> Result<(Vec<ExtractGroup>, Vec<String
         } else {
             Backend::native()
         };
+        let size = sizes.remove(&name.to_lowercase()).unwrap_or(0);
         groups.push(ExtractGroup {
             resolved: ResolvedArchive {
                 path: input.join(name),
                 backend,
             },
             original: None,
+            size,
         });
     }
     if groups.is_empty() {
@@ -415,11 +510,18 @@ pub(crate) fn scan_groups(input: &Path) -> Result<(Vec<ExtractGroup>, Vec<String
                 .iter()
                 .any(|g| file_name_of(&g.resolved.path).eq_ignore_ascii_case(a))
             {
-                warnings.push(format!("mapping.csv: archive not found: {a}"));
+                issues.push(ScanIssue {
+                    name: "mapping.csv".into(),
+                    message: format!("archive not found: {a}"),
+                });
             }
         }
     }
-    Ok((groups, warnings))
+    Ok(ExtractScan {
+        groups,
+        meta,
+        issues,
+    })
 }
 
 /// 成员卷对应的入口卷名(小写): `x.znn` → `x.zip`; `x.zip.nnn`(nnn≠001)→ `x.zip.001`;
@@ -539,6 +641,7 @@ mod orch_tests {
                 backend: Backend::native(),
             },
             original: None,
+            size: 0,
         };
         (root, g)
     }
@@ -708,6 +811,7 @@ mod orch_tests {
                 backend: Backend::SevenZip,
             },
             original: None,
+            size: 0,
         };
         let be = FakeExtract::new(&["a.txt"], &["a.txt"], false);
         let seen = RefCell::new(0);
@@ -980,40 +1084,42 @@ mod batch_tests {
         touch(&d, "big.zip"); // zip 组(big)
         touch(&d, "mapping.csv"); // 元数据, 不算非包文件
 
-        let (groups, warnings) = scan_groups(&d).unwrap();
+        let scan = scan_groups(&d).unwrap();
         assert_eq!(
-            entry_names(&groups),
+            entry_names(&scan.groups),
             ["big.zip", "media.zip.001", "Novel.zip"],
             "无 mapping 时按名排序(小写比较, 跨平台稳定)"
         );
-        let media = groups
+        let media = scan
+            .groups
             .iter()
             .find(|g| g.resolved.path.ends_with("media.zip.001"))
             .unwrap();
         assert_eq!(media.resolved.backend, Backend::SevenZip);
-        let novel = groups
+        let novel = scan
+            .groups
             .iter()
             .find(|g| g.resolved.path.ends_with("Novel.zip"))
             .unwrap();
         assert_eq!(novel.resolved.backend, Backend::native());
-        assert!(warnings.is_empty(), "{warnings:?}");
-        assert!(groups.iter().all(|g| g.original.is_none()));
+        assert!(scan.issues.is_empty(), "{scan:?}");
+        assert!(scan.groups.iter().all(|g| g.original.is_none()));
         fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
-    fn scan_groups_flags_orphan_volumes_as_warnings() {
+    fn scan_groups_flags_orphan_volumes_as_issues() {
         let d = unique_temp("batch-orphan");
         fs::create_dir_all(&d).unwrap();
         touch(&d, "B.z01"); // 无 B.zip → 孤儿
         touch(&d, "C.zip.003"); // 无 C.zip.001 → 孤儿
         touch(&d, "D.zip"); // 正常组
 
-        let (groups, warnings) = scan_groups(&d).unwrap();
-        assert_eq!(entry_names(&groups), ["D.zip"]);
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("B.z01")));
-        assert!(warnings.iter().any(|w| w.contains("C.zip.003")));
+        let scan = scan_groups(&d).unwrap();
+        assert_eq!(entry_names(&scan.groups), ["D.zip"]);
+        assert_eq!(scan.issues.len(), 2, "{scan:?}");
+        assert!(scan.issues.iter().any(|i| i.name == "B.z01"));
+        assert!(scan.issues.iter().any(|i| i.name == "C.zip.003"));
         fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1024,10 +1130,10 @@ mod batch_tests {
         touch(&d, "A.zip");
         touch(&d, "notes.txt");
 
-        let (groups, warnings) = scan_groups(&d).unwrap();
-        assert_eq!(entry_names(&groups), ["A.zip"]);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("notes.txt"), "{warnings:?}");
+        let scan = scan_groups(&d).unwrap();
+        assert_eq!(entry_names(&scan.groups), ["A.zip"]);
+        assert_eq!(scan.issues.len(), 1);
+        assert_eq!(scan.issues[0].name, "notes.txt");
         fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1043,15 +1149,73 @@ mod batch_tests {
         )
         .unwrap();
 
-        let (groups, warnings) = scan_groups(&d).unwrap();
+        let scan = scan_groups(&d).unwrap();
         assert_eq!(
-            entry_names(&groups),
+            entry_names(&scan.groups),
             ["zt_b.zip", "zt_a.zip"],
             "按 mapping 行序(= 原条目顺序)"
         );
-        assert_eq!(groups[0].original.as_deref(), Some("Novel"));
-        assert_eq!(groups[1].original.as_deref(), Some("media"));
-        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(scan.groups[0].original.as_deref(), Some("Novel"));
+        assert_eq!(scan.groups[1].original.as_deref(), Some("media"));
+        assert!(scan.issues.is_empty(), "{scan:?}");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn scan_groups_reports_mapping_meta() {
+        let d = unique_temp("batch-meta");
+        fs::create_dir_all(&d).unwrap();
+        touch(&d, "zt_a.zip");
+        let csv = "archive,original\nzt_a.zip,Novel\n";
+        fs::write(d.join("mapping.csv"), csv).unwrap();
+
+        let scan = scan_groups(&d).unwrap();
+        let meta = scan.meta.expect("有 mapping.csv 时应返回 meta");
+        assert_eq!(meta.name, "mapping.csv");
+        assert_eq!(meta.rows, 1);
+        assert_eq!(meta.size, csv.len() as u64);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn scan_groups_mapping_read_failure_degrades_to_issue_and_name_order() {
+        let d = unique_temp("batch-mapping-bad");
+        fs::create_dir_all(&d).unwrap();
+        touch(&d, "zt_a.zip");
+        fs::write(d.join("mapping.csv"), "not-csv\n").unwrap();
+
+        let scan = scan_groups(&d).unwrap();
+        assert!(scan.meta.is_none(), "读取失败时无 meta");
+        assert!(
+            scan.issues.iter().any(|i| i.name == "mapping.csv"),
+            "{scan:?}"
+        );
+        assert_eq!(entry_names(&scan.groups), ["zt_a.zip"], "降级为按名排序");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn scan_groups_sums_volume_sizes_per_group() {
+        let d = unique_temp("batch-size");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("Novel.zip"), vec![0u8; 100]).unwrap();
+        fs::write(d.join("Novel.z01"), vec![0u8; 50]).unwrap();
+        fs::write(d.join("media.zip.001"), vec![0u8; 200]).unwrap();
+        fs::write(d.join("media.zip.002"), vec![0u8; 300]).unwrap();
+
+        let scan = scan_groups(&d).unwrap();
+        let novel = scan
+            .groups
+            .iter()
+            .find(|g| g.resolved.path.ends_with("Novel.zip"))
+            .unwrap();
+        assert_eq!(novel.size, 150, "zip -s 组 = 末卷 + 成员卷");
+        let media = scan
+            .groups
+            .iter()
+            .find(|g| g.resolved.path.ends_with("media.zip.001"))
+            .unwrap();
+        assert_eq!(media.size, 500, "7z -v 组 = 首卷 + 成员卷");
         fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1066,13 +1230,15 @@ mod batch_tests {
         )
         .unwrap();
 
-        let (groups, warnings) = scan_groups(&d).unwrap();
-        assert_eq!(entry_names(&groups), ["zt_a.zip"]);
+        let scan = scan_groups(&d).unwrap();
+        assert_eq!(entry_names(&scan.groups), ["zt_a.zip"]);
         assert!(
-            warnings.iter().any(|w| w.contains("zt_gone.zip")),
-            "{warnings:?}"
+            scan.issues
+                .iter()
+                .any(|i| i.name == "mapping.csv" && i.message.contains("zt_gone.zip")),
+            "{scan:?}"
         );
-        assert_eq!(groups[0].original.as_deref(), Some("media"));
+        assert_eq!(scan.groups[0].original.as_deref(), Some("media"));
         fs::remove_dir_all(&d).unwrap();
     }
 
