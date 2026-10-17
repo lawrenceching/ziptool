@@ -1,0 +1,7 @@
+[package]
+name = "zip-tool-e2e"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# 仅含集成测试(tests/), 无 lib/bin

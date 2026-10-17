@@ -1,0 +1,345 @@
+//! 端到端测试:在系统临时目录构造测试夹具 → 调用 zip-tool CLI 二进制压缩 →
+//! 用系统 zip/7z 工具解压(不使用本工具)→ 校验压缩包生成且内容逐字节一致。
+//!
+//! 运行: cargo test -p zip-tool-e2e
+//! 依赖: Windows 需 7z(NanaZip 兼容);Linux 需 zip / unzip。
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::{env, fs};
+
+/// workspace 根目录(本 crate 的上一级)
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+/// 构建并返回被测 CLI 二进制路径。
+/// 用独立 target-dir(target/e2e):cargo test 期间持有主 target 的锁,
+/// 嵌套 cargo 用同一 target 会死锁;独立目录也有增量缓存, 只在首次慢。
+fn tool_binary() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let ws = workspace_root();
+        let target = ws.join("target").join("e2e");
+        let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let out = Command::new(&cargo)
+            .args(["build", "-p", "zip-tool-cli"])
+            .arg("--target-dir")
+            .arg(&target)
+            .current_dir(&ws)
+            .output()
+            .expect("无法启动 cargo build");
+        assert!(
+            out.status.success(),
+            "构建 zip-tool-cli 失败:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bin = target
+            .join("debug")
+            .join(if cfg!(windows) { "zip-tool.exe" } else { "zip-tool" });
+        assert!(bin.exists(), "未找到 CLI 二进制: {}", bin.display());
+        bin
+    })
+}
+
+/// 系统临时目录下的唯一夹具, 测试结束(含断言失败)自动清理
+struct Fixture {
+    root: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // ZIP_TOOL_E2E_KEEP=1 时保留现场, 便于排查失败
+        if env::var_os("ZIP_TOOL_E2E_KEEP").is_none() {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+/// in/Novel/book.txt(2.5MB), in/media/clip.bin(3MB), in/photo.jpg(200KB)
+fn fixture(tag: &str) -> Fixture {
+    let root = env::temp_dir().join(format!("zip-tool-e2e-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("in/Novel")).unwrap();
+    fs::create_dir_all(root.join("in/media")).unwrap();
+    fill(&root.join("in/Novel/book.txt"), 2_500_000, 7);
+    fill(&root.join("in/media/clip.bin"), 3_000_000, 11);
+    fill(&root.join("in/photo.jpg"), 200_000, 13);
+    Fixture { root }
+}
+
+/// 确定性且不可压内容(xorshift32, 周期远大于文件长度):解压后逐字节比对,
+/// 且 --split 分卷测试不会因数据高度可压而缩成单卷。
+fn fill(path: &Path, len: usize, seed: u8) {
+    let mut x = (seed as u32) | 1;
+    let data: Vec<u8> = (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x & 0xff) as u8
+        })
+        .collect();
+    fs::write(path, data).unwrap();
+}
+
+struct Run {
+    ok: bool,
+    stderr: String,
+}
+
+fn run_tool(args: &[&str]) -> Run {
+    let out = Command::new(tool_binary())
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("无法启动 zip-tool");
+    Run {
+        ok: out.status.success(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+fn list_dir(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn assert_file_eq(a: &Path, b: &Path) {
+    let da = fs::read(a).unwrap_or_else(|e| panic!("读取 {} 失败: {e}", a.display()));
+    let db = fs::read(b).unwrap_or_else(|e| panic!("读取 {} 失败: {e}", b.display()));
+    assert_eq!(
+        da.len(),
+        db.len(),
+        "{} 与 {} 大小不一致",
+        a.display(),
+        b.display()
+    );
+    assert!(da == db, "{} 与 {} 内容不一致", a.display(), b.display());
+}
+
+/// 用系统工具解压(本测试的核心约束: 不使用本工具)。
+/// Windows: 7z, .zip 与 .zip.001 分卷首卷都能直接解。
+/// Linux: unzip;zip -s 的分卷按官方流程先 `zip -s 0` 合并为整包再解。
+fn extract_archive(archive: &Path, dest: &Path, password: Option<&str>) {
+    fs::create_dir_all(dest).unwrap();
+    if cfg!(windows) {
+        let mut cmd = Command::new("7z");
+        cmd.arg("x").arg("-y");
+        if let Some(pw) = password {
+            cmd.arg(format!("-p{pw}"));
+        }
+        cmd.arg(format!("-o{}", dest.display()));
+        cmd.arg("--").arg(archive);
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        assert!(
+            out.status.success(),
+            "7z 解压 {} 失败:\n{}",
+            archive.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    } else {
+        let stem = archive.file_stem().unwrap().to_string_lossy().into_owned();
+        let z01 = archive.with_file_name(format!("{stem}.z01"));
+        let effective: PathBuf = if z01.exists() {
+            let merged = archive.parent().unwrap().join(format!("{stem}.unsplit.zip"));
+            let out = Command::new("zip")
+                .arg("-s")
+                .arg("0")
+                .arg(archive)
+                .arg("--out")
+                .arg(&merged)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "zip -s 0 合并 {} 失败:\n{}",
+                archive.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            merged
+        } else {
+            archive.to_path_buf()
+        };
+        let mut cmd = Command::new("unzip");
+        cmd.arg("-o");
+        if let Some(pw) = password {
+            cmd.arg("-P").arg(pw);
+        }
+        cmd.arg(&effective).arg("-d").arg(dest);
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        assert!(
+            out.status.success(),
+            "unzip 解压 {} 失败:\n{}",
+            effective.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// 断言错误密码无法解压(加密确实生效)
+fn extract_with_wrong_password_must_fail(archive: &Path, dest: &Path) {
+    fs::create_dir_all(dest).unwrap();
+    let out = if cfg!(windows) {
+        Command::new("7z")
+            .arg("x")
+            .arg("-y")
+            .arg("-pWRONG-PW")
+            .arg(format!("-o{}", dest.display()))
+            .arg("--")
+            .arg(archive)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    } else {
+        Command::new("unzip")
+            .arg("-o")
+            .arg("-P")
+            .arg("WRONG-PW")
+            .arg(archive)
+            .arg("-d")
+            .arg(dest)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !out.status.success(),
+        "错误密码不应解压成功: {}",
+        archive.display()
+    );
+}
+
+/// zt_ + 16 位 hex + (.zip | .zNN | .zip.NNN)
+fn is_random_artifact(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("zt_") else {
+        return false;
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() < 16 || !bytes[..16].iter().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    match &rest[16..] {
+        ".zip" => true,
+        s if s.starts_with(".zip.") => s.len() == 8 && s[5..].bytes().all(|b| b.is_ascii_digit()),
+        s if s.starts_with(".z") => s.len() == 4 && s[3..].bytes().all(|b| b.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+#[test]
+fn compress_then_external_extract_roundtrip() {
+    let fx = fixture("plain");
+    let (inp, out) = (fx.root.join("in"), fx.root.join("out"));
+
+    let r = run_tool(&[
+        "compress",
+        "-i",
+        inp.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(r.ok, "压缩失败:\n{}", r.stderr);
+
+    // 每个顶层条目一个包: 原名 + ".zip"(追加, 不替换扩展名)
+    assert_eq!(list_dir(&out), ["Novel.zip", "media.zip", "photo.jpg.zip"]);
+
+    // 系统工具逐包解压到同一 restore 目录(包内布局为 <条目名>/...,
+    // 7z/unzip 的 -o/-d 是"解到该目录之下", 不能再传子目录)
+    let restore = fx.root.join("restore");
+    for name in ["Novel", "media", "photo.jpg"] {
+        extract_archive(&out.join(format!("{name}.zip")), &restore, None);
+    }
+    assert_file_eq(
+        &inp.join("Novel/book.txt"),
+        &fx.root.join("restore/Novel/book.txt"),
+    );
+    assert_file_eq(
+        &inp.join("media/clip.bin"),
+        &fx.root.join("restore/media/clip.bin"),
+    );
+    assert_file_eq(&inp.join("photo.jpg"), &fx.root.join("restore/photo.jpg"));
+}
+
+#[test]
+fn split_password_random_roundtrip() {
+    let fx = fixture("split");
+    let (inp, out) = (fx.root.join("in"), fx.root.join("out"));
+
+    let r = run_tool(&[
+        "compress",
+        "-i",
+        inp.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--split",
+        "1m",
+        "-p",
+        "secret123",
+        "--random-name",
+    ]);
+    assert!(r.ok, "压缩失败:\n{}", r.stderr);
+
+    // mapping.csv 存在, 其余产物都是随机名, 不泄露原名
+    let names = list_dir(&out);
+    assert!(names.contains(&"mapping.csv".to_string()), "{names:?}");
+    let archives: Vec<&String> = names.iter().filter(|n| *n != "mapping.csv").collect();
+    assert!(!archives.is_empty(), "应有压缩包产物: {names:?}");
+    for n in &archives {
+        assert!(is_random_artifact(n), "产物应是随机名: {n}");
+        for orig in ["Novel", "media", "photo"] {
+            assert!(!n.contains(orig), "包名 {n} 不应包含原名");
+        }
+    }
+
+    // 按 mapping.csv 还原对应关系
+    let csv = fs::read_to_string(out.join("mapping.csv")).unwrap();
+    let rows: Vec<(String, String)> = csv
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let (a, o) = l.split_once(',').unwrap();
+            (a.to_string(), o.to_string())
+        })
+        .collect();
+    assert_eq!(rows.len(), 3, "mapping.csv 应有 3 行: {csv:?}");
+
+    // clip.bin 3MB / 1m: 至少分成 2 卷
+    let media_primary = rows.iter().find(|(_, o)| o == "media").unwrap().0.clone();
+    let id: String = media_primary.chars().take("zt_".len() + 16).collect();
+    let volume_count = names.iter().filter(|n| n.starts_with(&id)).count();
+    assert!(
+        volume_count >= 2,
+        "media 应被分包, 实际 {volume_count} 卷: {names:?}"
+    );
+
+    // 错误密码必须被拒(加密生效), 正确密码解压并逐字节比对
+    let (first, _) = &rows[0];
+    extract_with_wrong_password_must_fail(&out.join(first), &fx.root.join("badpw"));
+    let restore = fx.root.join("restore");
+    for (archive, _) in &rows {
+        extract_archive(&out.join(archive), &restore, Some("secret123"));
+    }
+    assert_file_eq(
+        &inp.join("Novel/book.txt"),
+        &fx.root.join("restore/Novel/book.txt"),
+    );
+    assert_file_eq(
+        &inp.join("media/clip.bin"),
+        &fx.root.join("restore/media/clip.bin"),
+    );
+    assert_file_eq(
+        &inp.join("media/clip.bin"),
+        &fx.root.join("restore/media/clip.bin"),
+    );
+    assert_file_eq(&inp.join("photo.jpg"), &fx.root.join("restore/photo.jpg"));
+}
