@@ -2,7 +2,7 @@
 //! 用系统 zip/7z 工具解压(不使用本工具)→ 校验压缩包生成且内容逐字节一致。
 //!
 //! 运行: cargo test -p zip-tool-e2e
-//! 依赖: Windows 需 7z(NanaZip 兼容);Linux 需 zip / unzip。
+//! 依赖: Windows 需 7z(NanaZip 兼容);Linux 需 zip / unzip;--format 7z 用例另需 p7zip 的 7z。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -136,12 +136,23 @@ fn assert_file_eq(a: &Path, b: &Path) {
     assert!(da == db, "{} 与 {} 内容不一致", a.display(), b.display());
 }
 
+/// .7z 系(.7z / .7z.001)交系统 7z;zip 系按平台(zip -s 分卷 Linux 走合并流程)
+fn is_7z_archive(archive: &Path) -> bool {
+    let name = archive
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .to_lowercase();
+    name.ends_with(".7z") || name.ends_with(".7z.001")
+}
+
 /// 用系统工具解压(本测试的核心约束: 不使用本工具)。
 /// Windows: 7z, .zip 与 .zip.001 分卷首卷都能直接解。
-/// Linux: unzip;zip -s 的分卷按官方流程先 `zip -s 0` 合并为整包再解。
+/// Linux: unzip;zip -s 的分卷按官方流程先 `zip -s 0` 合并为整包再解;
+/// 7z 格式的包(.7z 系)两平台都走 7z(unzip 不认识 7z)。
 fn extract_archive(archive: &Path, dest: &Path, password: Option<&str>) {
     fs::create_dir_all(dest).unwrap();
-    if cfg!(windows) {
+    if cfg!(windows) || is_7z_archive(archive) {
         let mut cmd = Command::new("7z");
         cmd.arg("x").arg("-y");
         if let Some(pw) = password {
@@ -202,7 +213,7 @@ fn extract_archive(archive: &Path, dest: &Path, password: Option<&str>) {
 /// 断言错误密码无法解压(加密确实生效)
 fn extract_with_wrong_password_must_fail(archive: &Path, dest: &Path) {
     fs::create_dir_all(dest).unwrap();
-    let out = if cfg!(windows) {
+    let out = if cfg!(windows) || is_7z_archive(archive) {
         Command::new("7z")
             .arg("x")
             .arg("-y")
@@ -232,7 +243,7 @@ fn extract_with_wrong_password_must_fail(archive: &Path, dest: &Path) {
     );
 }
 
-/// zt_ + 16 位 hex + (.zip | .zNN | .zip.NNN)
+/// zt_ + 16 位 hex + (.zip | .7z | .zNN | .zip.NNN | .7z.NNN)
 fn is_random_artifact(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("zt_") else {
         return false;
@@ -242,8 +253,9 @@ fn is_random_artifact(name: &str) -> bool {
         return false;
     }
     match &rest[16..] {
-        ".zip" => true,
+        ".zip" | ".7z" => true,
         s if s.starts_with(".zip.") => s.len() == 8 && s[5..].bytes().all(|b| b.is_ascii_digit()),
+        s if s.starts_with(".7z.") => s.len() == 7 && s[4..].bytes().all(|b| b.is_ascii_digit()),
         s if s.starts_with(".z") => s.len() == 4 && s[3..].bytes().all(|b| b.is_ascii_digit()),
         _ => false,
     }
@@ -558,6 +570,100 @@ fn extract_batch_random_names_restores_original_tree() {
     assert_tree_matches_input(&fx);
 
     // 报告里应给出 mapping.csv 记录的原条目名
+    for orig in ["Novel", "media", "photo.jpg"] {
+        assert!(
+            r.stdout.contains(&format!("[{orig}]")),
+            "报告应含原条目名 {orig}: {}",
+            r.stdout
+        );
+    }
+}
+
+#[test]
+fn compress_7z_format_roundtrip() {
+    let fx = fixture("fmt-7z");
+    let (inp, out) = (fx.root.join("in"), fx.root.join("out"));
+
+    let r = run_tool(&[
+        "compress",
+        "-i",
+        inp.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--format",
+        "7z",
+    ]);
+    assert!(r.ok, "7z 格式压缩失败:\n{}", r.stderr);
+
+    // 产物扩展名 .7z, 包名规则不变(原名追加)
+    assert_eq!(list_dir(&out), ["Novel.7z", "media.7z", "photo.jpg.7z"]);
+
+    let restore = fx.root.join("restore");
+    for name in ["Novel", "media", "photo.jpg"] {
+        extract_archive(&out.join(format!("{name}.7z")), &restore, None);
+    }
+    assert_tree_matches_input(&fx);
+}
+
+#[test]
+fn compress_7z_split_password_random_then_tool_extracts_back() {
+    let fx = fixture("fmt-7z-split");
+    compress_fixture(
+        &fx,
+        &[
+            "--format",
+            "7z",
+            "--split",
+            "1m",
+            "-p",
+            "secret123",
+            "--random-name",
+        ],
+    );
+
+    let out = fx.root.join("out");
+    let names = list_dir(&out);
+    assert!(names.contains(&"mapping.csv".to_string()), "{names:?}");
+    let archives: Vec<&String> = names.iter().filter(|n| *n != "mapping.csv").collect();
+    assert!(!archives.is_empty(), "{names:?}");
+    for n in &archives {
+        assert!(is_random_artifact(n), "产物应是 zt_ 随机名: {n}");
+    }
+
+    // clip.bin 3MB / 1m 至少 2 卷(.7z.001/.002/...)
+    let csv = fs::read_to_string(out.join("mapping.csv")).unwrap();
+    let rows: Vec<(String, String)> = csv
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let (a, o) = l.split_once(',').unwrap();
+            (a.to_string(), o.to_string())
+        })
+        .collect();
+    assert_eq!(rows.len(), 3, "{csv:?}");
+    let media_primary = rows.iter().find(|(_, o)| o == "media").unwrap().0.clone();
+    let id: String = media_primary.chars().take("zt_".len() + 16).collect();
+    assert!(
+        names.iter().filter(|n| n.starts_with(&id)).count() >= 2,
+        "media 应被分包: {names:?}"
+    );
+
+    // 加密生效(7z 格式 = AES-256):错误密码被系统 7z 拒绝
+    let (first, _) = &rows[0];
+    extract_with_wrong_password_must_fail(&out.join(first), &fx.root.join("badpw"));
+
+    // 本工具批量解压:覆盖 .7z.001 入口卷归一 + scan_groups 7z 分组 + mapping 还原
+    let r = run_tool(&[
+        "extract",
+        "-i",
+        out.to_str().unwrap(),
+        "-o",
+        fx.root.join("restore").to_str().unwrap(),
+        "-p",
+        "secret123",
+    ]);
+    assert!(r.ok, "批量 extract 失败:\n{}\n{}", r.stderr, r.stdout);
+    assert_tree_matches_input(&fx);
     for orig in ["Novel", "media", "photo.jpg"] {
         assert!(
             r.stdout.contains(&format!("[{orig}]")),
