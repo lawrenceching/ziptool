@@ -44,6 +44,12 @@ enum Command {
         /// 压缩级别 0-9(0=仅存储, 9=最大);缺省用后端默认
         #[arg(long, value_parser = clap::value_parser!(u8).range(0..=9))]
         level: Option<u8>,
+        /// 排除模式(可重复): 不含/ = 任意深度文件名(如 Thumbs.db, *.tmp); 含/ = 从源根锚定的相对路径(如 node_modules/**)
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// 不排除隐藏文件(默认排除: Windows=文件系统隐藏属性, Linux/mac=. 开头)
+        #[arg(long)]
+        include_hidden_files: bool,
     },
     /// 解压/合并分包(单包或整个目录批量)
     Extract {
@@ -74,6 +80,8 @@ fn main() -> ExitCode {
             random_name,
             format,
             level,
+            exclude,
+            include_hidden_files,
         } => {
             let split_size = match split.as_deref().map(parse_size) {
                 Some(Ok(v)) => Some(v),
@@ -83,6 +91,11 @@ fn main() -> ExitCode {
                 }
                 None => None,
             };
+            // 宁停不错: 非法模式在开工前拒绝(exit 2, 与 --split 非法一致)
+            if let Err(e) = zip_tool_core::validate_patterns(&exclude) {
+                eprintln!("error: invalid --exclude: {e}");
+                return ExitCode::from(2);
+            }
             let opts = Options {
                 split_size,
                 password,
@@ -92,7 +105,10 @@ fn main() -> ExitCode {
                     _ => Format::Zip, // Some("zip") / None
                 },
                 level,
-                exclude: Default::default(),
+                exclude: zip_tool_core::ExcludeRules {
+                    include_hidden: include_hidden_files,
+                    patterns: exclude,
+                },
             };
             // CLI 不做交互取消(Ctrl+C 杀整个控制台进程组, 后端子命令一并退出)
             match compress_dir(
@@ -128,6 +144,9 @@ fn main() -> ExitCode {
                     eprintln!();
                     for w in &report.warnings {
                         eprintln!("warning: {w}");
+                    }
+                    for x in &report.excluded {
+                        eprintln!("excluded ({}): {}", x.reason, x.name);
                     }
                     for e in &report.entries {
                         println!("{} -> {}", e.original, e.archive.display());
