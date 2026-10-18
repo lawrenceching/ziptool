@@ -1,0 +1,101 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install Tauri dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install backend tools & Tauri dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip unzip p7zip-full libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - name: Install 7z (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sevenzip
+          ln -sf "$(brew --prefix)/bin/7zz" "$(brew --prefix)/bin/7z"
+          7z i | head -3
+      - name: Ensure 7z (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $seven = Get-Command 7z -ErrorAction SilentlyContinue
+          if (-not $seven) {
+            Write-Host "7z not found, installing via chocolatey"
+            choco install 7zip -y --no-progress
+            $env:PATH = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + $env:PATH
+            $seven = Get-Command 7z -ErrorAction SilentlyContinue
+          }
+          if (-not $seven) { Write-Error "7z unavailable after install"; exit 1 }
+          Write-Host "7z -> $($seven.Source)"
+      - name: Rust unit tests (workspace, excl. e2e)
+        run: cargo test --workspace --exclude zip-tool-e2e
+      - name: E2E tests
+        run: cargo test -p zip-tool-e2e
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/tauri-app/package-lock.json
+      - name: UI unit tests
+        working-directory: crates/tauri-app
+        run: npm ci && npm test
