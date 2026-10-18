@@ -438,6 +438,7 @@ mod tests {
             split_size: split,
             password: None,
             random_name: false,
+            ..Options::default()
         }
     }
 
@@ -560,6 +561,7 @@ mod fake_tests {
             split_size: None,
             password: None,
             random_name: true,
+            ..Options::default()
         }
     }
 
@@ -776,6 +778,7 @@ mod staged_tests {
             split_size: None,
             password: None,
             random_name: false,
+            ..Options::default()
         }
     }
 

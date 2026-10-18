@@ -9,6 +9,7 @@
 //! 压缩后端按平台选择(core 内部抽象,均为调用外部命令):
 //! - Linux: 系统 `zip` 命令
 //! - Windows: `7z` 命令(Windows 无系统 zip 命令)
+//! - 格式维度:zip(最大兼容)与 7z(LZMA2),见 [`backend::Format`] 与 _docs/compress-modes.md
 //!
 //! 计划的对外 API(尚未实现):
 //! - [`Options`]:压缩选项
@@ -19,7 +20,7 @@
 //! - Linux `zip -s`:`B.z01, ..., B.zip`(最后一卷为 `.zip`)
 //! - Windows `7z -v`:`B.zip.001, ...`(`-tzip` 输出 zip 格式;实测 NanaZip 支持 zip 分卷)
 //!
-//! 两侧输出均为 zip 格式,解压/合并由 `extract` 承担。
+//! 输出格式由 `Options.format` 决定(zip / 7z),解压/合并由 `extract` 承担。
 
 pub mod backend;
 pub mod cancel;
@@ -30,7 +31,7 @@ pub mod naming;
 pub mod progress;
 pub mod scan;
 
-pub use backend::parse_size;
+pub use backend::{Format, parse_size};
 pub use cancel::CancelFlag;
 pub use compress::{CompressedEntry, Report, compress_dir, compress_entries, plan};
 pub use extract::{
@@ -188,7 +189,7 @@ impl From<std::io::Error> for CoreError {
 /// 核心库统一 Result
 pub type Result<T> = std::result::Result<T, CoreError>;
 
-/// 压缩选项(骨架占位,字段随实现调整)
+/// 压缩选项
 #[derive(Debug, Default, Clone)]
 pub struct Options {
     /// 分包大小(字节);`None` 表示不分包
@@ -197,6 +198,10 @@ pub struct Options {
     pub password: Option<String>,
     /// 是否使用随机包名,避免包名本身泄露敏感信息
     pub random_name: bool,
+    /// 压缩包格式,默认 zip(最大兼容)
+    pub format: Format,
+    /// 压缩级别 0-9(0=仅存储);`None` = 不传级别参数,用后端默认
+    pub level: Option<u8>,
 }
 
 #[cfg(test)]
@@ -209,5 +214,7 @@ mod tests {
         assert!(opts.split_size.is_none());
         assert!(opts.password.is_none());
         assert!(!opts.random_name);
+        assert_eq!(opts.format, Format::Zip, "默认 zip(最大兼容)");
+        assert!(opts.level.is_none(), "默认不传级别, 用后端默认");
     }
 }

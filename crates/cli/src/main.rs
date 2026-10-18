@@ -77,6 +77,8 @@ fn main() -> ExitCode {
                 split_size,
                 password,
                 random_name,
+                format: zip_tool_core::Format::Zip,
+                level: None,
             };
             // CLI 不做交互取消(Ctrl+C 杀整个控制台进程组, 后端子命令一并退出)
             match compress_dir(

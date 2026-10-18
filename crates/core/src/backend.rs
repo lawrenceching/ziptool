@@ -12,6 +12,35 @@ use crate::{CancelFlag, CoreError, Options, Result};
 /// 进程轮询间隔, 也是取消生效的延迟上界
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// 压缩包格式:决定外部工具、命令参数、产物扩展名与加密方式。
+/// zip = Deflate(兼容性最大);7z = LZMA2(压缩率更高, 需 7z 系工具解压)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Format {
+    /// zip 格式:Linux 走系统 zip 命令,Windows 走 7z -tzip
+    #[default]
+    Zip,
+    /// 7z 格式:两平台都走 7z 命令(-t7z -m0=LZMA2)
+    SevenZ,
+}
+
+impl Format {
+    /// 产物扩展名(.zip / .7z)
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Format::Zip => "zip",
+            Format::SevenZ => "7z",
+        }
+    }
+
+    /// 格式对应的外部工具:Zip 格式用平台原生;SevenZ 格式两平台统一 7z
+    pub fn backend(&self) -> Backend {
+        match self {
+            Format::Zip => Backend::native(),
+            Format::SevenZ => Backend::SevenZip,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     /// Linux 系统 zip 命令
@@ -598,6 +627,7 @@ mod tests {
             split_size: split,
             password: password.map(String::from),
             random_name: false,
+            ..Options::default()
         }
     }
 
@@ -605,6 +635,16 @@ mod tests {
         cmd.get_args()
             .map(|s| s.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn format_maps_extension_and_backend() {
+        assert_eq!(Format::Zip.extension(), "zip");
+        assert_eq!(Format::SevenZ.extension(), "7z");
+        // Zip 格式跟随平台原生工具(Windows 上 zip 格式也由 7z -tzip 产出);
+        // SevenZ 格式两平台统一 7z
+        assert_eq!(Format::Zip.backend(), Backend::native());
+        assert_eq!(Format::SevenZ.backend(), Backend::SevenZip);
     }
 
     #[test]

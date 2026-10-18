@@ -380,6 +380,8 @@ async fn compress(
         split_size,
         password: non_empty(options.password),
         random_name: options.random_name,
+        format: zip_tool_core::Format::Zip,
+        level: None,
     };
 
     acquire_busy(&state.busy, "compress")?;
