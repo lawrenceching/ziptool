@@ -163,7 +163,7 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
     for (i, e) in entries.iter().enumerate() {
         let out_archive = out_abs.join(format!("{}.{}", e.dst, ext));
         let result = backend
-            .compress_command(&input_abs, &e.name, &out_archive, opts)
+            .compress_command(&input_abs, &e.name, &out_archive, opts, &e.attr_hidden)
             .and_then(|mut cmd| backend.run(&mut cmd, cancel));
         if let Err(err) = result {
             // 停批并清理半成品: 半成品分卷被误当完整包比少一个包更危险
@@ -601,6 +601,7 @@ mod fake_tests {
             name: &str,
             out_archive: &Path,
             _opts: &Options,
+            _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
             let stem = out_archive.file_stem().unwrap().to_string_lossy().into_owned();
@@ -775,6 +776,7 @@ mod fake_tests {
             name: &str,
             out_archive: &Path,
             _opts: &Options,
+            _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
             let stem = out_archive.file_stem().unwrap().to_string_lossy().into_owned();
@@ -932,6 +934,7 @@ mod staged_tests {
             name: &str,
             out_archive: &Path,
             _opts: &Options,
+            _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
             fs::write(out_archive, b"fake").unwrap();

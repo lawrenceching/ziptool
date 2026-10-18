@@ -152,6 +152,100 @@ pub fn is_hidden_attr(md: &std::fs::Metadata) -> bool {
     }
 }
 
+/// 7z `-x!` 的包内路径分隔符(7z 按运行平台写入/匹配本地分隔符)
+#[cfg(windows)]
+const SEP: char = '\\';
+#[cfg(not(windows))]
+const SEP: char = '/';
+
+/// 生效模式集 = 内建隐藏默认集(include_hidden=false 且非 Windows 时)+ 用户模式
+fn effective_patterns(rules: &ExcludeRules) -> Vec<String> {
+    let mut v = Vec::new();
+    if !rules.include_hidden && !cfg!(windows) {
+        v.push(HIDDEN_UNIX_PATTERN.to_string());
+    }
+    v.extend(rules.patterns.iter().cloned());
+    v
+}
+
+/// 追加一组 argv token;字符预算不足时整组丢弃(护栏;收集端已控量, 正常不触发)。
+/// 返回 false = 预算耗尽。
+fn push_tokens(args: &mut Vec<String>, budget: &mut usize, toks: Vec<String>) -> bool {
+    let cost: usize = toks.iter().map(|t| t.chars().count() + 1).sum();
+    if cost > *budget {
+        return false;
+    }
+    *budget -= cost;
+    args.extend(toks);
+    true
+}
+
+/// 把规则归一化为后端命令的排除开关 argv 片段(见 _docs/exclude-rules.md §3):
+/// - zip:开关在条目名**之后**;模式 → `-x <glob>` 双开关(`*/p` + `*/p/*`)
+/// - 7z:开关在 `--` 之前;basename → `-xr!p`,锚定 → `-x!<条目名><SEP>路径`,目录 `/**` → 一条
+/// - Windows 属性隐藏路径(模式不可表达)逐条追加
+pub(crate) fn exclusion_args(
+    backend: crate::backend::Backend,
+    entry_name: &str,
+    rules: &ExcludeRules,
+    attr_hidden: &[String],
+) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut budget = EXCLUDE_ARG_BUDGET;
+    match backend {
+        crate::backend::Backend::Zip => {
+            for p in effective_patterns(rules) {
+                // `/**` 结尾 → 取前缀(目录 at-or-below 双开关);其余 `**` 已被校验排除
+                let base = p.strip_suffix("/**").unwrap_or(&p);
+                if !push_tokens(
+                    &mut args,
+                    &mut budget,
+                    vec!["-x".into(), format!("*/{base}")],
+                ) {
+                    break;
+                }
+                if !push_tokens(
+                    &mut args,
+                    &mut budget,
+                    vec!["-x".into(), format!("*/{base}/*")],
+                ) {
+                    break;
+                }
+            }
+            for rel in attr_hidden {
+                if !push_tokens(
+                    &mut args,
+                    &mut budget,
+                    vec!["-x".into(), rel.clone(), "-x".into(), format!("{rel}/*")],
+                ) {
+                    break;
+                }
+            }
+        }
+        crate::backend::Backend::SevenZip => {
+            for p in effective_patterns(rules) {
+                let tok = if !p.contains('/') {
+                    format!("-xr!{p}")
+                } else if let Some(prefix) = p.strip_suffix("/**") {
+                    format!("-x!{entry_name}{SEP}{}", prefix.replace('/', &SEP.to_string()))
+                } else {
+                    format!("-x!{entry_name}{SEP}{}", p.replace('/', &SEP.to_string()))
+                };
+                if !push_tokens(&mut args, &mut budget, vec![tok]) {
+                    break;
+                }
+            }
+            for rel in attr_hidden {
+                let tok = format!("-x!{}", rel.replace('/', &SEP.to_string()));
+                if !push_tokens(&mut args, &mut budget, vec![tok]) {
+                    break;
+                }
+            }
+        }
+    }
+    args
+}
+
 #[cfg(test)]
 mod validate_tests {
     use super::*;
