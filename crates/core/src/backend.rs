@@ -143,6 +143,10 @@ impl Backend {
                 if let Some(pw) = &opts.password {
                     cmd.arg("-P").arg(pw);
                 }
+                // 级别:Info-ZIP 的级别 flag 就是数字本身(-0 仅存储 … -9 最大)
+                if let Some(n) = opts.level {
+                    cmd.arg(format!("-{n}"));
+                }
                 // zip 无 -- 分隔符, "-" 开头的名字 ./ 化防被当参数
                 let src = if name.starts_with('-') {
                     format!("./{name}")
@@ -152,12 +156,21 @@ impl Backend {
                 cmd.arg(out_zip).arg(src);
             }
             Backend::SevenZip => {
-                cmd.arg("a").arg("-tzip");
+                cmd.arg("a");
+                // 格式由 Options.format 决定:SevenZip 后端可产 zip 与 7z 两种格式
+                match opts.format {
+                    Format::Zip => cmd.arg("-tzip"),
+                    // 显式 -m0=LZMA2:防旧版 p7zip 默认 LZMA1, 保证两平台算法一致
+                    Format::SevenZ => cmd.arg("-t7z").arg("-m0=LZMA2"),
+                };
                 if let Some(size) = opts.split_size {
                     cmd.arg(format!("-v{}", format_split_size(size)));
                 }
                 if let Some(pw) = &opts.password {
                     cmd.arg(format!("-p{pw}"));
+                }
+                if let Some(n) = opts.level {
+                    cmd.arg(format!("-mx={n}"));
                 }
                 cmd.arg("--").arg(out_zip).arg(name);
             }
@@ -645,6 +658,93 @@ mod tests {
         // SevenZ 格式两平台统一 7z
         assert_eq!(Format::Zip.backend(), Backend::native());
         assert_eq!(Format::SevenZ.backend(), Backend::SevenZip);
+    }
+
+    fn opts_fmt(format: Format, level: Option<u8>) -> Options {
+        Options {
+            split_size: None,
+            password: None,
+            random_name: false,
+            format,
+            level,
+        }
+    }
+
+    #[test]
+    fn sevenzip_command_7z_format_emits_lzma2() {
+        let cmd = Backend::SevenZip
+            .compress_command(
+                Path::new("D:/data"),
+                "A",
+                Path::new("E:/out/A.7z"),
+                &opts_fmt(Format::SevenZ, None),
+            )
+            .unwrap();
+        assert_eq!(cmd.get_program(), "7z");
+        assert_eq!(
+            args_of(&cmd),
+            ["a", "-t7z", "-m0=LZMA2", "--", "E:/out/A.7z", "A"]
+        );
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("D:/data")));
+    }
+
+    #[test]
+    fn sevenzip_command_7z_format_with_split_password_level() {
+        let mut o = opts_fmt(Format::SevenZ, Some(9));
+        o.split_size = Some(2 * 1024 * 1024 * 1024);
+        o.password = Some("pw".into());
+        let cmd = Backend::SevenZip
+            .compress_command(Path::new("D:/data"), "B", Path::new("E:/out/B.7z"), &o)
+            .unwrap();
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "a", "-t7z", "-m0=LZMA2", "-v2g", "-ppw", "-mx=9", "--", "E:/out/B.7z", "B"
+            ]
+        );
+    }
+
+    #[test]
+    fn sevenzip_command_zip_format_level_uses_mx() {
+        let cmd = Backend::SevenZip
+            .compress_command(
+                Path::new("D:/data"),
+                "A",
+                Path::new("E:/out/A.zip"),
+                &opts_fmt(Format::Zip, Some(9)),
+            )
+            .unwrap();
+        assert_eq!(
+            args_of(&cmd),
+            ["a", "-tzip", "-mx=9", "--", "E:/out/A.zip", "A"]
+        );
+    }
+
+    #[test]
+    fn zip_command_level_uses_digit_flag() {
+        // Info-ZIP zip 的级别 flag 就是数字本身(-0 仅存储 … -9 最大)
+        let cmd = Backend::Zip
+            .compress_command(
+                Path::new("/in"),
+                "A",
+                Path::new("/out/A.zip"),
+                &opts_fmt(Format::Zip, Some(9)),
+            )
+            .unwrap();
+        assert_eq!(args_of(&cmd), ["-r", "-9", "/out/A.zip", "A"]);
+    }
+
+    #[test]
+    fn level_zero_means_store() {
+        let cmd = Backend::Zip
+            .compress_command(
+                Path::new("/in"),
+                "A",
+                Path::new("/out/A.zip"),
+                &opts_fmt(Format::Zip, Some(0)),
+            )
+            .unwrap();
+        assert_eq!(args_of(&cmd), ["-r", "-0", "/out/A.zip", "A"]);
     }
 
     #[test]
