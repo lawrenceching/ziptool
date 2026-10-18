@@ -34,6 +34,8 @@ pub struct Report {
     pub cancelled: bool,
     /// 扫描阶段的非致命问题(如无权限子树)
     pub warnings: Vec<String>,
+    /// 被排除的顶层条目(仅 compress_dir 单调用路径丢弃时带出;分阶段路径为空)
+    pub excluded: Vec<crate::exclude::ExcludedEntry>,
 }
 
 /// 批量压缩:把 input 目录下的每个顶层条目各压缩为一个包,输出到 out_dir。
@@ -67,7 +69,23 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
     let scan = scan_dir(input, &opts.exclude, &|p| {
         let _ = on_progress(p);
     })?;
-    let mut entries = scan.entries;
+    // 顶层丢弃(单调用路径):被标条目不压缩。
+    // 分阶段 API(UI)不走这里 —— 标记仅展示, 勾选名单决定内容。
+    // include_hidden=true 时不会产生 Hidden 标记, Pattern 标记一律丢弃。
+    let excluded: Vec<crate::exclude::ExcludedEntry> = scan
+        .entries
+        .iter()
+        .filter(|e| e.exclude.is_some())
+        .map(|e| crate::exclude::ExcludedEntry {
+            name: e.name.clone(),
+            reason: e.exclude.clone().expect("过滤后必有标记"),
+        })
+        .collect();
+    let mut entries: Vec<Entry> = scan
+        .entries
+        .into_iter()
+        .filter(|e| e.exclude.is_none())
+        .collect();
 
     // Step 2/3 经分阶段 API 组合(行为与历史实现逐项一致)
     plan(input, out_dir, &mut entries, opts)?;
@@ -81,6 +99,7 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
         on_progress,
     )?;
     report.warnings = scan.warnings;
+    report.excluded = excluded;
     Ok(report)
 }
 
@@ -578,6 +597,7 @@ mod fake_tests {
     use crate::testutil::unique_temp;
     use std::cell::RefCell;
     use std::process::Command;
+    use crate::ExcludeReason;
 
     /// 假后端:成功时写出 {dst}.zip;fail_on 中的条目写出半成品分卷后报错
     struct FakeBackend {
@@ -866,6 +886,71 @@ mod fake_tests {
         }
         fs::remove_dir_all(&root).unwrap();
     }
+
+    #[test]
+    fn compress_dir_drops_pattern_matched_top_level_entries() {
+        let root = unique_temp("orch-exclude");
+        fs::create_dir_all(root.join("in/keep")).unwrap();
+        fs::create_dir_all(root.join("in/junk")).unwrap();
+        fs::write(root.join("in/keep/a.txt"), "a").unwrap();
+        fs::write(root.join("in/junk/b.tmp"), "bb").unwrap();
+
+        let mut o = rnd();
+        // 顶层目录按 basename 匹配(树内 *.tmp 剔除由 scan 用例与 e2e 覆盖)
+        o.exclude.patterns = vec!["junk".into()];
+        let events = RefCell::new(Vec::new());
+        let report = compress_with_backend(
+            &FakeBackend::new(&[]),
+            &root.join("in"),
+            &root.join("out"),
+            &o,
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+
+        // 被标顶层被丢弃, 不压缩
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].original, "keep");
+        // 报告带出被排除名单
+        assert_eq!(report.excluded.len(), 1);
+        assert_eq!(report.excluded[0].name, "junk");
+        assert_eq!(
+            report.excluded[0].reason,
+            ExcludeReason::Pattern("junk".into())
+        );
+        // 进度权重只含保留条目(压缩阶段 total=1, 字节 1)
+        let ev = events.borrow();
+        let comp: Vec<_> = ev.iter().filter(|p| p.phase == Phase::Compressing).collect();
+        assert_eq!(comp.len(), 1);
+        assert_eq!((comp[0].done, comp[0].total, comp[0].total_bytes), (1, 1, 1));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn compress_dir_all_excluded_reports_no_entries() {
+        let root = unique_temp("orch-excl-all");
+        fs::create_dir_all(root.join("in/junk")).unwrap();
+        fs::write(root.join("in/junk/b.tmp"), "bb").unwrap();
+
+        let mut o = rnd();
+        o.exclude.patterns = vec!["*".into()];
+        let err = compress_with_backend(
+            &FakeBackend::new(&[]),
+            &root.join("in"),
+            &root.join("out"),
+            &o,
+            &CancelFlag::new(),
+            &|_| ControlFlow::Continue(()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::NoEntries(_)), "全排除 = 无条目可压");
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 /// 分阶段 API 测试(_docs/ui-backend.md 5.3/6): scan → plan → compress_entries
@@ -878,6 +963,7 @@ mod staged_tests {
     use crate::testutil::unique_temp;
     use std::cell::RefCell;
     use std::process::Command;
+    use crate::{ExcludeReason, ExcludeRules};
 
     fn entry(name: &str, size: u64) -> Entry {
         Entry {
@@ -1054,6 +1140,38 @@ mod staged_tests {
             ]
         );
         assert_eq!((ev[3].done, ev[3].done_bytes, ev[3].total_bytes), (2, 5, 5));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn staged_path_keeps_marked_entries_as_advisory_only() {
+        // 分阶段 API(UI): 不做顶层丢弃, 标记仅展示; 勾选名单决定压缩内容
+        let root = unique_temp("staged-excl");
+        fs::create_dir_all(root.join("in/junk")).unwrap();
+        fs::write(root.join("in/junk/b.tmp"), "bb").unwrap();
+
+        let rules = ExcludeRules { include_hidden: true, patterns: vec!["junk".into()] };
+        let scan = scan_dir(&root.join("in"), &rules, &|_| {}).unwrap();
+        assert_eq!(scan.entries[0].exclude, Some(ExcludeReason::Pattern("junk".into())));
+
+        // 照常 plan + compress_entries(带标条目勾选了就压)
+        let mut es = scan.entries;
+        plan(&root.join("in"), &root.join("out"), &mut es, &opts()).unwrap();
+        let fb = Recorder::new();
+        let report = compress_entries_with_backend(
+            &fb,
+            &root.join("in"),
+            &root.join("out"),
+            &es,
+            &opts(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(*fb.attempted.borrow(), ["junk"]);
+        assert!(report.excluded.is_empty(), "分阶段路径不带出丢弃名单");
+
         fs::remove_dir_all(&root).unwrap();
     }
 }
