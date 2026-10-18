@@ -164,10 +164,13 @@ pub(crate) fn resolve_archive(input: &Path) -> Result<ResolvedArchive> {
             let first = vol(&format!("{}.001", stem_str(input)));
             locate_entry_volume(input, first, Backend::SevenZip)
         }
-        // .zNN(zip -s 非末卷): 找末卷 .zip
+        // .zNN(zip -s 非末卷): 找末卷 .zip;末卷旁有 .z01(即本输入)= 分卷组 → 强制 7z
         e if e.len() >= 2 && e.starts_with('z') && is_digits(&e[1..]) => {
             let last = vol(&format!("{}.zip", stem_str(input)));
-            locate_entry_volume(input, last, Backend::native())
+            locate_entry_volume(input, last, Backend::native()).map(|r| ResolvedArchive {
+                backend: zip_entry_backend(&r.path),
+                ..r
+            })
         }
         _ => Err(crate::CoreError::UnsupportedArchive(input.to_path_buf())),
     }
