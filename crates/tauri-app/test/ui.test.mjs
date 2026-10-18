@@ -1,0 +1,349 @@
+// UI 单测(node --test): 契约 + 行为, 不需要起 Tauri 进程。
+//
+// 关键设计——表面真实、传输造假:
+//   window.__TAURI__ 挂的是**真实 @tauri-apps/api 与 @tauri-apps/plugin-dialog 包对象**
+//   (Tauri 的 withGlobalTauri 全局 bundle 就是这些模块挂到 __TAURI__ 上), 只有最底层
+//   的 window.__TAURI_INTERNALS__(IPC 传输)被 mock。因此:
+//   - UI 引用了不存在的全局 API 路径(如 __TAURI__.ipc.Channel)→ 这里必然 TypeError,
+//     在 npm test 就爆掉, 而不是等到真机手工测试;
+//   - invoke 的命令名 / 参数形状 / Channel 序列化格式都按真实链路校验。
+// 进度回放走真实 Channel 协议: Rust 侧回调收到 { index, message }, message 已是解析后的对象。
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { JSDOM } from "jsdom";
+import * as coreApi from "@tauri-apps/api/core";
+import * as appApi from "@tauri-apps/api/app";
+import * as dialogApi from "@tauri-apps/plugin-dialog";
+
+const APP_JS = new URL("../ui/app.js", import.meta.url);
+const INDEX_HTML = new URL("../ui/index.html", import.meta.url);
+
+// —— 壳层 DTO 形状的扫描结果(与 crates/tauri-app/src/lib.rs 的 DTO 保持一致) ——
+const ITEM = (name, kind, size, status, extra = {}) => ({
+  name, kind, size, status, original: null, detail: null, ...extra,
+});
+const SCAN_COMPRESS = {
+  mode: "compress",
+  items: [
+    ITEM("Novel", "dir", 2_600_000_000, "pending"),
+    ITEM("media", "dir", 890_000_000, "pending"),
+    ITEM("photo.jpg", "file", 204_800, "pending"),
+  ],
+  warnings: [],
+  totalBytes: 3_490_204_800,
+};
+const SCAN_EXTRACT = {
+  mode: "extract",
+  items: [
+    ITEM("Novel.zip", "file", 2_600_000_000, "pending", { original: "Novel" }),
+    ITEM("media.zip.001", "file", 890_000_000, "pending", { original: "media" }),
+    ITEM("photo.jpg.zip", "file", 204_800, "pending"),
+    ITEM("mapping.csv", "file", 1024, "meta", { detail: "3 行" }),
+    ITEM("notes.txt", "file", 0, "warning", { detail: "非压缩包文件, 已跳过" }),
+  ],
+  warnings: [],
+  totalBytes: 3_490_204_800,
+};
+
+// 回放一条 Rust → JS 的进度消息(真实 Channel 排序协议)
+function sendProgress(callbacks, channel, i, message) {
+  callbacks.get(channel.id)({ index: i, message });
+}
+
+/**
+ * 构建一个加载了 app.js 的页面。
+ * - withTauri=false: 浏览器预览形态(无 __TAURI__, 走内置 mock)
+ * - withTauri=true: 真实包表面 + mock IPC 传输; invokeImpl 按命令名分发
+ */
+function makeHarness(withTauri, invokeImpl) {
+  const dom = new JSDOM(readFileSync(INDEX_HTML, "utf8"), {
+    url: "http://localhost/",
+    runScripts: "outside-only", // window.eval 跑在带完整全局(document 等)的上下文里
+  });
+  const { window } = dom;
+  const calls = []; // { cmd, args }
+  const callbacks = new Map(); // channel id → Rust 侧回调
+  let channelSeq = 1;
+
+  if (withTauri) {
+    window.__TAURI_INTERNALS__ = {
+      transformCallback(cb) {
+        const id = channelSeq++;
+        callbacks.set(id, cb);
+        return id;
+      },
+      unregisterCallback(id) {
+        callbacks.delete(id);
+      },
+      invoke(cmd, args) {
+        calls.push({ cmd, args });
+        return Promise.resolve(invokeImpl({ cmd, args, callbacks, calls }));
+      },
+      convertFileSrc: (p) => p,
+      metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
+      plugins: {},
+    };
+    window.__TAURI__ = { core: coreApi, app: appApi, dialog: dialogApi };
+    globalThis.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__;
+  }
+  // 真实包模块运行在 Node 全局, 其中的 window 自由变量解析到 globalThis;
+  // 指向 JSDOM window 使 mock 传输对真实代码可见(同文件测试串行, 互不干扰)
+  globalThis.window = window;
+  window.eval(readFileSync(APP_JS, "utf8"));
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  return {
+    window, doc: window.document, calls, callbacks, flush,
+    badges: () =>
+      [...window.document.querySelectorAll("#rows td:last-child span")].map((b) => b.textContent),
+    rows: () => [...window.document.querySelectorAll("#rows tr")],
+  };
+}
+
+/** 选源(mock dialog 返回固定路径)并等扫描完成 */
+async function pickSource(h, path = "C:\\demo\\data") {
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(h.doc.getElementById("src").value, path);
+}
+
+// 断言跨 realm 值: app.js 跑在 JSDOM 上下文, 其对象/数组的原型与 Node 侧字面量
+// 不同 realm, assert.deepStrictEqual 会因原型引用不等而假失败 → 用 JSON 形状比较
+const jsonEq = (a, b) => assert.equal(JSON.stringify(a), JSON.stringify(b));
+
+test("契约: 有 Tauri 时扫描走真实表面, scan 命令参数与 Channel 序列化正确", async () => {
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:app|version") return "1.2.3";
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    return null;
+  });
+  await pickSource(h);
+
+  // dialog 契约: 系统文件夹选择, 单选目录
+  const dlg = h.calls.find((c) => c.cmd === "plugin:dialog|open");
+  assert.ok(dlg, "应通过真实 plugin-dialog 打开选择框");
+  assert.equal(dlg.args.options.directory, true);
+  assert.equal(dlg.args.options.multiple, false);
+
+  // scan 契约: 命令名 + mode/path + onProgress 是真实 core.Channel 且序列化为 __CHANNEL__:<id>
+  const scan = h.calls.find((c) => c.cmd === "scan");
+  assert.ok(scan, "应调用 scan 命令");
+  assert.equal(scan.args.mode, "compress");
+  assert.equal(scan.args.path, "C:\\demo\\data");
+  assert.ok(scan.args.onProgress instanceof coreApi.Channel, "onProgress 必须是 core.Channel 实例");
+  assert.match(JSON.stringify(scan.args), /__CHANNEL__:\d+/);
+
+  // 渲染契约: 表格 3 行, 状态栏带总数, 版本号来自真实 app 表面
+  assert.deepEqual(h.badges(), ["待压缩", "待压缩", "待压缩"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("3 个条目"));
+  assert.equal(h.doc.getElementById("ver").textContent, "v1.2.3");
+});
+
+test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙、选项透传", async () => {
+  const prog = [];
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "compress") {
+      // Rust 侧逐条目回放进度(对象已解析, 与真实链路一致)
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "compressing", done: 1, total: 2, doneBytes: 2_600_000_000,
+        totalBytes: 2_600_204_800, entry: "Novel",
+      });
+      prog.push(...h.badges());
+      return {
+        cancelled: false,
+        entries: [{ archive: "C:\\out\\Novel.zip", original: "Novel" }, { archive: "C:\\out\\photo.jpg.zip", original: "photo.jpg" }],
+        warnings: ["skipped hidden file"],
+      };
+    }
+    return null;
+  });
+
+  await pickSource(h);
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  // 取消第二行勾选(media)
+  h.rows()[1].querySelector("input").click();
+  // 选项: 分包 2g + 密码(壳层负责解析, UI 只透传非空值)
+  h.doc.getElementById("opt-split").value = " 2g ";
+  h.doc.getElementById("opt-password").value = "pw";
+  h.doc.getElementById("opt-random").click();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+
+  // compress 契约: 名单 = 勾选项(表格序), 选项非空才透传
+  const comp = h.calls.find((c) => c.cmd === "compress");
+  assert.ok(comp, "应调用 compress 命令");
+  jsonEq(comp.args.entries, ["Novel", "photo.jpg"]);
+  jsonEq(comp.args.options, { splitSize: "2g", password: "pw", randomName: true });
+  assert.equal(comp.args.src, "C:\\demo\\data");
+  assert.equal(comp.args.dst, "C:\\out");
+
+  // 运行中第一帧(进度 done=1): sel=[Novel, photo.jpg] → Novel 完成, photo.jpg 进行中
+  assert.deepEqual(prog, ["完成", "待压缩", "进行中"]);
+  // 终态: 勾选的两行完成, 未勾选保持待压缩; 告警走状态栏
+  assert.deepEqual(h.badges(), ["完成", "待压缩", "完成"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("压缩完成: 2 个压缩包"));
+  assert.ok(h.doc.getElementById("msg").textContent.includes("1 条告警"));
+  // 完成行不再可勾选; 确认钮恢复但无新勾选可处理 → 禁用
+  assert.ok(h.rows()[0].querySelector("input").disabled);
+  assert.ok(h.doc.getElementById("confirm").disabled);
+});
+
+test("行为: 运行中「取消」— 确认钮变形、cancel_current 被调、部分完成保留", async () => {
+  let resolveCompress;
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "compress")
+      return new Promise((res) => {
+        resolveCompress = res;
+        sendProgress(callbacks, args.onProgress, 0, {
+          phase: "compressing", done: 1, total: 2, doneBytes: 1, totalBytes: 2, entry: "Novel",
+        });
+      });
+    if (cmd === "cancel_current") return null;
+    return null;
+  });
+
+  await pickSource(h);
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+
+  // 运行中: 确认钮变取消(红), 其余行待处理, 第一条已完成
+  assert.equal(h.doc.getElementById("confirm").textContent, "取消");
+  assert.ok(h.doc.getElementById("confirm").className.includes("bg-red-600"));
+  assert.deepEqual(h.badges(), ["完成", "进行中", "待压缩"]);
+  assert.ok(h.doc.getElementById("src").disabled, "任务期锁控件");
+
+  h.doc.getElementById("confirm").click(); // → 取消
+  await h.flush();
+  assert.ok(h.calls.some((c) => c.cmd === "cancel_current"), "应通知外壳取消");
+
+  resolveCompress({ cancelled: true, entries: [], warnings: [] });
+  await h.flush();
+  await h.flush();
+  assert.equal(h.doc.getElementById("confirm").textContent, "确认");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("已取消(完成 1/2)"));
+  assert.deepEqual(h.badges(), ["完成", "待压缩", "待压缩"], "取消后未完成的行回到待处理");
+  assert.ok(h.doc.getElementById("confirm").className.includes("bg-blue-600"));
+});
+
+test("行为: 压缩命令失败 — 当前行标失败, 徽章悬停看原因", async () => {
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "compress") return Promise.reject("entry disappeared after scan: Novel");
+    return null;
+  });
+  await pickSource(h);
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+
+  const badge = h.rows()[0].querySelector("td:last-child span");
+  assert.equal(badge.textContent, "失败");
+  assert.equal(badge.title, "entry disappeared after scan: Novel");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("压缩失败"));
+});
+
+test("行为: 解压模式 — 选项显隐、meta/warning 行、extract_archive 参数", async () => {
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_EXTRACT;
+    if (cmd === "extract_archive") {
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "extracting", done: 1, total: 1, doneBytes: 1, totalBytes: 1, entry: "Novel.zip",
+      });
+      return { cancelled: false, groups: [{ entry: "Novel.zip", original: "Novel", files: 5 }], warnings: [] };
+    }
+    return null;
+  });
+
+  h.doc.getElementById("mode-extract").click();
+  assert.ok(h.doc.getElementById("opt-split-wrap").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("opt-random-wrap").classList.contains("hidden"));
+  assert.ok(!h.doc.getElementById("opt-force-wrap").classList.contains("hidden"));
+
+  await pickSource(h);
+  assert.deepEqual(
+    h.badges(),
+    ["待解压", "待解压", "待解压", "元数据", "告警"],
+    "组行 + 元数据行 + 告警行"
+  );
+  // meta/warning 行禁勾; 告警行悬停看原因; 组行悬停看原名
+  const checkboxes = h.rows().map((tr) => tr.querySelector("input"));
+  assert.ok(checkboxes[3].disabled && checkboxes[4].disabled);
+  assert.equal(h.rows()[4].querySelector("td:last-child span").title, "非压缩包文件, 已跳过");
+  assert.match(h.rows()[0].querySelector("td:nth-child(2)").title, /原名 Novel/);
+
+  // 默认全选(pending 行)→ 取消后两组, 只留第一组 + 勾覆盖
+  checkboxes[1].click();
+  checkboxes[2].click();
+  h.doc.getElementById("opt-force").click();
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+
+  const ext = h.calls.find((c) => c.cmd === "extract_archive");
+  assert.ok(ext, "应调用 extract_archive 命令");
+  jsonEq(ext.args.entries, ["Novel.zip"]);
+  jsonEq(ext.args.options, { password: null, force: true });
+  assert.deepEqual(h.badges(), ["完成", "待解压", "待解压", "元数据", "告警"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("解压完成: 1 组"));
+});
+
+test("行为: 模式切换作废旧扫描(源清空、表格清空、提示重扫)", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    return null;
+  });
+  await pickSource(h);
+  assert.equal(h.rows().length, 3);
+
+  h.doc.getElementById("mode-extract").click();
+  await h.flush();
+  assert.equal(h.doc.getElementById("src").value, "");
+  assert.equal(h.rows().length, 0);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("模式已切换"));
+});
+
+test("浏览器预览(无 Tauri): mock 扫描与 mock 运行仍可用", async () => {
+  const h = makeHarness(false, () => {
+    throw new Error("无 Tauri 环境不应触碰 IPC");
+  });
+  await pickSource(h);
+  assert.deepEqual(h.badges(), ["待压缩", "待压缩", "待压缩"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("浏览器预览假数据"));
+  assert.equal(h.doc.getElementById("ver").textContent, "dev");
+
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  h.doc.getElementById("confirm").click();
+  // mock 每 400ms 一条进度, 3 条约 1.2s; 中途采样一次
+  await new Promise((r) => setTimeout(r, 500));
+  const mid = h.badges();
+  await new Promise((r) => setTimeout(r, 1600));
+  assert.deepEqual(mid, ["完成", "进行中", "待压缩"]);
+  assert.deepEqual(h.badges(), ["完成", "完成", "完成"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("压缩完成: 3 个压缩包"));
+});

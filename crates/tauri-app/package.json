@@ -4,9 +4,13 @@
   "description": "仅用于把 Tailwind 编译成静态 ui/app.css(运行时不依赖 node,产物已提交)",
   "scripts": {
     "css": "tailwindcss -i tailwind/input.css -o ui/app.css --minify",
-    "css:watch": "tailwindcss -i tailwind/input.css -o ui/app.css --watch"
+    "css:watch": "tailwindcss -i tailwind/input.css -o ui/app.css --watch",
+    "test": "node --test test/ui.test.mjs"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4"
+    "@tailwindcss/cli": "^4",
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-dialog": "^2.8.3",
+    "jsdom": "^29.1.1"
   }
 }

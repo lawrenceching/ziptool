@@ -87,6 +87,12 @@ UI 样式用 Tailwind 预编译成静态 `ui/app.css`(运行时离线, 无前端
 cd crates/tauri-app && npm install && npm run css
 ```
 
+UI 逻辑有 Node 单测(命令名/参数形状/进度协议等前后端契约 + 界面行为;`window.__TAURI__` 表面用真实 `@tauri-apps/api` 包对象、只 mock IPC 传输, 因此 UI 引用不存在的全局 API 路径会在测试期直接 TypeError, 不必等真机手测):
+
+```
+cd crates/tauri-app && npm install && npm test
+```
+
 正式打包:
 
 ```
