@@ -101,7 +101,9 @@ pub struct Options {
   - 7z 分卷只有 `.7z.NNN` 一种形态, 无 zip 系 `.zNN` 别名
 - **scan_groups**(B1 分类): 入口卷集合扩为 `{X.zip, X.zip.001, X.7z, X.7z.001}`, 成员卷集合扩为 `{X.zNN, X.zip.NNN, X.7z.NNN}`; 孤儿卷 / 非包文件 / mapping.csv 规则不变; zip 组与 7z 组可混处同一目录
 - **extract_command**: 零改动(7z `x` 自动识别容器格式); `.7z` 永不映射到 unzip(resolve 层强制保证)
-- **工具要求**: Linux 解 `.7z` 需 p7zip 的 `7z` 命令; spawn 失败(不在 PATH)走既有 BackendFailed 路径, 错误信息列出所需工具名. README 工具矩阵与 doctor 体现
+- **工具要求**: Linux 解 `.7z` 需 p7zip 的 `7z` 命令; 压缩/解压统一在 PATH 预定位工具, 缺失报 `ToolMissing`(与解压既有行为一致)。README 工具矩阵与 doctor 体现
+
+> 勘误(落地时): 原文写"spawn 失败(不在 PATH)走既有 BackendFailed 路径"——实现时改为与解压对齐的 `ensure_tool_available` 预检, 两条路径的错误语义统一为 `ToolMissing`。
 
 ## 5. CLI
 

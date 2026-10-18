@@ -15,8 +15,8 @@
 
 ### 非目标
 
-- 不自带压缩实现, 只封装外部命令 (Linux: `zip`, Windows: `7z`), 输出统一为 zip 格式
-- 不做断点续压 / 并行压缩 / 压缩级别透传 (见第 11 节)
+- 不自带压缩实现, 只封装外部命令 (Linux: `zip`/`7z`, Windows: `7z`); 输出格式支持 zip 与 7z (LZMA2), 见 _docs/compress-modes.md
+- 不做断点续压 / 并行压缩 (见第 11 节)
 - 不提供文件名加密 (zip 格式不加密文件名; 用随机包名 + mapping.csv 缓解, 见 5.3)
 - 字节级压缩进度 (后端行为不统一, 见 7.2)
 
@@ -171,12 +171,13 @@ for entry in entries:                        # 顺序执行, 不并行
 
 | 平台 | 后端 | 压缩命令(在 input 内执行) |
 |---|---|---|
-| Linux | zip 3.0 | `zip -r [-s <size>] [-P <pw>] <out_abs>/<dst>.zip <name>` |
-| Windows | 7z | `7z a -tzip [-v<size>] [-p<pw>] -- <out_abs>/<dst>.zip <name>` |
+| Linux | zip 3.0 | `zip -r [-s <size>] [-P <pw>] [-<0-9>] <out_abs>/<dst>.zip <name>` |
+| Windows | 7z | `7z a -tzip [-v<size>] [-p<pw>] [-mx=<0-9>] -- <out_abs>/<dst>.zip <name>` |
+| 7z 格式 | 7z | `7z a -t7z -m0=LZMA2 [-v<size>] [-p<pw>] [-mx=<0-9>] -- <out_abs>/<dst>.7z <name>` |
 
 - `<out_abs>`: 输出目录经 `create_dir_all` + `canonicalize` 得到的绝对路径(切换工作目录后相对路径会失效, 必须绝对化)
 - `--` 仅 7z 需要(防参数注入式文件名); zip 的 `-` 开头文件名通过路径前缀 `./` 化处理
-- 不暴露压缩级别, 用后端默认
+- 压缩级别 0-9 经 `Options.level` 透传 (zip: `-<n>`; 7z: `-mx=<n>`, 0 = 仅存储); 缺省 = 后端默认。格式维度见 _docs/compress-modes.md
 
 ### 6.3 产物与主卷解析
 
@@ -184,13 +185,14 @@ for entry in entries:                        # 顺序执行, 不并行
 |---|---|---|
 | zip | `B.zip` | `B.z01, B.z02, ..., B.zip`(末卷 `.zip`) |
 | 7z | `B.zip` | `B.zip.001, B.zip.002, ...`(首卷 `.zip.001`) |
+| 7z 格式 | `B.7z` | `B.7z.001, B.7z.002, ...`(首卷 `.001`) |
 
-主卷(primary archive, 记入 Report 与 mapping.csv, 也是解压入口): 优先 `B.zip`(zip 末卷 / 不分卷), 否则 `B.zip.001`(7z 首卷). 解压侧规则见 extract 模块, 此处不展开.
+主卷(primary archive, 记入 Report 与 mapping.csv, 也是解压入口): 优先 `B.zip`/`B.7z`(zip 末卷 / 不分卷), 否则分卷首卷 `B.zip.001`/`B.7z.001`. 解压侧规则见 extract 模块, 此处不展开.
 
 ### 6.4 失败处理与半成品清理
 
 - 单条目后端命令非零退出 → 整批停止(后续条目不开始), 返回 `BackendFailed`(含程序名、退出状态、stderr 末 5 行)
-- 停止前**清理本条目的半成品**: 精确匹配 `<dst>.zip`、`<dst>.z[0-9][0-9]`、`<dst>.zip.[0-9][0-9][0-9]` 并删除. 半成品分卷被误当完整包比少一个包更危险
+- 停止前**清理本条目的半成品**: 精确匹配 `<dst>.zip`、`<dst>.z[0-9][0-9]`、`<dst>.zip.[0-9][0-9][0-9]` 并删除; 7z 格式对应 `<dst>.7z`、`<dst>.7z.[0-9][0-9][0-9]`. 半成品分卷被误当完整包比少一个包更危险
 - 已完成条目的产物与 mapping.csv 已写入的行**保留**(它们是完好的)
 - 失败条目不写入 mapping.csv
 
@@ -283,11 +285,11 @@ CLI 退出码: `0` 成功(含 cancelled 完整返回), `1` 一般错误(CoreErro
 
 ## 11. 非目标与后续改进
 
-按价值排序, 均不在本次规格内:
+按价值排序, 均不在本次规格内(已落地的划掉)。格式维度(zip/7z)与压缩级别已于 2026-10 落地, 见 _docs/compress-modes.md:
 
 1. ~~**取消杀子进程**~~: 已实现(2026-10)——取消立即中断当前条目, 产物按半成品清理; 关闭窗口时外壳置取消并等收尾, 孤儿进程不再残留
 2. **manifest 校验**: 输出 `manifest.txt`(每包的大小 + SHA-256), 搬运后校验完整性 —— 与本工具场景高度契合, 建议优先
-3. **--level 透传**: `-0`/store 模式对已是压缩内容的媒体盘可数倍提速
+3. ~~**--level 透传**~~: 已实现(2026-10)——`Options.level` 0-9(zip `-<n>` / 7z `-mx=<n>`, 0=store), CLI `--level` / UI「强度」均可调
 4. **空间预检**: 输出盘剩余空间 < total_bytes 时提前失败(需 fs4 之类的依赖获取剩余空间, 与零依赖取向冲突, 故列为后续)
 5. **字节级进度**: 7z 可解析 `-bsp1` 输出, zip 无机器可读进度, 两后端不统一, 暂不做
 6. **--dry-run**: 扫描+命名后打印预览表(核心已具备能力, 属 CLI 外壳功能)

@@ -110,6 +110,8 @@ struct ScanResult { mode: String, items: Vec<ScanItem>, warnings: Vec<String>, t
 
 结果(扩展现有): `CompressResult { cancelled, entries: [{archive, original}], warnings }`; `ExtractResult { cancelled, groups: [{entry, original, files}], warnings }`.
 
+压缩选项 DTO(已实现)另含 `format: Option<String>`("zip"|"7z", 缺省 zip)与 `level: Option<u8>`(0-9, 缺省不传级别) —— 壳层 `to_core_options` 统一校验并映射到 core `Options`; UI 侧仅以预设/高级微调呈现, 见 _docs/compress-modes.md.
+
 ## 5. 交互流程与时序
 
 ### 5.1 时序
@@ -243,8 +245,12 @@ meta / warning 行:      恒定不变
 | 压缩 | 分包大小(text, placeholder "不分包") | 空 = 不分包 | 确认时 `parse_size`, 失败提示并聚焦 |
 | 压缩 | 密码(password) | 空 = 不加密 | 空串按 None; 不持久化 |
 | 压缩 | 随机包名(checkbox) | 关 | 与 CLI `--random-name` 默认关闭一致 |
+| 压缩 | 模式预设(buttons, 已实现) | 最大兼容性 | zip+强度9 / 平衡=7z+强度5; 手改底层参数变"自定义"(见 compress-modes.md) |
+| 压缩 | 高级(checkbox, 已实现) | 关 | 展开格式(zip/7z)与强度(0-9)微调; 模式预设隐藏 |
 | 解压 | 密码(password) | 空 = 不加密 | 整批一个密码, 与 compress 对称 |
 | 解压 | 覆盖已有文件(checkbox) | 关 | 宁停不错, 与 CLI `--force` 默认一致 |
+
+压缩模式下密码非空时, 选项行按格式提示加密语义(zip → ZipCrypto 弱加密 / 7z → AES-256), 帮助用户理解两种格式的安全差异.
 
 随机名开启时目标产物为 `zt_xxxxxxxxxxxxxxxx.zip` + mapping.csv, UI 在选项行以说明文字提示一句, 避免用户在输出目录找不到原名.
 
@@ -293,7 +299,7 @@ meta / warning 行:      恒定不变
 
 1. **扫描可取消**: scan_dir 加取消点(栈式遍历每轮回查), 大目录扫描期间允许反悔
 2. ~~**取消杀子进程 / 关窗收尾**~~: 已实现(2026-10)——取消立即 kill 后端进程, 关窗时 `ExitRequested` 置取消并等待收尾
-3. **doctor 自检入 UI**: 启动时调 `doctor` 检查后端工具, 缺 7z 提前预警(核心已有 check_backend_tool, 只差暴露与展示)
+3. **doctor 自检入 UI**: 启动时调 `doctor` 检查平台工具, 缺 7z 提前预警(核心已有 check_platform_tools, 只差暴露与展示)
 4. **打开输出目录**: 完成后一键 reveal 产物(含 mapping.csv 提示)
 5. **dry-run 模式**: scan + plan 后即可渲染"预计包名 / 分卷数"预览表 —— 第 6 节分阶段 API 的直接受益者(与 compress.md 11.6 合流)
 6. **内容级选择性解压**: 解包内部分文件(extract.md 12.5, 组级选择已具备基础设施)

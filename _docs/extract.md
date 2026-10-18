@@ -49,14 +49,19 @@ dest: 还原后的原始条目布局 + ExtractReport { groups }
 
 ## 3. 包形态与布局还原
 
-### 3.1 四种包形态(compress 端保证的契约)
+### 3.1 包形态(compress 端保证的契约)
 
 | 包形态 | 产物(基础名 B) | 入口卷 | 解压端 |
 |---|---|---|---|
-| 整包 | `B.zip` | `B.zip` 自身 | 平台默认: Linux unzip / Windows 7z |
+| zip 整包 | `B.zip` | `B.zip` 自身 | 平台默认: Linux unzip / Windows 7z |
 | zip -s 分卷 | `B.z01 ... B.zip` | **末卷 B.zip** | unzip 直接读全组; Windows 7z 待实机验证 |
-| 7z -v 分卷 | `B.zip.001 ...` | **首卷 B.zip.001** | 仅 7z 系(unzip 不认识这种分卷) |
+| zip 经 7z -v 分卷 | `B.zip.001 ...` | **首卷 B.zip.001** | 仅 7z 系(unzip 不认识这种分卷) |
+
+| 7z 整包 | `B.7z` | `B.7z` 自身 | 仅 7z 系 |
+| 7z -v 分卷 | `B.7z.001 ...` | **首卷 B.7z.001** | 仅 7z 系 |
 | mapping.csv | 随机命名时的附带产物 | 不是包 | 不参与解压, 批量模式下作元数据(7.3) |
+
+7z 格式(整包与分卷)见 _docs/compress-modes.md.
 
 入口卷(entry volume): 后端工具从它开始就能找到整组其余分卷的卷. 两种分卷方案的入口卷方向相反(zip -s 是末卷, 7z -v 是首卷), 这是识别逻辑必须显式处理的核心事实.
 
@@ -75,9 +80,10 @@ dest: 还原后的原始条目布局 + ExtractReport { groups }
 | 输入扩展名 | 判定 | 动作 |
 |---|---|---|
 | `.zip` | 整包或 zip -s 末卷 | 入口卷即自身, 后端 = 平台默认 |
-| `.001` | 7z -v 首卷 | 入口卷即自身, 后端 = **强制 7z**(Linux 也要找 7z) |
+| `.7z` | 7z 格式整包 | 入口卷即自身, 后端 = **强制 7z**(Linux 也要找 7z) |
+| `.001` | 7z -v 首卷(`.zip.001` / `.7z.001`) | 入口卷即自身, 后端 = **强制 7z**(Linux 也要找 7z) |
 | `.zNN`(z+数字, 如 `.z01`) | zip -s 非末卷 | 同目录找 `{stem}.zip`: 有 → 归一化为它; 无 → `EntryVolumeMissing` |
-| `.zip.NNN`(NNN>001) | 7z -v 非首卷 | 同目录找 `{stem}.001`(stem 已含 `.zip`): 有 → 归一化; 无 → `EntryVolumeMissing` |
+| `.NNN`(NNN>001, 即 `.zip.002` / `.7z.002`) | 7z -v 非首卷 | 同目录找 `{stem}.001`(stem 已含 `.zip` 或 `.7z`): 有 → 归一化; 无 → `EntryVolumeMissing` |
 | 其他 / 无扩展名 | 非本工具契约格式 | `UnsupportedArchive`(明确报错, 不盲目丢给后端) |
 
 `Path::file_stem` 的行为正好配合: `B.z01` 的 stem 是 `B` → 找 `B.zip`; `B.zip.002` 的 stem 是 `B.zip` → 找 `B.zip.001`, 两条规则统一为"stem + 固定后缀".
@@ -192,13 +198,14 @@ restore 根: 还原的整棵输入树 + ExtractReport { groups, warnings, cancel
 | 文件 | 分类 |
 |---|---|
 | `X.zip` | zip 组入口卷(整包或 zip -s 末卷) |
-| `X.zip.001` | 7z 组入口卷 |
+| `X.zip.001` / `X.7z.001` | 7z 组入口卷 |
+| `X.7z` | 7z 格式整包, 独立组(后端强制 7z) |
 | `X.zNN` | 成员卷: `X.zip` 存在 → 静默忽略; 不存在 → 孤儿卷, 记入 warnings, 该组跳过 |
-| `X.zip.NNN`(NNN>001) | 成员卷: `X.zip.001` 存在 → 静默忽略; 不存在 → 孤儿卷, 同上 |
+| `X.zip.NNN` / `X.7z.NNN`(NNN>001) | 成员卷: 对应 `.001` 存在 → 静默忽略; 不存在 → 孤儿卷, 同上 |
 | `mapping.csv` | 元数据: 读出 `archive,original` 行序与对应关系(见下) |
 | 其他文件 | 非包, 记入 warnings(输入目录混杂的提示), 不中断 |
 
-- 一个目录里同时有 `X.zip` 与 `X.zip.001` 是两个独立组(入口卷不同), 各自解压; 内容若相撞会由 B2 的冲突检测拦住
+- 一个目录里同时有 `X.zip` 与 `X.zip.001`(或 `X.7z` 与 `X.7z.001`)是两个独立组(入口卷不同), 各自解压; 内容若相撞会由 B2 的冲突检测拦住
 - **排序**: 有 mapping.csv 按 mapping 行序(= compress 时的原条目顺序, 与压缩顺序一致), 无 mapping.csv 按入口卷名排序 —— 进度与报告顺序稳定可复现
 - 一个组都没有 → `NoArchives`(用户多半指错了目录)
 
