@@ -73,6 +73,85 @@ pub fn validate_patterns(patterns: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// 单段通配匹配:`*` 任意串、`?` 单字符(都不跨 `/`),其余字面。
+/// 两指针 + `*` 回溯(经典 glob 单段算法)。
+fn match_seg(pat: &[u8], text: &[u8]) -> bool {
+    let (mut p, mut t) = (0usize, 0usize);
+    let mut star = usize::MAX; // 最近一个 '*' 的位置
+    let mut mark = 0usize; // 回溯时 text 的推进点
+    while t < text.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = p;
+            mark = t;
+            p += 1;
+        } else if star != usize::MAX {
+            p = star + 1;
+            mark += 1;
+            t = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// 统一模式匹配相对路径(分隔符 `/`,输入侧 `\` 容忍归一):
+/// - 不含 `/`:与末段(basename)比 → 任意深度
+/// - 含 `/`:整条锚定,逐段比较(`*`/`?` 不跨段);`prefix/**` = prefix 自身或其下
+pub fn matches_pattern(pattern: &str, rel: &str) -> bool {
+    let pat = pattern.replace('\\', "/");
+    let rel = rel.replace('\\', "/");
+    if !pat.contains('/') {
+        return rel
+            .rsplit('/')
+            .next()
+            .is_some_and(|base| match_seg(pat.as_bytes(), base.as_bytes()));
+    }
+    if let Some(prefix) = pat.strip_suffix("/**") {
+        let pfx = prefix.trim_end_matches('/');
+        return rel == pfx
+            || (rel.len() > pfx.len()
+                && rel.starts_with(pfx)
+                && rel.as_bytes()[pfx.len()] == b'/');
+    }
+    let pv: Vec<&str> = pat.split('/').collect();
+    let rv: Vec<&str> = rel.split('/').collect();
+    pv.len() == rv.len() && pv.iter().zip(&rv).all(|(p, r)| match_seg(p.as_bytes(), r.as_bytes()))
+}
+
+/// 命中任一模式即排除, 返回首个命中的模式(供 `ExcludeReason::Pattern`)
+pub fn matches_patterns(patterns: &[String], rel: &str) -> Option<String> {
+    patterns.iter().find(|p| matches_pattern(p, rel)).cloned()
+}
+
+/// 内建隐藏判定(名字口径):仅 Unix 原生约定(`.` 前缀);
+/// Windows 无名字口径(`.` 开头可能是用户自命名), 恒 false, 走属性判定
+pub fn is_hidden_name(name: &str) -> bool {
+    !cfg!(windows) && name.starts_with('.')
+}
+
+/// Windows 文件系统隐藏属性(stable std API: `MetadataExt::file_attributes`);
+/// 非 Windows 恒 false
+pub fn is_hidden_attr(md: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        md.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = md;
+        false
+    }
+}
+
 #[cfg(test)]
 mod validate_tests {
     use super::*;
@@ -102,5 +181,69 @@ mod validate_tests {
         bad(&["a**b"]);        // ** 不在结尾
         // 反斜杠只做归一, 不是非法来源
         ok(&[r"a\b", r"a\b\**"]);
+    }
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::*;
+
+    #[test]
+    fn basename_pattern_matches_any_depth_without_crossing() {
+        // 不含 / 的模式 = 任意深度的 basename(只与末段比)
+        assert!(matches_pattern("Thumbs.db", "Thumbs.db"));
+        assert!(matches_pattern("Thumbs.db", "a/b/Thumbs.db"));
+        assert!(!matches_pattern("Thumbs.db", "a/b/Thumbs"));
+        assert!(matches_pattern("*.log", "a.log"));
+        assert!(matches_pattern("*.log", "sub/b.log"));
+        assert!(matches_pattern("*.log", "sub/deep/c.log"));
+        assert!(!matches_pattern("*.log", "a.log2"));
+        // ? 单字符
+        assert!(matches_pattern("a?c", "abc"));
+        assert!(!matches_pattern("a?c", "ac"));
+        assert!(!matches_pattern("a?c", "abbc"));
+        // 大小写敏感
+        assert!(!matches_pattern("Thumbs.db", "thumbs.db"));
+    }
+
+    #[test]
+    fn anchored_pattern_matches_path_from_entry_root() {
+        // 含 / 的模式 = 从条目根锚定的整条相对路径
+        assert!(matches_pattern("sub/*.log", "sub/a.log"));
+        assert!(!matches_pattern("sub/*.log", "sub/x/y.log"), "* 不跨 /");
+        assert!(!matches_pattern("sub/a.log", "other/sub/a.log"), "锚定不任意深度");
+        assert!(!matches_pattern("sub/a.log", "sub/a.log2"));
+        // prefix/** = prefix 自身或其下
+        assert!(matches_pattern("node_modules/**", "node_modules"));
+        assert!(matches_pattern("node_modules/**", "node_modules/a/b.js"));
+        assert!(!matches_pattern("node_modules/**", "node_modulesx"));
+        assert!(!matches_pattern("node_modules/**", "a/node_modules/b"));
+        // 输入侧容忍反斜杠(归一为 /)
+        assert!(matches_pattern("sub\\a.log", "sub/a.log"));
+        assert!(matches_pattern("sub/*.log", "sub\\a.log"));
+    }
+
+    #[test]
+    fn matches_patterns_returns_first_hit() {
+        let pats: Vec<String> = vec!["*.tmp".into(), "cache".into()];
+        assert_eq!(matches_patterns(&pats, "x/y/tmp.tmp"), Some("*.tmp".into()));
+        assert_eq!(matches_patterns(&pats, "cache"), Some("cache".into()));
+        assert_eq!(matches_patterns(&pats, "keep.txt"), None);
+        assert_eq!(matches_patterns(&[], "anything"), None);
+    }
+
+    #[test]
+    fn hidden_name_uses_unix_convention_only() {
+        if cfg!(windows) {
+            // Windows 无名字口径: . 开头不算隐藏(可能是用户自命名)
+            assert!(!is_hidden_name(".DS_Store"));
+            assert!(!is_hidden_name(".git"));
+        } else {
+            assert!(is_hidden_name(".DS_Store"));
+            assert!(is_hidden_name(".."));
+            assert!(is_hidden_name(".git"));
+            assert!(!is_hidden_name("git"));
+            assert!(!is_hidden_name("a.txt"));
+        }
     }
 }
