@@ -18,7 +18,8 @@ use tauri::State;
 use tauri::ipc::Channel;
 
 use zip_tool_core::{
-    CancelFlag, Entry, EntryKind, ExtractGroup, ExtractScan, Options, Phase, Progress, ScanReport,
+    CancelFlag, Entry, EntryKind, ExtractGroup, ExtractScan, Format, Options, Phase, Progress,
+    ScanReport,
 };
 
 const POISONED: &str = "state poisoned";
@@ -109,6 +110,10 @@ struct CompressOptions {
     /// 空串按 None(不加密)
     password: Option<String>,
     random_name: bool,
+    /// "zip" | "7z"; None = zip(最大兼容)
+    format: Option<String>,
+    /// 0-9; None = 后端默认
+    level: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +182,32 @@ fn finish_job(state: &AppState) {
 /// 空串(或纯空白)按 None 处理
 fn non_empty(p: Option<String>) -> Option<String> {
     p.filter(|s| !s.trim().is_empty())
+}
+
+/// UI DTO → core Options;format/level 的取值校验在这里(宁停不错)
+fn to_core_options(o: CompressOptions) -> Result<Options, String> {
+    let format = match o.format.as_deref() {
+        None | Some("zip") => Format::Zip,
+        Some("7z") => Format::SevenZ,
+        Some(other) => return Err(format!("未知压缩格式: {other}")),
+    };
+    let level = match o.level {
+        None => None,
+        Some(n) if n <= 9 => Some(n),
+        Some(n) => return Err(format!("压缩级别超出 0-9: {n}")),
+    };
+    let split_size = match o.split_size.as_deref().map(zip_tool_core::parse_size) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(e)) => return Err(e),
+        None => None,
+    };
+    Ok(Options {
+        split_size,
+        password: non_empty(o.password),
+        random_name: o.random_name,
+        format,
+        level,
+    })
 }
 
 fn kind_str(k: EntryKind) -> &'static str {
@@ -371,18 +402,7 @@ async fn compress(
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
 ) -> Result<CompressResult, String> {
-    let split_size = match options.split_size.as_deref().map(zip_tool_core::parse_size) {
-        Some(Ok(v)) => Some(v),
-        Some(Err(e)) => return Err(e),
-        None => None,
-    };
-    let opts = Options {
-        split_size,
-        password: non_empty(options.password),
-        random_name: options.random_name,
-        format: zip_tool_core::Format::Zip,
-        level: None,
-    };
+    let opts = to_core_options(options)?;
 
     acquire_busy(&state.busy, "compress")?;
     // ScanContext 校验与筛选(纯内存; 锁在 await 前释放)
@@ -572,7 +592,7 @@ mod tests {
             kind,
             size,
             dst: String::new(),
-            format: "zip".into(),
+            format: String::new(),
         }
     }
 
@@ -773,5 +793,35 @@ mod tests {
             *b.lock().unwrap() = None;
         });
         assert!(wait_until_idle(&busy, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn to_core_options_maps_format_and_level() {
+        let base = || CompressOptions {
+            split_size: None,
+            password: None,
+            random_name: false,
+            format: None,
+            level: None,
+        };
+        let mut o = base();
+        o.format = Some("7z".into());
+        o.level = Some(5);
+        let core = to_core_options(o).unwrap();
+        assert_eq!(core.format, zip_tool_core::Format::SevenZ);
+        assert_eq!(core.level, Some(5));
+
+        // 缺省 = zip + 后端默认级别
+        let core = to_core_options(base()).unwrap();
+        assert_eq!(core.format, zip_tool_core::Format::Zip);
+        assert!(core.level.is_none());
+
+        // 非法值拒绝
+        let mut o = base();
+        o.format = Some("rar".into());
+        assert!(to_core_options(o).is_err());
+        let mut o = base();
+        o.level = Some(10);
+        assert!(to_core_options(o).is_err());
     }
 }
