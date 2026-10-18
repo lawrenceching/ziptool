@@ -136,7 +136,7 @@ fn assert_file_eq(a: &Path, b: &Path) {
     assert!(da == db, "{} 与 {} 内容不一致", a.display(), b.display());
 }
 
-/// .7z 系(.7z / .7z.001)交系统 7z;zip 系按平台(zip -s 分卷 Linux 走合并流程)
+/// .7z 系(.7z / .7z.001)
 fn is_7z_archive(archive: &Path) -> bool {
     let name = archive
         .file_name()
@@ -146,13 +146,26 @@ fn is_7z_archive(archive: &Path) -> bool {
     name.ends_with(".7z") || name.ends_with(".7z.001")
 }
 
+/// 是否交系统 7z 解压: Windows 一律 7z(.zip 与 .zip.001 都能直接解); .7z 系
+/// 两平台都交 7z(unzip 不认识 7z); unix 的 zip -s 分卷组(有 .z01 兄弟卷)也必须
+/// 交 7z —— unzip 不支持分卷包, 且实测 Ubuntu 24.04 的 zip 3.0 上 `zip -s 0`
+/// 合并 / `zip -FF` / cat 拼接均产出坏包(中央目录偏移按盘相对), 仅 7z 直读正确。
+fn use_7z(archive: &Path) -> bool {
+    if cfg!(windows) || is_7z_archive(archive) {
+        return true;
+    }
+    let stem = archive
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    archive.with_file_name(format!("{stem}.z01")).exists()
+}
+
 /// 用系统工具解压(本测试的核心约束: 不使用本工具)。
-/// Windows: 7z, .zip 与 .zip.001 分卷首卷都能直接解。
-/// Linux: unzip;zip -s 的分卷按官方流程先 `zip -s 0` 合并为整包再解;
-/// 7z 格式的包(.7z 系)两平台都走 7z(unzip 不认识 7z)。
+/// 7z 系(`use_7z`)走 7z; 其余(unix 的 .zip 整包)走 unzip。
 fn extract_archive(archive: &Path, dest: &Path, password: Option<&str>) {
     fs::create_dir_all(dest).unwrap();
-    if cfg!(windows) || is_7z_archive(archive) {
+    if use_7z(archive) {
         let mut cmd = Command::new("7z");
         cmd.arg("x").arg("-y");
         if let Some(pw) = password {
@@ -168,43 +181,17 @@ fn extract_archive(archive: &Path, dest: &Path, password: Option<&str>) {
             String::from_utf8_lossy(&out.stderr)
         );
     } else {
-        let stem = archive.file_stem().unwrap().to_string_lossy().into_owned();
-        let z01 = archive.with_file_name(format!("{stem}.z01"));
-        let effective: PathBuf = if z01.exists() {
-            let merged = archive
-                .parent()
-                .unwrap()
-                .join(format!("{stem}.unsplit.zip"));
-            let out = Command::new("zip")
-                .arg("-s")
-                .arg("0")
-                .arg(archive)
-                .arg("--out")
-                .arg(&merged)
-                .stdin(Stdio::null())
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "zip -s 0 合并 {} 失败:\n{}",
-                archive.display(),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            merged
-        } else {
-            archive.to_path_buf()
-        };
         let mut cmd = Command::new("unzip");
         cmd.arg("-o");
         if let Some(pw) = password {
             cmd.arg("-P").arg(pw);
         }
-        cmd.arg(&effective).arg("-d").arg(dest);
+        cmd.arg(archive).arg("-d").arg(dest);
         let out = cmd.stdin(Stdio::null()).output().unwrap();
         assert!(
             out.status.success(),
             "unzip 解压 {} 失败:\n{}",
-            effective.display(),
+            archive.display(),
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -213,7 +200,7 @@ fn extract_archive(archive: &Path, dest: &Path, password: Option<&str>) {
 /// 断言错误密码无法解压(加密确实生效)
 fn extract_with_wrong_password_must_fail(archive: &Path, dest: &Path) {
     fs::create_dir_all(dest).unwrap();
-    let out = if cfg!(windows) || is_7z_archive(archive) {
+    let out = if use_7z(archive) {
         Command::new("7z")
             .arg("x")
             .arg("-y")

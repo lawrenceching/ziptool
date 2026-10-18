@@ -1,5 +1,6 @@
 //! 解压:支持单个 .zip,以及两种原生分卷
-//! - `B.z01 ... B.zip`(zip -s,末卷 .zip)→ 交给平台后端(unzip/7z)
+//! - `B.z01 ... B.zip`(zip -s,末卷 .zip)→ 只能 7z 系工具解
+//!   (unzip 不支持分卷包; 实测各合并方案均产出坏包, 见 `zip_entry_backend`)
 //! - `B.zip.001 ...`(7z -v,首卷 .001)→ 只能 7z 系工具解
 //!
 //! 目标规格见 _docs/extract.md(识别 → 预检 → 解压 三步 + 批量编排层):
@@ -10,8 +11,21 @@ use std::path::{Path, PathBuf};
 
 use crate::CancelFlag;
 use crate::Result;
-use crate::backend::{ArchiveListing, Backend, ExtractBackend};
+use crate::backend::{ArchiveListing, Backend, ExtractBackend, split_first_volume};
 use crate::progress::{Phase, Progress};
+
+/// .zip 入口卷的后端选择: 同目录存在 .z01 兄弟卷 = zip -s 分卷组 → 强制
+/// SevenZip。unzip 不支持分卷包(unzip 6.0 自述 "true multi-part support
+/// doesn't exist yet"), 且实测 Ubuntu 24.04 的 zip 3.0 上 `zip -s 0` 合并 /
+/// `zip -FF` / cat 拼接都产出坏包(中央目录偏移按盘相对), 只有 7z 能直读
+/// 分卷组(有/无密码均字节一致); 整包 → 平台默认后端(unzip / 7z)。
+fn zip_entry_backend(entry: &Path) -> Backend {
+    if split_first_volume(entry).is_some() {
+        Backend::SevenZip
+    } else {
+        Backend::native()
+    }
+}
 
 /// 解压入口(见 _docs/extract.md): input 为文件(单包)或目录(批量, 第 7 节)。
 /// dest 会被创建; 默认拒绝覆盖已有文件, force = true 才覆盖(对应 CLI --force)。
@@ -130,10 +144,10 @@ pub(crate) fn resolve_archive(input: &Path) -> Result<ResolvedArchive> {
     let dir = input.parent().unwrap_or(Path::new(""));
     let vol = |name: &str| dir.join(name);
     match ext.as_str() {
-        // 整包或 zip -s 末卷: 入口卷即自身
+        // 整包或 zip -s 末卷: 入口卷即自身; 有 .z01 兄弟卷的分卷组强制 7z 系
         "zip" => Ok(ResolvedArchive {
             path: input.to_path_buf(),
-            backend: Backend::native(),
+            backend: zip_entry_backend(input),
         }),
         // 7z 格式整包:只有 7z 系工具能解, 强制 SevenZip 后端
         "7z" => Ok(ResolvedArchive {
@@ -499,7 +513,7 @@ pub fn scan_groups(input: &Path) -> Result<ExtractScan> {
     let mut groups: Vec<ExtractGroup> = Vec::new();
     for name in zip_entries.iter().chain(&sev_entries) {
         let backend = if name.to_lowercase().ends_with(".zip") {
-            Backend::native()
+            zip_entry_backend(&input.join(name))
         } else {
             Backend::SevenZip
         };
@@ -1246,7 +1260,29 @@ mod resolve_tests {
 
         let r = resolve_archive(&d.join("B.z01")).unwrap();
         assert_eq!(r.path, d.join("B.zip"));
-        assert_eq!(r.backend, Backend::native());
+        // 入口卷旁有 .z01 = zip -s 分卷组 → 只能 7z 系解(见 zip_entry_backend)
+        assert_eq!(r.backend, Backend::SevenZip);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn zip_with_z01_sibling_routes_to_sevenzip_even_on_zip_platform() {
+        // .zip 单看扩展名是平台默认后端, 但旁有 .z01 兄弟卷即 zip -s 分卷组,
+        // 两平台都强制 SevenZip(unzip 读不了分卷组)
+        let d = unique_temp("res-zip-split");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("B.zip"), b"").unwrap();
+        assert_eq!(
+            resolve_archive(&d.join("B.zip")).unwrap().backend,
+            Backend::native(),
+            "无 .z01 兄弟卷 = 整包 → 平台默认"
+        );
+        fs::write(d.join("B.z01"), b"").unwrap();
+        assert_eq!(
+            resolve_archive(&d.join("B.zip")).unwrap().backend,
+            Backend::SevenZip,
+            "有 .z01 兄弟卷 = 分卷组 → 强制 SevenZip"
+        );
         fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1413,6 +1449,16 @@ mod batch_tests {
             .find(|g| g.resolved.path.ends_with("media.zip.001"))
             .unwrap();
         assert_eq!(media.resolved.backend, Backend::SevenZip);
+        let big = scan
+            .groups
+            .iter()
+            .find(|g| g.resolved.path.ends_with("big.zip"))
+            .unwrap();
+        assert_eq!(
+            big.resolved.backend,
+            Backend::SevenZip,
+            "big 旁有 .z01 成员卷 = zip -s 分卷组 → 强制 SevenZip"
+        );
         let novel = scan
             .groups
             .iter()

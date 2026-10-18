@@ -101,7 +101,9 @@ impl Backend {
                             text = String::from_utf8_lossy(&out).into_owned();
                         }
                         return Err(CoreError::BackendFailed {
-                            program: self.program().into(),
+                            // 按 cmd 里实际程序归因(extract 路径复用本函数跑 unzip,
+                            // 不能用 self.program(), 那是压缩端程序名)
+                            program: cmd.get_program().to_string_lossy().into_owned(),
                             status: status.to_string(),
                             output: last_lines(&text, 5),
                         });
@@ -188,7 +190,9 @@ impl Backend {
         Ok(cmd)
     }
 
-    /// 构造解压命令。archive 可以是 .zip、zip -s 的末卷 .zip,或 7z -v 的首卷 .zip.001。
+    /// 构造解压命令。archive 传整包(普通 .zip)或分卷入口卷(7z 系自身支持分卷:
+    /// 7z -v 的 .zip.001, 以及 zip -s 的末卷 .zip); zip 后端只接整包,
+    /// zip -s 分卷组在 resolve 层已路由为 SevenZip(见 extract.rs `zip_entry_backend`)。
     pub fn extract_command(&self, archive: &Path, dest: &Path, password: Option<&str>) -> Command {
         let mut cmd = match self {
             // 解压端程序与压缩端不同:zip -> unzip
@@ -197,7 +201,6 @@ impl Backend {
         };
         match self {
             Backend::Zip => {
-                // zip -s 的末卷就是 .zip,unzip 直接读整组分卷
                 cmd.arg("-o");
                 if let Some(pw) = password {
                     cmd.arg("-P").arg(pw);
@@ -307,6 +310,15 @@ impl ExtractBackend for RealExtract {
         let mut cmd = kind.extract_command(entry, dest, password);
         kind.run(&mut cmd, cancel)
     }
+}
+
+/// zip -s 分卷组的兄弟首卷(入口卷 {stem}.zip 同目录下的 {stem}.z01): 存在即认定
+/// 该入口卷是 zip -s 的末卷。分卷组的解压必须走 7z 系(见 extract.rs
+/// `zip_entry_backend` 的路由说明), 本函数只做识别, 供 resolve 层选后端。
+pub(crate) fn split_first_volume(entry: &Path) -> Option<PathBuf> {
+    let stem = entry.file_stem()?.to_string_lossy().into_owned();
+    let z01 = entry.with_file_name(format!("{stem}.z01"));
+    z01.is_file().then_some(z01)
 }
 
 /// 在 PATH 里定位压缩/解压程序, 缺失报 ToolMissing(而不是 spawn 失败的 os error 2)
@@ -438,6 +450,36 @@ mod run_tests {
         let flag = CancelFlag::new();
         let mut cmd = exit_ok();
         Backend::native().run(&mut cmd, &flag).unwrap();
+    }
+
+    #[test]
+    fn failure_attribution_uses_actual_command_program() {
+        // extract 路径复用 Backend::run 跑 unzip 等非压缩端程序,
+        // 错误归因必须跟 cmd 走而不是 Backend 枚举(曾误报成 "zip")
+        let flag = CancelFlag::new();
+        let mut cmd = echo_boom_exit_2();
+        let err = Backend::Zip.run(&mut cmd, &flag).unwrap_err();
+        match err {
+            CoreError::BackendFailed { program, .. } => {
+                let want = if cfg!(windows) { "cmd" } else { "sh" };
+                assert_eq!(program, want, "应按 cmd 实际程序归因");
+            }
+            other => panic!("应为 BackendFailed, 实际: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_detection_by_z01_sibling() {
+        let root = std::env::temp_dir().join(format!("zt-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let zip = root.join("B.zip");
+        std::fs::write(&zip, b"x").unwrap();
+        assert!(split_first_volume(&zip).is_none(), "无 .z01 兄弟卷即整包");
+
+        std::fs::write(root.join("B.z01"), b"x").unwrap();
+        assert_eq!(split_first_volume(&zip), Some(root.join("B.z01")));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

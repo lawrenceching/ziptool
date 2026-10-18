@@ -54,7 +54,7 @@ dest: 还原后的原始条目布局 + ExtractReport { groups }
 | 包形态 | 产物(基础名 B) | 入口卷 | 解压端 |
 |---|---|---|---|
 | zip 整包 | `B.zip` | `B.zip` 自身 | 平台默认: Linux unzip / Windows 7z |
-| zip -s 分卷 | `B.z01 ... B.zip` | **末卷 B.zip** | unzip 直接读全组; Windows 7z 待实机验证 |
+| zip -s 分卷 | `B.z01 ... B.zip` | **末卷 B.zip** | 仅 7z 系(unzip 不支持分卷包; 实测 Ubuntu 24.04 zip 3.0 的 `zip -s 0` 合并 / `zip -FF` / cat 拼接均产出坏包, 7z 直读分卷组有/无密码均字节一致) |
 | zip 经 7z -v 分卷 | `B.zip.001 ...` | **首卷 B.zip.001** | 仅 7z 系(unzip 不认识这种分卷) |
 
 | 7z 整包 | `B.7z` | `B.7z` 自身 | 仅 7z 系 |
@@ -79,7 +79,7 @@ dest: 还原后的原始条目布局 + ExtractReport { groups }
 
 | 输入扩展名 | 判定 | 动作 |
 |---|---|---|
-| `.zip` | 整包或 zip -s 末卷 | 入口卷即自身, 后端 = 平台默认 |
+| `.zip` | 整包或 zip -s 末卷 | 入口卷即自身, 后端 = 平台默认; 旁有 `.z01` 兄弟卷(= zip -s 分卷组)则**强制 7z**(unzip 读不了分卷组, 见 3.1) |
 | `.7z` | 7z 格式整包 | 入口卷即自身, 后端 = **强制 7z**(Linux 也要找 7z) |
 | `.001` | 7z -v 首卷(`.zip.001` / `.7z.001`) | 入口卷即自身, 后端 = **强制 7z**(Linux 也要找 7z) |
 | `.zNN`(z+数字, 如 `.z01`) | zip -s 非末卷 | 同目录找 `{stem}.zip`: 有 → 归一化为它; 无 → `EntryVolumeMissing` |
@@ -149,9 +149,9 @@ pub(crate) struct ResolvedArchive {
 
 与现状 `extract_command` 一致; 覆盖开关恒传(冲突已由 Step 2 拦截, 见 5.3), 密码 argv 传递的威胁模型同 compress.md 6.5, 不重复展开.
 
-- unzip 解 `B.zip` 时自动读取同目录的 `B.z01...`(缺卷 → 后端失败, 原因透出)
-- 7z 解 `B.zip.001` 时自动找 `.002...`(同上)
-- 两个后端都只认识自己那套分卷方案, 这就是 Step 1 按形态路由后端的原因
+- unzip 解 `B.zip` 整包(不认识任何分卷形态)
+- 7z 解 `B.zip.001` 时自动找 `.002...`; 解 zip -s 组的末卷 `B.zip` 时自动读 `.z01...` 同伴(缺卷 → 后端失败, 原因透出)
+- 分卷解压只认 7z 一家(实测 unzip 及 zip 自带的合并/修复命令都不可用), 这就是 Step 1 按形态路由后端的原因
 
 ### 6.3 失败处理与半成品清理
 
@@ -297,7 +297,7 @@ CLI 退出码沿用: `0` 成功(含 cancelled 完整返回), `1` 一般错误(Co
 - **集成测试(真实后端, 本机 NanaZip)**: round-trip(压 → 删源 → 用 zip-tool 解 → 逐字节比对)、`.zip.001` 分卷 round-trip、错误密码被拒、`.z01` / `.zip.002` 入口归一化、冲突默认拒绝与 `--force` 覆盖、半成品清理、手工构造的 zip-slip 包被拒; 批量: compress 随机名 + 分包的输出目录整体还原、孤儿卷 warning
 - **实机验证 / 回归清单(发布前人工)**
   - Windows `7z x` 解 zip -s 组(`B.zip` + `.z01` 同伴) —— 跨平台搬运的关键场景(Linux 压的包在 Windows 解), 7z 对 Info-ZIP 分卷的支持未验证
-  - Linux: `unzip -Z1` 清单输出、unzip 解 zip -s 分卷、unzip 对 `.zip.001` 报错(验证路由)、退出码 82(密码错)
+  - Linux: `unzip -Z1` 清单输出、zip -s 分卷由 7z 直读(`7z x B.zip` 识别 `.z01` 同伴)、unzip 对 `.zip.001` 报错(验证路由)、退出码 82(密码错)
 - **E2E(test crate)**: 现有 E2E 用系统工具解压是 compress 正确性的基准, 保持不动; 另加"用 zip-tool extract 批量解压自己压缩的输出目录"的对称用例, 闭环验证解压端
 
 ## 11. 与当前实现的差异汇总(演进清单)
