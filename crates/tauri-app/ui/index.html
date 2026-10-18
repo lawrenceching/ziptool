@@ -76,10 +76,58 @@
           placeholder="留空不加密"
         />
       </span>
+      <span id="pw-hint" class="hidden text-amber-600"></span>
       <label id="opt-random-wrap" class="flex items-center gap-1.5 cursor-pointer">
         <input id="opt-random" type="checkbox" class="accent-blue-600 align-middle" />
         随机包名
       </label>
+      <span id="opt-preset-wrap" class="hidden items-center gap-1.5">
+        <label class="shrink-0">模式</label>
+        <span class="flex rounded-md border border-slate-300 overflow-hidden">
+          <button
+            type="button"
+            id="preset-compat"
+            title="zip 格式 + 最大压缩强度; 所有系统都能打开"
+            class="px-2 py-1 bg-blue-600 text-white"
+          >
+            最大兼容性
+          </button>
+          <button
+            type="button"
+            id="preset-balanced"
+            title="7z 格式(LZMA2), 压缩率更高; 需 7z 系工具解压"
+            class="px-2 py-1 bg-white text-slate-600 border-l border-slate-300"
+          >
+            平衡
+          </button>
+        </span>
+        <span id="opt-preset-custom" class="hidden text-slate-400">自定义</span>
+      </span>
+      <label id="opt-advanced-wrap" class="hidden items-center gap-1.5 cursor-pointer">
+        <input id="opt-advanced" type="checkbox" class="accent-blue-600 align-middle" />
+        高级
+      </label>
+      <span id="opt-format-wrap" class="hidden items-center gap-1.5">
+        <label for="opt-format" class="shrink-0">格式</label>
+        <select
+          id="opt-format"
+          class="px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
+        >
+          <option value="zip">zip</option>
+          <option value="7z">7z</option>
+        </select>
+      </span>
+      <span id="opt-level-wrap" class="hidden items-center gap-1.5">
+        <label for="opt-level" class="shrink-0">强度</label>
+        <input
+          id="opt-level"
+          type="number"
+          min="0"
+          max="9"
+          value="9"
+          class="w-14 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
+        />
+      </span>
       <label id="opt-force-wrap" class="hidden items-center gap-1.5 cursor-pointer">
         <input id="opt-force" type="checkbox" class="accent-blue-600 align-middle" />
         覆盖已有文件

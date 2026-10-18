@@ -181,7 +181,13 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
   const comp = h.calls.find((c) => c.cmd === "compress");
   assert.ok(comp, "应调用 compress 命令");
   jsonEq(comp.args.entries, ["Novel", "photo.jpg"]);
-  jsonEq(comp.args.options, { splitSize: "2g", password: "pw", randomName: true });
+  jsonEq(comp.args.options, {
+    splitSize: "2g",
+    password: "pw",
+    randomName: true,
+    format: "zip",
+    level: 9,
+  });
   assert.equal(comp.args.src, "C:\\demo\\data");
   assert.equal(comp.args.dst, "C:\\out");
 
@@ -346,4 +352,87 @@ test("浏览器预览(无 Tauri): mock 扫描与 mock 运行仍可用", async ()
   assert.deepEqual(mid, ["完成", "进行中", "待压缩"]);
   assert.deepEqual(h.badges(), ["完成", "完成", "完成"]);
   assert.ok(h.doc.getElementById("msg").textContent.includes("压缩完成: 3 个压缩包"));
+});
+
+test("行为: 压缩模式预设 — 默认最大兼容性, 预设联动参数, 手动改参数变自定义", async () => {
+  const h = makeHarness(false, () => null);
+  // 默认 = 最大兼容性预设(zip + 强度 9)
+  assert.equal(h.doc.getElementById("opt-format").value, "zip");
+  assert.equal(h.doc.getElementById("opt-level").value, "9");
+  assert.ok(h.doc.getElementById("opt-preset-custom").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("preset-compat").className.includes("bg-blue-600"));
+
+  // 切平衡预设 → 底层参数联动
+  h.doc.getElementById("preset-balanced").click();
+  assert.equal(h.doc.getElementById("opt-format").value, "7z");
+  assert.equal(h.doc.getElementById("opt-level").value, "5");
+  assert.ok(h.doc.getElementById("preset-balanced").className.includes("bg-blue-600"));
+  assert.ok(!h.doc.getElementById("preset-compat").className.includes("bg-blue-600"));
+
+  // 手动改强度 → 自定义(高亮清除)
+  const lvl = h.doc.getElementById("opt-level");
+  lvl.value = "2";
+  lvl.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.ok(!h.doc.getElementById("opt-preset-custom").classList.contains("hidden"));
+  assert.ok(!h.doc.getElementById("preset-balanced").className.includes("bg-blue-600"));
+
+  // 高级区显隐开关
+  assert.ok(h.doc.getElementById("opt-format-wrap").classList.contains("hidden"));
+  h.doc.getElementById("opt-advanced").click();
+  assert.ok(!h.doc.getElementById("opt-format-wrap").classList.contains("hidden"));
+  assert.ok(!h.doc.getElementById("opt-level-wrap").classList.contains("hidden"));
+
+  // 解压模式下预设/高级控件隐藏, 切回压缩恢复
+  h.doc.getElementById("mode-extract").click();
+  assert.ok(h.doc.getElementById("opt-preset-wrap").classList.contains("hidden"));
+  h.doc.getElementById("mode-compress").click();
+  assert.ok(!h.doc.getElementById("opt-preset-wrap").classList.contains("hidden"));
+});
+
+test("契约: 平衡预设的参数透传到 compress 调用", async () => {
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "compress") return { cancelled: false, entries: [], warnings: [] };
+    return null;
+  });
+  await pickSource(h);
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("preset-balanced").click();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+  const comp = h.calls.find((c) => c.cmd === "compress");
+  assert.ok(comp, "应调用 compress");
+  jsonEq(comp.args.options, {
+    splitSize: null,
+    password: null,
+    randomName: false,
+    format: "7z",
+    level: 5,
+  });
+});
+
+test("行为: 密码提示随格式切换(zip=ZipCrypto / 7z=AES-256)", async () => {
+  const h = makeHarness(false, () => null);
+  const hint = h.doc.getElementById("pw-hint");
+  h.doc.getElementById("opt-password").value = "pw";
+  h.doc.getElementById("opt-password").dispatchEvent(
+    new h.window.Event("input", { bubbles: true })
+  );
+  assert.ok(!hint.classList.contains("hidden"), "zip+密码应有提示");
+  assert.ok(hint.textContent.includes("ZipCrypto"), hint.textContent);
+
+  // 切平衡预设 → 参数与提示一起联动(无需手动触发 change)
+  h.doc.getElementById("preset-balanced").click();
+  assert.ok(hint.textContent.includes("AES-256"), hint.textContent);
+
+  h.doc.getElementById("opt-password").value = "";
+  h.doc.getElementById("opt-password").dispatchEvent(
+    new h.window.Event("input", { bubbles: true })
+  );
+  assert.ok(hint.classList.contains("hidden"), "无密码时提示隐藏");
 });

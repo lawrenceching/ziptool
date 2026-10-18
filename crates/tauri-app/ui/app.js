@@ -23,6 +23,31 @@ const BADGE = {
   warning: "bg-amber-50 text-amber-600",
 };
 
+// 压缩模式预设 = 底层参数组合(格式 + 强度);core/CLI 无"模式"概念(_docs/compress-modes.md)
+const PRESETS = {
+  compat: { format: "zip", level: 9 },
+  balanced: { format: "7z", level: 5 },
+};
+// 预设按钮两种形态(选中蓝 / 未选白; 平衡钮恒有左边框)
+const PRESET_ON = "px-2 py-1 bg-blue-600 text-white";
+const PRESET_OFF = "px-2 py-1 bg-white text-slate-600 hover:bg-slate-50";
+
+function highlightPreset(name) {
+  $("opt-preset-custom").classList.toggle("hidden", name !== "custom");
+  $("preset-compat").className = name === "compat" ? PRESET_ON : PRESET_OFF;
+  $("preset-balanced").className =
+    name === "balanced" ? PRESET_ON : PRESET_OFF + " border-l border-slate-300";
+}
+
+// 选预设 = 写入底层参数; 手动改参数 = 离开预设(自定义)
+function applyPreset(name) {
+  const p = PRESETS[name];
+  $("opt-format").value = p.format;
+  $("opt-level").value = p.level;
+  highlightPreset(name);
+  updatePwHint();
+}
+
 function status(msg) {
   const el = $("msg");
   el.textContent = msg;
@@ -60,6 +85,7 @@ function clearTable() {
 const LOCK_IDS = [
   "mode-compress", "mode-extract", "src", "dst",
   "opt-split", "opt-password", "opt-random", "opt-force",
+  "preset-compat", "preset-balanced", "opt-advanced", "opt-format", "opt-level",
 ];
 // 确认钮两种形态: 常规蓝 / 运行中红色「取消」
 const BTN_CONFIRM =
@@ -84,6 +110,10 @@ function setMode(mode) {
   $("opt-random-wrap").classList.toggle("hidden", mode !== "compress");
   $("opt-force-wrap").classList.toggle("hidden", mode !== "extract");
   $("opt-force-wrap").classList.toggle("flex", mode === "extract");
+  $("opt-preset-wrap").classList.toggle("hidden", mode !== "compress");
+  $("opt-preset-wrap").classList.toggle("flex", mode === "compress");
+  $("opt-advanced-wrap").classList.toggle("hidden", mode !== "compress");
+  $("opt-advanced-wrap").classList.toggle("flex", mode === "compress");
   if (switched && state.rows.length > 0) {
     $("src").value = "";
     clearTable();
@@ -287,6 +317,8 @@ $("confirm").addEventListener("click", async () => {
         splitSize: $("opt-split").value.trim() || null,
         password: $("opt-password").value || null,
         randomName: $("opt-random").checked,
+        format: $("opt-format").value,
+        level: Number($("opt-level").value),
       }
     : {
         password: $("opt-password").value || null,
@@ -363,6 +395,39 @@ $("mode-compress").addEventListener("click", () => setMode("compress"));
 $("mode-extract").addEventListener("click", () => setMode("extract"));
 $("src").addEventListener("click", () => pickFolder("src"));
 $("dst").addEventListener("click", () => pickFolder("dst"));
+
+// —— 压缩模式预设与高级微调 ——
+$("preset-compat").addEventListener("click", () => applyPreset("compat"));
+$("preset-balanced").addEventListener("click", () => applyPreset("balanced"));
+$("opt-advanced").addEventListener("change", (e) => {
+  const show = e.target.checked;
+  for (const id of ["opt-format-wrap", "opt-level-wrap"]) {
+    $(id).classList.toggle("hidden", !show);
+    $(id).classList.toggle("flex", show);
+  }
+});
+// 手动改底层参数 = 离开预设
+for (const id of ["opt-format", "opt-level"]) {
+  $(id).addEventListener("input", () => highlightPreset("custom"));
+}
+// 密码语义随格式: zip=ZipCrypto(兼容优先, 强度弱), 7z=AES-256
+function updatePwHint() {
+  const hint = $("pw-hint");
+  const pw = $("opt-password").value;
+  if (!pw || state.mode !== "compress") {
+    hint.classList.add("hidden");
+    return;
+  }
+  hint.textContent =
+    $("opt-format").value === "7z"
+      ? "7z 格式: AES-256 加密"
+      : "zip 格式: ZipCrypto 加密(兼容性最好, 强度弱)";
+  hint.classList.remove("hidden");
+}
+$("opt-password").addEventListener("input", updatePwHint);
+$("opt-format").addEventListener("change", updatePwHint);
+// 初始状态 = 最大兼容性预设
+applyPreset("compat");
 
 // ———— 浏览器预览 mock(无 Tauri 环境): 假扫描 + 定时器推进度 ————
 let mockCancel = null;
