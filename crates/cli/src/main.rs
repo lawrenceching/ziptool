@@ -4,7 +4,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use zip_tool_core::{CancelFlag, Options, Phase, Progress, compress_dir, extract, parse_size};
+use zip_tool_core::{
+    CancelFlag, Format, Options, Phase, Progress, compress_dir, extract, parse_size,
+};
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +38,12 @@ enum Command {
         /// 使用随机包名
         #[arg(short, long)]
         random_name: bool,
+        /// 压缩包格式:zip(最大兼容)或 7z(LZMA2, 压缩率更高);缺省 zip
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["zip", "7z"]))]
+        format: Option<String>,
+        /// 压缩级别 0-9(0=仅存储, 9=最大);缺省用后端默认
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=9))]
+        level: Option<u8>,
     },
     /// 解压/合并分包(单包或整个目录批量)
     Extract {
@@ -64,6 +72,8 @@ fn main() -> ExitCode {
             split,
             password,
             random_name,
+            format,
+            level,
         } => {
             let split_size = match split.as_deref().map(parse_size) {
                 Some(Ok(v)) => Some(v),
@@ -77,8 +87,11 @@ fn main() -> ExitCode {
                 split_size,
                 password,
                 random_name,
-                format: zip_tool_core::Format::Zip,
-                level: None,
+                format: match format.as_deref() {
+                    Some("7z") => Format::SevenZ,
+                    _ => Format::Zip, // Some("zip") / None
+                },
+                level,
             };
             // CLI 不做交互取消(Ctrl+C 杀整个控制台进程组, 后端子命令一并退出)
             match compress_dir(
@@ -174,16 +187,23 @@ fn main() -> ExitCode {
             }
         }
         Command::Doctor => {
-            let c = zip_tool_core::doctor::check_backend_tool();
-            match (&c.path, &c.probe) {
-                (Some(p), Ok(Some(line))) => {
-                    println!("[ok] {}: {} ({line})", c.program, p.display())
+            let checks = zip_tool_core::doctor::check_platform_tools();
+            for c in &checks {
+                match (&c.path, &c.probe) {
+                    (Some(p), Ok(Some(line))) => {
+                        println!("[ok] {}: {} ({line})", c.program, p.display())
+                    }
+                    (Some(p), Ok(None)) => println!("[ok] {}: {}", c.program, p.display()),
+                    (Some(p), Err(e)) => println!("[FAIL] {}: {} ({e})", c.program, p.display()),
+                    (None, _) => println!("[FAIL] {}: not found in PATH", c.program),
                 }
-                (Some(p), Ok(None)) => println!("[ok] {}: {}", c.program, p.display()),
-                (Some(p), Err(e)) => println!("[FAIL] {}: {} ({e})", c.program, p.display()),
-                (None, _) => println!("[FAIL] {}: not found in PATH", c.program),
             }
-            if c.is_ok() {
+            // 规格 §7: Linux 上 7z 缺失仅影响 7z 格式与解 .7z, 标注适用范围
+            #[cfg(not(windows))]
+            if checks.iter().any(|c| c.program == "7z" && !c.is_ok()) {
+                println!("note: 7z 只影响 7z 格式压缩与解 .7z(zip 格式压缩/解压不受影响)");
+            }
+            if checks.iter().all(|c| c.is_ok()) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE

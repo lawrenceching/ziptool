@@ -1,12 +1,10 @@
 //! 环境自检(供 CLI `doctor` 子命令与未来 UI 的环境状态页共用):
-//! 定位当前平台后端工具(zip / 7z)的完整路径, 并试运行一次。
+//! 定位当前平台涉及的全部工具(见 [`platform_tools`])的完整路径, 并试运行一次。
 //! "在 PATH 里"不等于"能用"(例如损坏的 zip.exe 缺 DLL 时定位得到但起不来),
 //! 所以除了找路径还要真的跑一次, 用输出首行当版本信息。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-
-use crate::backend::Backend;
 
 /// 一项环境检查结果(当前仅"后端工具"一项)
 #[derive(Debug, Clone)]
@@ -26,12 +24,21 @@ impl ToolCheck {
     }
 }
 
-/// 检查当前平台后端工具(从 PATH 定位 + 试运行)
-pub fn check_backend_tool() -> ToolCheck {
-    let program = Backend::native().program().to_string();
+/// 当前平台压缩/解压涉及的完整工具列表:
+/// Windows 压缩(zip 与 7z 格式)与解压全走 7z;Linux 压缩用 zip / 7z, 解压用 unzip / 7z。
+pub fn platform_tools() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["7z"]
+    } else {
+        &["zip", "7z", "unzip"]
+    }
+}
+
+/// 检查平台全部工具(从 PATH 定位 + 试运行), CLI doctor 用
+pub fn check_platform_tools() -> Vec<ToolCheck> {
     let dirs: Vec<PathBuf> =
         std::env::split_paths(std::env::var_os("PATH").as_deref().unwrap_or_default()).collect();
-    check_tool(&program, &dirs)
+    platform_tools().iter().map(|p| check_tool(p, &dirs)).collect()
 }
 
 /// 检查指定工具(搜索目录可注入, 便于测试)
@@ -163,5 +170,17 @@ mod tests {
         assert!(c.probe.is_ok(), "试运行应成功: {:?}", c.probe);
         assert!(c.is_ok());
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn platform_tools_cover_both_formats_and_extract() {
+        let tools = platform_tools();
+        if cfg!(windows) {
+            // Windows 压缩(zip 与 7z 格式)与解压全走 7z
+            assert_eq!(tools, ["7z"]);
+        } else {
+            // Linux: 压缩 zip 格式用 zip, 7z 格式与解 .7z 用 7z, 解 zip 用 unzip
+            assert_eq!(tools, ["zip", "7z", "unzip"]);
+        }
     }
 }
