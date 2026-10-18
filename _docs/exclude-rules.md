@@ -53,12 +53,14 @@ pub enum ExcludeReason {
 }
 ```
 
-- `Entry` 增加 `exclude: Option<ExcludeReason>`; `ScanReport` 增加 `excluded: Vec<String>`(被标条目名, CLI 提示用)
+- `Entry` 增加 `exclude: Option<ExcludeReason>` 与 `attr_hidden: Vec<String>`(§4 属性路径); `ScanReport` 增加 `excluded: Vec<ExcludedEntry>`(name + reason, CLI 提示用)
 - 分层职责:
   - **顶层**: `scan_dir` 永远返回全部条目并打标(隐藏判定 / 模式匹配); CLI 默认丢弃被标条目(`include_hidden=true` 时保留 Hidden 标记条目); UI 渲染为不勾选(既有勾选名单机制消化)
   - **内部**: `dir_size` 遍历时跳过被排除文件/子树(不下钻被排除目录), 尺寸扣除
 - 模式命中目录 = 整棵子树排除(统计 + 后端一致)
-- 命令构造 arg 顺序不变(格式 flags → -v/-p → 级别 → 排除开关 → `--`), 排除开关在 `--` 之前、条目名之前
+- 排除开关的位置**按后端可执行文件**(Info-ZIP 与 7z 语法不同):
+  - `zip`(Linux zip 格式): `-x` 开关必须在**条目名之后**(Info-ZIP 语法 `zip -r out.zip A -x pat...`)
+  - `7z`(Windows zip 格式 + 全部 7z 格式): `-x!` 开关在 `--` 之前、条目名之前(既有 flags → `--` → 条目名次序不变)
 
 ## 3. 统一模式语法与归一化
 
@@ -71,10 +73,12 @@ pub enum ExcludeReason {
 
 ### 归一化(按后端可执行文件, 而非格式)
 
-| 目标后端 | 不含 `/` 模式 p | 含 `/` 锚定模式 |
-|---|---|---|
-| `zip` 命令(Linux zip 格式) | `-x "*/p"`(zip 的 `*` 跨 `/`, 天然任意深度) | `-x "*/<p>"`, `**`→`*` |
-| `7z` 命令(Windows zip 格式 + 全部 7z 格式) | `-xr!p` | `-x!<p>`, `prefix/**`→`-xr!prefix` |
+| 目标后端 | 不含 `/` 模式 p(任意深度 basename) | 含 `/` 锚定模式 | `prefix/**`(at-or-below) |
+|---|---|---|---|
+| `zip` 命令 | `-x "*/p"` + `-x "*/p/*"`(双开关, 见下注) | `-x "*/<p>"` + `-x "*/<p>/*"`(无 `**` 段) | `-x "*/prefix"` + `-x "*/prefix/*"` |
+| `7z` 命令 | `-xr!p`(递归名排除) | `-x!<条目名>/<p>`(`\` 按平台分隔符, 精确锚定) | `-x!<条目名>/prefix`(7z 排除目录即整树) |
+
+- 注(zip 双开关): zip 对被排除目录是否继续下钻行为不确定, `*/p` 覆盖目录自身与树内文件、`*/p/*` 兜底树内路径, 两条一起保证目录排除; 空目录条目可能残留(接受, 见 §1 非目标)。
 
 - Windows 属性隐藏路径(非模式可表达)逐条: `zip` → `-x "<rel>"`; `7z` → `-x!<rel>`(目录一条即整树)
 - **已知语义缝隙**: zip 通配无目录段边界, `*/sub/*.log` 可能过度匹配更深层同名路径 —— 接受并文档标注(zip = 最大兼容模式, 排除精度次要); 7z 后端精确

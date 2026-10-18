@@ -19,6 +19,12 @@ pub struct Entry {
     pub dst: String,
     /// 压缩包格式("zip"/"7z"), 由 Step 2 按 Options.format 填充; 扫描后为空串
     pub format: String,
+    /// 排除标记(仅顶层打标;None = 正常条目)。扫描永远返回全部条目,
+    /// CLI 丢弃被标条目, UI 渲染为不勾选
+    pub exclude: Option<crate::exclude::ExcludeReason>,
+    /// Windows 属性隐藏的树内相对路径(条目名前缀, `/` 分隔, 见 _docs/exclude-rules.md §4);
+    /// 非 Windows 恒为空
+    pub attr_hidden: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +42,8 @@ pub struct ScanReport {
     pub total_bytes: u64,
     /// 扫描中的非致命问题(如无权限子树), 不中断扫描
     pub warnings: Vec<String>,
+    /// 被排除的顶层条目名单(CLI 提示用;与 entries 中带 exclude 标记者一致)
+    pub excluded: Vec<crate::exclude::ExcludedEntry>,
 }
 
 /// 扫描 input 的顶层条目并统计大小; 每完成一个顶层条目回调一次进度。
@@ -74,6 +82,8 @@ pub fn scan_dir(input: &Path, on_progress: &dyn Fn(&Progress)) -> Result<ScanRep
             size,
             dst: String::new(),
             format: String::new(),
+            exclude: None,
+            attr_hidden: Vec::new(),
         });
         report.total_bytes += size;
 

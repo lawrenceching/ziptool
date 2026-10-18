@@ -92,6 +92,7 @@ fn main() -> ExitCode {
                     _ => Format::Zip, // Some("zip") / None
                 },
                 level,
+                exclude: Default::default(),
             };
             // CLI 不做交互取消(Ctrl+C 杀整个控制台进程组, 后端子命令一并退出)
             match compress_dir(

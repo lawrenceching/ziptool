@@ -676,6 +676,7 @@ mod tests {
             random_name: false,
             format,
             level,
+            exclude: crate::ExcludeRules::default(),
         }
     }
 

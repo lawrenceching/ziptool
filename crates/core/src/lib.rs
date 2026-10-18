@@ -26,6 +26,7 @@ pub mod backend;
 pub mod cancel;
 pub mod compress;
 pub mod doctor;
+pub mod exclude;
 pub mod extract;
 pub mod naming;
 pub mod progress;
@@ -40,6 +41,7 @@ pub use extract::{
 };
 pub use progress::{Phase, Progress};
 pub use scan::{Entry, EntryKind, ScanReport, scan_dir};
+pub use exclude::{ExcludeReason, ExcludeRules, ExcludedEntry, validate_patterns};
 
 #[cfg(test)]
 mod testutil;
@@ -86,6 +88,8 @@ pub enum CoreError {
     ExtractConflict(Vec<String>),
     /// 压缩/解压:所需工具(zip / 7z / unzip)不在 PATH
     ToolMissing(String),
+    /// 压缩:用户排除模式非法(空串 / 空段 / `**` 位置错误)
+    InvalidExclude(String),
     /// 解压:输入目录里没有任何压缩包组
     NoArchives(PathBuf),
     /// 压缩:条目在扫描之后、执行之前消失(分阶段 API 的存在性复核, 提示重新扫描)
@@ -162,6 +166,7 @@ impl fmt::Display for CoreError {
             CoreError::ToolMissing(program) => {
                 write!(f, "required tool {program:?} not found in PATH")
             }
+            CoreError::InvalidExclude(msg) => write!(f, "invalid exclude pattern: {msg}"),
             CoreError::NoArchives(p) => write!(f, "no archives found in: {}", p.display()),
             CoreError::EntryMissing { name } => write!(
                 f,
@@ -202,6 +207,8 @@ pub struct Options {
     pub format: Format,
     /// 压缩级别 0-9(0=仅存储);`None` = 不传级别参数,用后端默认
     pub level: Option<u8>,
+    /// 排除规则:内建隐藏默认集 + 用户模式;Default = 排除隐藏、无用户模式
+    pub exclude: ExcludeRules,
 }
 
 #[cfg(test)]
@@ -216,5 +223,7 @@ mod tests {
         assert!(!opts.random_name);
         assert_eq!(opts.format, Format::Zip, "默认 zip(最大兼容)");
         assert!(opts.level.is_none(), "默认不传级别, 用后端默认");
+        assert!(opts.exclude.patterns.is_empty(), "默认无用户模式");
+        assert!(!opts.exclude.include_hidden, "默认排除隐藏文件");
     }
 }

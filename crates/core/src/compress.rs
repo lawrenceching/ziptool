@@ -359,6 +359,8 @@ mod dst_tests {
                 size: 1,
                 dst: String::new(),
                 format: String::new(),
+                exclude: None,
+                attr_hidden: Vec::new(),
             })
             .collect()
     }
@@ -882,6 +884,8 @@ mod staged_tests {
             size,
             dst: String::new(),
             format: String::new(),
+            exclude: None,
+            attr_hidden: Vec::new(),
         }
     }
 

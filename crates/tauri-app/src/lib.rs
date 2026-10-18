@@ -207,6 +207,7 @@ fn to_core_options(o: CompressOptions) -> Result<Options, String> {
         random_name: o.random_name,
         format,
         level,
+        exclude: Default::default(),
     })
 }
 
@@ -593,6 +594,8 @@ mod tests {
             size,
             dst: String::new(),
             format: String::new(),
+            exclude: None,
+            attr_hidden: Vec::new(),
         }
     }
 
@@ -607,6 +610,7 @@ mod tests {
                 ],
                 total_bytes: 3,
                 warnings: vec!["warn1".into()],
+                excluded: Vec::new(),
             }),
         }
     }
@@ -689,6 +693,7 @@ mod tests {
             ],
             total_bytes: 8,
             warnings: vec!["no permission".into()],
+            excluded: Vec::new(),
         };
         let dto = compress_scan_dto(&report);
         assert_eq!(dto.mode, "compress");
