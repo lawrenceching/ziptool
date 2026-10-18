@@ -7,6 +7,7 @@
 2. 支持分包压缩
 3. 支持随机压缩包名(避免压缩包名本身包含敏感信息, 导致信息泄露)
 4. 两种压缩格式: zip(兼容性最好)与 7z(LZMA2, 压缩率更高), 以及 0-9 压缩级别
+5. 排除规则: 默认排除各 OS 隐藏文件(Windows=隐藏属性, Linux/mac=`.` 开头), `--exclude` 自定义模式可叠加
 
 **为什么不整个磁盘打包成一个压缩包**
 一个数T的压缩包不利于运输. 且压缩, 复制, 上传, 下载过程都不容易中断与恢复.
@@ -75,6 +76,12 @@ zip-tool extract -i E:\out -o D:\restore -p 密码
 
 # 默认拒绝覆盖目标已有文件; 确认后用 --force 覆盖
 zip-tool extract -i E:\out -o D:\restore --force
+
+# 排除规则: --exclude 可重复(不含/ = 任意深度文件名, 含/ = 从源根锚定路径)
+zip-tool compress -i D:\data -o E:\out --exclude Thumbs.db --exclude "*.tmp" --exclude node_modules/**
+
+# 默认排除隐藏文件(Windows=隐藏属性, Linux/mac=. 开头); --include-hidden-files 关闭
+zip-tool compress -i D:\data -o E:\out --include-hidden-files
 
 # 环境自检: 定位并试运行后端工具, 打印路径与可用性 (全部正常时退出码 0)
 zip-tool doctor

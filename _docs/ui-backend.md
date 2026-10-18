@@ -61,6 +61,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 ### 3.1 scan
 
 - `mode`: `"compress" | "extract"`, 与 UI 顶栏模式一致; `path`: 源文件夹(系统对话框返回值)
+- `excludes?: string[]`(仅 compress 模式, 可选): 排除模式列表, 透传 `ExcludeRules.patterns`(恒定 `include_hidden=false`); 非法模式返回错误字符串, 不开工
 - compress → `core::scan_dir`(递归统计大小, `Phase::Scanning` 进度经 Channel 推送, 状态栏显示 `i/n`)
 - extract → `core::scan_groups`(顶层分组, 量小无需进度); 每组补大小(组内各卷大小之和), mapping.csv 作为元数据行返回
 - 错误透传 core: 路径不存在 / 非目录 → `InputNotFound`; 空目录 → `NoEntries`; 无包 → `NoArchives`
@@ -69,7 +70,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 ### 3.2 compress / 3.3 extract_archive
 
 - `entries: string[]`: 勾选名单, 取值必须是 scan 返回的**原样 `name`**(compress = 条目名, extract = 入口卷名), 严格精确匹配
-- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean }`; `options`(解压): `{ password: string | null, force: boolean }`
+- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean, excludes?: string[] }`(excludes 与本次 scan 传参比对保鲜, 见 5.4); `options`(解压): `{ password: string | null, force: boolean }`
 - 壳层转换: `splitSize` 经 `parse_size`("2g" / "500m" / 字节数), 失败 → Err 提示; `password` 空串按 `None`(不加密)
 - 执行路径见 5.3/5.4(壳层用 ScanContext 中缓存的扫描结果, 按名单筛选后调 core 分阶段 API; **不重扫**)
 - 返回值: 现有 `CompressResult` / `ExtractResult` 增加 `warnings: string[]` 透传(现状 DTO 丢弃了 Report.warnings)
@@ -99,6 +100,7 @@ struct ScanItem {
     status: String,      // "pending"(可勾选) | "meta"(元数据) | "warning"(告警, 不可勾选)
     original: Option<String>, // extract: mapping.csv 原名; compress: None
     detail: Option<String>,   // warning 原因 / meta 附注(如 "2 行"); 展示文案由 UI 决定
+    excluded: Option<String>, // compress: 排除原因(「隐藏文件」/「匹配排除模式: <p>」); 该行显示但默认不勾选
 }
 struct ScanResult { mode: String, items: Vec<ScanItem>, warnings: Vec<String>, total_bytes: u64 }
 ```
@@ -156,6 +158,7 @@ extract 无此问题: scan_groups 只列顶层(便宜), 真正的清单(list)与
 
 - 壳层 `AppState` 增加 `scan: Mutex<Option<ScanContext>>`; `ScanContext { mode, src, data: ScanReport | ExtractScan }`, 由 scan 命令写入
 - compress / extract_archive 进入时校验: `mode` 与命令一致且 `src` 与传入路径一致, 否则 `Err("扫描结果已过期, 请重新选择源文件夹")`
+- compress 模式还比对扫描时的排除规则(excludes), 与本次 compress 传参不一致同样按过期拒绝 —— 修改模式输入后必须重扫
 - UI 传来的名单在壳层与缓存结果**严格匹配**(未知名同样按过期拒绝)—— 宁停不错
 - UI 的模式切换 / 重选源已在 7.4 作废前端状态; 壳层 ScanContext 在下次 scan 时整体覆盖
 
@@ -247,6 +250,7 @@ meta / warning 行:      恒定不变
 | 压缩 | 随机包名(checkbox) | 关 | 与 CLI `--random-name` 默认关闭一致 |
 | 压缩 | 模式预设(buttons, 已实现) | 最大兼容性 | zip+强度9 / 平衡=7z+强度5; 手改底层参数变"自定义"(见 compress-modes.md) |
 | 压缩 | 高级(checkbox, 已实现) | 关 | 展开格式(zip/7z)与强度(0-9)微调; 模式预设隐藏 |
+| 压缩 | 排除模式输入(text, 高级区) | 空 = 不排除 | 多行/逗号分隔; scan 与 compress 都透传 `excludes`(恒定 `include_hidden=false`); 被标行默认不勾选, 可手动勾选 |
 | 解压 | 密码(password) | 空 = 不加密 | 整批一个密码, 与 compress 对称 |
 | 解压 | 覆盖已有文件(checkbox) | 关 | 宁停不错, 与 CLI `--force` 默认一致 |
 
@@ -272,7 +276,7 @@ meta / warning 行:      恒定不变
 
 - **core 单测(无外部命令)**: plan 在筛选集上的各预检变体; compress_entries 存在性复核(删条目 → EntryMissing、整批不开始); scan_groups 的 ExtractScan(size 合计 / meta 行 / issues / 排序不变); extract_prepared 组筛选后 B2 语义; EntryMissing Display
 - **编排测试(注入假后端)**: compress_dir 组合 = plan + compress_entries 的等价性(现有用例不改即应全绿, 是拆分正确性的回归网); extract 同理
-- **壳层单测**: DTO 映射(ScanItem 三种 status / warnings 透传); ScanContext 失配与未知名单拒绝; 忙闲互斥; parse_size 错误路径
+- **壳层单测**: DTO 映射(ScanItem 三种 status / warnings 透传); ScanContext 失配与未知名单拒绝; 忙闲互斥; parse_size 错误路径; to_core_options 模式校验; 规则不一致 = 过期; excluded 文案映射
 - **UI 单测(node --test + jsdom, `npm test`)**: 前后端契约 + 界面行为。关键设计——**表面真实、传输造假**: `window.__TAURI__` 挂真实 `@tauri-apps/api` / `@tauri-apps/plugin-dialog` 包对象(全局 bundle 就是这些模块), 只 mock 最底层 `__TAURI_INTERNALS__`; 因此 UI 引用不存在的全局 API 路径在测试期必然 TypeError(抓过实际案例: `__TAURI__.ipc.Channel`, Tauri 2 的 Channel 在 core 命名空间), 命令名/参数形状/`__CHANNEL__:<id>` 序列化/进度回放协议(`{index, message}` 对象)全按真实链路校验。UI 逻辑独立为 `ui/app.js`(index.html 外链引用)
 - **UI 走查(chrome-devtools, mock 模式)**: 状态机全迁移、行状态推导(虚拟事件序列驱动)、取消变形按钮、选项行切换
 - **实机验证(用户)**: `cargo run -p zip-tool-tauri` 走通 scan → 表格 → 确认 → 进度 → 取消 / 完成全链路(命令真到 core 与后端工具)
