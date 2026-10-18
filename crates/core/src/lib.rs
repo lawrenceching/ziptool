@@ -69,7 +69,7 @@ pub enum CoreError {
         /// 应存在的入口卷路径
         expected: PathBuf,
     },
-    /// 解压:扩展名不是 zip 系四种形态(.zip / .zNN / .zip.001 / .zip.NNN)
+    /// 解压:扩展名不是支持的包形态(zip 系四种 / 7z 系三种)
     UnsupportedArchive(PathBuf),
     /// 解压:入口卷不存在
     ArchiveNotFound(PathBuf),
@@ -142,7 +142,7 @@ impl fmt::Display for CoreError {
             ),
             CoreError::UnsupportedArchive(p) => write!(
                 f,
-                "unsupported archive type: {} (expected .zip / .zNN / .zip.001 / .zip.NNN)",
+                "unsupported archive type: {} (expected .zip / .zNN / .zip.001 / .zip.NNN / .7z / .7z.001 / .7z.NNN)",
                 p.display()
             ),
             CoreError::ArchiveNotFound(p) => write!(f, "archive not found: {}", p.display()),

@@ -113,9 +113,9 @@ pub fn extract_prepared(
 /// Step 1 识别结果:入口卷路径 + 解压后端(见 _docs/extract.md 第 4 节)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedArchive {
-    /// 入口卷路径(.zip 或 .zip.001), Step 2/3 均以此为准
+    /// 入口卷路径(.zip / .7z 或分卷首卷 .zip.001 / .7z.001), Step 2/3 均以此为准
     pub path: PathBuf,
-    /// .zip → 平台默认后端; .zip.001 → 强制 Backend::SevenZip
+    /// .zip → 平台默认后端; .zip.001 / .7z / .7z.001 → 强制 Backend::SevenZip
     pub backend: Backend,
 }
 
@@ -135,12 +135,17 @@ pub(crate) fn resolve_archive(input: &Path) -> Result<ResolvedArchive> {
             path: input.to_path_buf(),
             backend: Backend::native(),
         }),
+        // 7z 格式整包:只有 7z 系工具能解, 强制 SevenZip 后端
+        "7z" => Ok(ResolvedArchive {
+            path: input.to_path_buf(),
+            backend: Backend::SevenZip,
+        }),
         // 7z -v 首卷: 入口卷即自身, 且只有 7z 系能解
         "001" => Ok(ResolvedArchive {
             path: input.to_path_buf(),
             backend: Backend::SevenZip,
         }),
-        // .zip.NNN(NNN>001): 找首卷 .zip.001
+        // .zip.NNN / .7z.NNN(NNN>001): 找同包名首卷 .001
         e if is_digits(e) => {
             let first = vol(&format!("{}.001", stem_str(input)));
             locate_entry_volume(input, first, Backend::SevenZip)
@@ -1187,6 +1192,36 @@ mod resolve_tests {
         let r = resolve_archive(Path::new("somewhere/B.zip")).unwrap();
         assert_eq!(r.path, Path::new("somewhere/B.zip"));
         assert_eq!(r.backend, Backend::native());
+    }
+
+    #[test]
+    fn sevenz_single_resolves_to_sevenzip_forced() {
+        let r = resolve_archive(Path::new("somewhere/B.7z")).unwrap();
+        assert_eq!(r.path, Path::new("somewhere/B.7z"));
+        assert_eq!(r.backend, Backend::SevenZip, "7z 格式只能 7z 系解");
+    }
+
+    #[test]
+    fn sevenz_extension_is_case_insensitive() {
+        let r = resolve_archive(Path::new("somewhere/B.7Z")).unwrap();
+        assert_eq!(r.backend, Backend::SevenZip);
+    }
+
+    #[test]
+    fn sevenz_member_volume_normalizes_to_first_volume() {
+        let d = unique_temp("resolve-7z");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("B.7z.001"), b"").unwrap();
+        let r = resolve_archive(&d.join("B.7z.002")).unwrap();
+        assert_eq!(r.path, d.join("B.7z.001"));
+        assert_eq!(r.backend, Backend::SevenZip);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn sevenz_member_volume_without_first_volume_reports_missing() {
+        let err = resolve_archive(Path::new("somewhere/B.7z.002")).unwrap_err();
+        assert!(matches!(err, CoreError::EntryVolumeMissing { .. }), "实际: {err:?}");
     }
 
     #[test]
