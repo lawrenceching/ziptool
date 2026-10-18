@@ -132,7 +132,7 @@ mod tests {
         let d = unique_temp("doctor-dir");
         fs::create_dir_all(d.join(exe_name("mytool"))).unwrap();
         assert_eq!(
-            locate_tool("mytool", &[d.clone()]),
+            locate_tool("mytool", std::slice::from_ref(&d)),
             None,
             "同名目录不算工具"
         );
@@ -168,7 +168,7 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         // 用 cargo 当"工具", 保证测试不依赖环境装了 zip/7z
         fs::copy(env!("CARGO"), d.join(exe_name("cargo"))).unwrap();
-        let c = check_tool("cargo", &[d.clone()]);
+        let c = check_tool("cargo", std::slice::from_ref(&d));
         assert_eq!(c.path, Some(d.join(exe_name("cargo"))));
         assert!(c.probe.is_ok(), "试运行应成功: {:?}", c.probe);
         assert!(c.is_ok());

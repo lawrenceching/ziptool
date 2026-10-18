@@ -64,10 +64,10 @@ pub fn validate_patterns(patterns: &[String]) -> Result<(), String> {
         if p == "**" {
             return Err("排除模式不能只含 **".into());
         }
-        if let Some(i) = p.find("**") {
-            if i + 2 != p.len() {
-                return Err(format!("排除模式 {p:?} 的 ** 只允许出现在结尾"));
-            }
+        if let Some(i) = p.find("**")
+            && i + 2 != p.len()
+        {
+            return Err(format!("排除模式 {p:?} 的 ** 只允许出现在结尾"));
         }
     }
     Ok(())

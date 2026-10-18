@@ -107,7 +107,7 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
 /// 在任何压缩开始之前。UI 分阶段入口: 外壳缓存扫描结果, 确认时对筛选后的条目
 /// 先调本函数、再调 [`compress_entries`], 不重复扫描。
 /// 筛选后为空 → `NoEntries`(条目存在性复核在 compress_entries)。
-pub fn plan(input: &Path, out_dir: &Path, entries: &mut Vec<Entry>, opts: &Options) -> Result<()> {
+pub fn plan(input: &Path, out_dir: &Path, entries: &mut [Entry], opts: &Options) -> Result<()> {
     if !input.is_dir() {
         return Err(CoreError::InputNotFound(input.to_path_buf()));
     }
@@ -280,7 +280,7 @@ fn assign_dsts_with(
         let mut dup: Vec<String> = Vec::new();
         for e in entries.iter() {
             let lower = e.name.to_lowercase();
-            if seen.iter().any(|s| *s == lower) && !dup.iter().any(|s| *s == lower) {
+            if seen.contains(&lower) && !dup.contains(&lower) {
                 dup.push(e.name.clone());
             }
             seen.push(lower);

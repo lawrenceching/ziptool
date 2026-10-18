@@ -12,7 +12,7 @@
 //! - 格式维度:zip(最大兼容)与 7z(LZMA2),见 [`backend::Format`] 与 _docs/compress-modes.md
 //!
 //! 计划的对外 API(尚未实现):
-//! - [`Options`]:压缩选项
+//! - 压缩选项: [`Options`]
 //! - `compress_dir(src, out_dir, opts, on_progress)`:批量压缩入口,目录级隔离
 //! - `extract(archive_dir, dest)`:解压/合并分包
 //!

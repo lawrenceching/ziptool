@@ -463,11 +463,11 @@ pub fn format_split_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;
-    if bytes >= GB && bytes % GB == 0 {
+    if bytes >= GB && bytes.is_multiple_of(GB) {
         format!("{}g", bytes / GB)
-    } else if bytes >= MB && bytes % MB == 0 {
+    } else if bytes >= MB && bytes.is_multiple_of(MB) {
         format!("{}m", bytes / MB)
-    } else if bytes >= KB && bytes % KB == 0 {
+    } else if bytes >= KB && bytes.is_multiple_of(KB) {
         format!("{}k", bytes / KB)
     } else {
         format!("{bytes}")
