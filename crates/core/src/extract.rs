@@ -415,8 +415,8 @@ fn file_name_of(p: &Path) -> String {
 }
 
 /// 7.3 Step B1 扫描分组: 输入目录顶层(不递归)分类出压缩包组(UI 分阶段入口)。
-/// `X.zip` / `X.zip.001` 是入口卷; `.zNN` / `.zip.NNN` 是成员卷(入口卷存在则静默,
-/// 否则为孤儿卷记 issue); `mapping.csv` 是元数据; 其余文件记 issue。
+/// `X.zip` / `X.zip.001` / `X.7z` / `X.7z.001` 是入口卷; `.zNN` / `.zip.NNN` / `.7z.NNN` 是
+/// 成员卷(入口卷存在则静默, 否则为孤儿卷记 issue); `mapping.csv` 是元数据; 其余文件记 issue。
 /// 排序: 有 mapping.csv 按 mapping 行序(= 原条目顺序), 否则按入口卷名排序。
 /// 每组补 size(组内各卷大小之和); 逐文件一次 stat, 顶层量级可忽略。
 pub fn scan_groups(input: &Path) -> Result<ExtractScan> {
@@ -431,7 +431,7 @@ pub fn scan_groups(input: &Path) -> Result<ExtractScan> {
     let mut mapping: Vec<(String, String)> = Vec::new();
     let mut meta: Option<MetaFile> = None;
     let mut zip_entries: Vec<String> = Vec::new(); // X.zip(整包或 zip -s 末卷)
-    let mut sev_entries: Vec<String> = Vec::new(); // X.zip.001(7z -v 首卷)
+    let mut sev_entries: Vec<String> = Vec::new(); // X.zip.001 / X.7z / X.7z.001(强制 7z 系后端)
     let mut members: Vec<(String, String)> = Vec::new(); // (卷名, 期望的入口卷名, 小写)
     let mut others: Vec<String> = Vec::new(); // 非包文件
     // 入口卷名(小写) → 组内各卷大小之和(成员卷按 expected 归组)
@@ -460,7 +460,10 @@ pub fn scan_groups(input: &Path) -> Result<ExtractScan> {
         } else if lower.ends_with(".zip") {
             zip_entries.push(name.clone());
             *sizes.entry(lower).or_default() += size;
-        } else if lower.ends_with(".zip.001") {
+        } else if lower.ends_with(".zip.001")
+            || lower.ends_with(".7z")
+            || lower.ends_with(".7z.001")
+        {
             sev_entries.push(name.clone());
             *sizes.entry(lower).or_default() += size;
         } else if let Some(expected) = member_entry_volume(&lower) {
@@ -495,10 +498,10 @@ pub fn scan_groups(input: &Path) -> Result<ExtractScan> {
     // 组装组(入口卷 = 主卷文件名, 与 mapping.csv 的 archive 列一致)
     let mut groups: Vec<ExtractGroup> = Vec::new();
     for name in zip_entries.iter().chain(&sev_entries) {
-        let backend = if name.to_lowercase().ends_with(".zip.001") {
-            Backend::SevenZip
-        } else {
+        let backend = if name.to_lowercase().ends_with(".zip") {
             Backend::native()
+        } else {
+            Backend::SevenZip
         };
         let size = sizes.remove(&name.to_lowercase()).unwrap_or(0);
         groups.push(ExtractGroup {
@@ -553,7 +556,7 @@ pub fn scan_groups(input: &Path) -> Result<ExtractScan> {
     })
 }
 
-/// 成员卷对应的入口卷名(小写): `x.znn` → `x.zip`; `x.zip.nnn`(nnn≠001)→ `x.zip.001`;
+/// 成员卷对应的入口卷名(小写): `x.znn` → `x.zip`; `x.zip.nnn` / `x.7z.nnn`(nnn≠001)→ `{stem}.001`;
 /// 非成员卷 → None。
 fn member_entry_volume(lower: &str) -> Option<String> {
     let (stem, ext) = lower.rsplit_once('.')?;
@@ -1323,6 +1326,65 @@ mod batch_tests {
             .iter()
             .map(|g| file_name_of(&g.resolved.path))
             .collect()
+    }
+
+    /// 组名(入口卷文件名)排序收集(复用既有 entry_names)
+    fn sorted_group_names(scan: &ExtractScan) -> Vec<String> {
+        let mut v = entry_names(&scan.groups);
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn scan_groups_classifies_7z_entries_and_mixed_dirs() {
+        let d = unique_temp("sg-7z");
+        fs::create_dir_all(&d).unwrap();
+        touch(&d, "Novel.7z"); // 7z 整包
+        touch(&d, "media.7z.001"); // 7z 分卷首卷
+        touch(&d, "media.7z.002"); // 成员卷(静默)
+        touch(&d, "old.zip"); // zip 组混合
+        let scan = scan_groups(&d).unwrap();
+
+        assert_eq!(
+            sorted_group_names(&scan),
+            ["Novel.7z", "media.7z.001", "old.zip"]
+        );
+        for g in &scan.groups {
+            let n = file_name_of(&g.resolved.path);
+            let want = if n.ends_with(".zip") {
+                Backend::native()
+            } else {
+                Backend::SevenZip
+            };
+            assert_eq!(g.resolved.backend, want, "{n} 的后端");
+        }
+        // media 组大小 = 两个卷之和
+        let media = scan
+            .groups
+            .iter()
+            .find(|g| file_name_of(&g.resolved.path) == "media.7z.001")
+            .unwrap();
+        assert_eq!(media.size, 0, "touch 的文件为空, 大小 0");
+        assert!(scan.issues.is_empty(), "成员卷应静默: {:?}", scan.issues);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn scan_groups_reports_orphan_7z_volume() {
+        let d = unique_temp("sg-7z-orphan");
+        fs::create_dir_all(&d).unwrap();
+        touch(&d, "media.7z.002"); // 无 .7z.001 → 孤儿卷
+        touch(&d, "Novel.7z");
+        let scan = scan_groups(&d).unwrap();
+        assert_eq!(sorted_group_names(&scan), ["Novel.7z"]);
+        assert!(
+            scan.issues
+                .iter()
+                .any(|i| i.name == "media.7z.002" && i.message.contains("media.7z.001")),
+            "{:?}",
+            scan.issues
+        );
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
