@@ -180,6 +180,43 @@ fn push_tokens(args: &mut Vec<String>, budget: &mut usize, toks: Vec<String>) ->
     true
 }
 
+/// Windows 属性隐藏路径收集器(§4):条数与字符双预算, 超限停止收集并计数;
+/// 未收集的项两端一致地"不排除"(统计照加、后端无开关), 不变式不破。
+pub(crate) struct AttrCollector {
+    entry_name: String,
+    paths: Vec<String>,
+    chars: usize,
+    overflow: usize,
+}
+
+impl AttrCollector {
+    pub(crate) fn new(entry_name: String) -> Self {
+        Self { entry_name, paths: Vec::new(), chars: 0, overflow: 0 }
+    }
+
+    /// rel 已含条目名前缀(如 `Novel/sub/.hid`)
+    pub(crate) fn add(&mut self, rel: &str) {
+        if self.paths.len() >= EXCLUDE_PATH_LIMIT || self.chars >= EXCLUDE_ARG_BUDGET {
+            self.overflow += 1;
+            return;
+        }
+        self.chars += rel.chars().count() + 1;
+        self.paths.push(rel.to_string());
+    }
+
+    /// 取收集结果;有溢出时发 warning(N 项未排除但已计入统计)
+    pub(crate) fn finish(self, warnings: &mut Vec<String>) -> Vec<String> {
+        if self.overflow > 0 {
+            warnings.push(format!(
+                "隐藏项过多, {} 项未排除(已计入大小)",
+                self.overflow
+            ));
+        }
+        let _ = &self.entry_name;
+        self.paths
+    }
+}
+
 /// 把规则归一化为后端命令的排除开关 argv 片段(见 _docs/exclude-rules.md §3):
 /// - zip:开关在条目名**之后**;模式 → `-x <glob>` 双开关(`*/p` + `*/p/*`)
 /// - 7z:开关在 `--` 之前;basename → `-xr!p`,锚定 → `-x!<条目名><SEP>路径`,目录 `/**` → 一条

@@ -357,7 +357,7 @@ async fn scan(
     acquire_busy(&state.busy, "scan")?;
 
     let result = tauri::async_runtime::spawn_blocking(move || match mode {
-        "compress" => zip_tool_core::scan_dir(&p, &|prog| {
+        "compress" => zip_tool_core::scan_dir(&p, &zip_tool_core::ExcludeRules::default(), &|prog| {
             let _ = on_progress.send(ProgressEvent::from(prog));
         })
         .map(ScanData::Compress),

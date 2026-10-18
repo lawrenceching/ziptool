@@ -64,7 +64,7 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
     backend.check_split_size(opts.split_size)?;
 
     // Step 1: 扫描(进度 Phase::Scanning;扫描阶段不支持取消, 回调返回值在此忽略)
-    let scan = scan_dir(input, &|p| {
+    let scan = scan_dir(input, &opts.exclude, &|p| {
         let _ = on_progress(p);
     })?;
     let mut entries = scan.entries;
@@ -1016,7 +1016,7 @@ mod staged_tests {
 
         // 分阶段: scan → plan → compress_entries(事件应与整体一致)
         let events = RefCell::new(Vec::new());
-        let scan = scan_dir(&root.join("in"), &|p| {
+        let scan = scan_dir(&root.join("in"), &crate::ExcludeRules::default(), &|p| {
             events.borrow_mut().push(p.clone());
         })
         .unwrap();
