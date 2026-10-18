@@ -18,8 +18,8 @@ use tauri::State;
 use tauri::ipc::Channel;
 
 use zip_tool_core::{
-    CancelFlag, Entry, EntryKind, ExtractGroup, ExtractScan, Format, Options, Phase, Progress,
-    ScanReport,
+    CancelFlag, Entry, EntryKind, ExcludeReason, ExcludeRules, ExtractGroup, ExtractScan, Format,
+    Options, Phase, Progress, ScanReport,
 };
 
 const POISONED: &str = "state poisoned";
@@ -36,10 +36,12 @@ struct AppState {
     scan: Mutex<Option<ScanContext>>,
 }
 
-/// scan 命令缓存的扫描结果(mode + src 匹配才可用)
+/// scan 命令缓存的扫描结果(mode + src + 规则匹配才可用)
 struct ScanContext {
     mode: &'static str,
     src: PathBuf,
+    /// 扫描时的排除规则(compress 模式;确认时比对, 不一致 = 过期)
+    rules: ExcludeRules,
     data: ScanData,
 }
 
@@ -90,6 +92,8 @@ struct ScanItem {
     original: Option<String>,
     /// warning 原因 / meta 附注; 展示文案由前端决定
     detail: Option<String>,
+    /// compress: 排除原因(「隐藏文件」/「匹配排除模式: <p>」);行显示但默认不勾选
+    excluded: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -114,6 +118,8 @@ struct CompressOptions {
     format: Option<String>,
     /// 0-9; None = 后端默认
     level: Option<u8>,
+    /// 排除模式(高级区输入);None = 无用户模式
+    excludes: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -201,13 +207,25 @@ fn to_core_options(o: CompressOptions) -> Result<Options, String> {
         Some(Err(e)) => return Err(e),
         None => None,
     };
+    // 宁停不错: 用户模式非法即拒(与 CLI exit 2 同语义)
+    let patterns = match o.excludes {
+        None => Vec::new(),
+        Some(v) => match zip_tool_core::validate_patterns(&v) {
+            Ok(()) => v,
+            Err(e) => return Err(format!("排除模式无效: {e}")),
+        },
+    };
     Ok(Options {
         split_size,
         password: non_empty(o.password),
         random_name: o.random_name,
         format,
         level,
-        exclude: Default::default(),
+        exclude: ExcludeRules {
+            // UI 恒定排除隐藏(被标行显示不勾选; 勾选了也尊重用户)
+            include_hidden: false,
+            patterns,
+        },
     })
 }
 
@@ -225,14 +243,21 @@ fn file_name(p: &Path) -> String {
 }
 
 /// 从缓存的压缩扫描结果中按名单严格筛选;
-/// mode/src 失配或名单含未知名 = 扫描过期(宁停不错, 5.4)
+/// mode/src 失配、规则不一致或名单含未知名 = 扫描过期(宁停不错, 5.4)
 fn select_compress(
     scan: Option<&ScanContext>,
     src: &str,
     entries: &[String],
+    rules: &ExcludeRules,
 ) -> Result<Vec<Entry>, String> {
     let ctx = match scan {
-        Some(c) if c.mode == "compress" && c.src == Path::new(src) => c,
+        Some(c)
+            if c.mode == "compress"
+                && c.src == Path::new(src)
+                && rules_eq(&c.rules, rules) =>
+        {
+            c
+        }
         _ => return Err(EXPIRED.into()),
     };
     let report = match &ctx.data {
@@ -277,6 +302,19 @@ fn select_extract(
     Ok(selected)
 }
 
+/// 规则等价: 开关 + 模式逐条相等(顺序敏感, UI 透传顺序即扫描顺序)
+fn rules_eq(a: &ExcludeRules, b: &ExcludeRules) -> bool {
+    a.include_hidden == b.include_hidden && a.patterns == b.patterns
+}
+
+/// 排除原因的前端文案(ScanItem.excluded)
+fn excluded_text(r: &ExcludeReason) -> String {
+    match r {
+        ExcludeReason::Hidden => "隐藏文件".into(),
+        ExcludeReason::Pattern(p) => format!("匹配排除模式: {p}"),
+    }
+}
+
 fn compress_scan_dto(r: &ScanReport) -> ScanResult {
     ScanResult {
         mode: "compress".into(),
@@ -292,6 +330,7 @@ fn compress_scan_dto(r: &ScanReport) -> ScanResult {
                 status: "pending".into(),
                 original: None,
                 detail: None,
+                excluded: e.exclude.as_ref().map(excluded_text),
             })
             .collect(),
     }
@@ -308,6 +347,7 @@ fn extract_scan_dto(s: &ExtractScan) -> ScanResult {
             status: "pending".into(),
             original: g.original.clone(),
             detail: None,
+            excluded: None,
         })
         .collect();
     if let Some(m) = &s.meta {
@@ -318,6 +358,7 @@ fn extract_scan_dto(s: &ExtractScan) -> ScanResult {
             status: "meta".into(),
             original: None,
             detail: Some(format!("{} 行", m.rows)),
+            excluded: None,
         });
     }
     for i in &s.issues {
@@ -328,6 +369,7 @@ fn extract_scan_dto(s: &ExtractScan) -> ScanResult {
             status: "warning".into(),
             original: None,
             detail: Some(i.message.clone()),
+            excluded: None,
         });
     }
     ScanResult {
@@ -344,6 +386,7 @@ fn extract_scan_dto(s: &ExtractScan) -> ScanResult {
 async fn scan(
     mode: String,
     path: String,
+    excludes: Option<Vec<String>>,
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
 ) -> Result<ScanResult, String> {
@@ -352,12 +395,25 @@ async fn scan(
         "extract" => "extract",
         other => return Err(format!("未知模式: {other}")),
     };
+    // 宁停不错: 非法模式在占忙之前拒绝
+    if let Some(pats) = &excludes
+        && let Err(e) = zip_tool_core::validate_patterns(pats)
+    {
+        return Err(format!("排除模式无效: {e}"));
+    }
+    // UI 恒定排除隐藏(被标行显示不勾选)
+    let rules = ExcludeRules {
+        include_hidden: false,
+        patterns: excludes.unwrap_or_default(),
+    };
     let p = PathBuf::from(&path);
     let src_for_ctx = p.clone();
     acquire_busy(&state.busy, "scan")?;
 
+    // rules 既要进 move 闭包又要进缓存, 先克隆一份给闭包
+    let rules_for_scan = rules.clone();
     let result = tauri::async_runtime::spawn_blocking(move || match mode {
-        "compress" => zip_tool_core::scan_dir(&p, &zip_tool_core::ExcludeRules::default(), &|prog| {
+        "compress" => zip_tool_core::scan_dir(&p, &rules_for_scan, &|prog| {
             let _ = on_progress.send(ProgressEvent::from(prog));
         })
         .map(ScanData::Compress),
@@ -386,6 +442,7 @@ async fn scan(
     *state.scan.lock().map_err(|_| POISONED.to_string())? = Some(ScanContext {
         mode,
         src: src_for_ctx,
+        rules,
         data,
     });
     release_busy(&state.busy);
@@ -409,7 +466,7 @@ async fn compress(
     // ScanContext 校验与筛选(纯内存; 锁在 await 前释放)
     let selected = {
         let scan = state.scan.lock().map_err(|_| POISONED.to_string())?;
-        select_compress(scan.as_ref(), &src, &entries)
+        select_compress(scan.as_ref(), &src, &entries, &opts.exclude)
     };
     let selected = match selected {
         Ok(v) => v,
@@ -603,6 +660,7 @@ mod tests {
         ScanContext {
             mode: "compress",
             src: PathBuf::from(src),
+            rules: ExcludeRules::default(),
             data: ScanData::Compress(ScanReport {
                 entries: vec![
                     entry("A", 1, EntryKind::Dir),
@@ -639,17 +697,21 @@ mod tests {
     fn select_compress_filters_by_names_and_rejects_mismatch() {
         let ctx = compress_ctx("C:\\s");
         // 正常筛选
-        let sel = select_compress(Some(&ctx), "C:\\s", &s(&["A"])).unwrap();
+        let sel = select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &ExcludeRules::default()).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].name, "A");
         // 未知名 = 过期
-        assert!(select_compress(Some(&ctx), "C:\\s", &s(&["X"])).is_err());
+        assert!(select_compress(Some(&ctx), "C:\\s", &s(&["X"]), &ExcludeRules::default()).is_err());
         // 重复名 = 过期(严格长度校验)
-        assert!(select_compress(Some(&ctx), "C:\\s", &s(&["A", "A"])).is_err());
+        assert!(
+            select_compress(Some(&ctx), "C:\\s", &s(&["A", "A"]), &ExcludeRules::default()).is_err()
+        );
         // src 失配 / 模式失配 / 无缓存
-        assert!(select_compress(Some(&ctx), "C:\\other", &s(&["A"])).is_err());
+        assert!(
+            select_compress(Some(&ctx), "C:\\other", &s(&["A"]), &ExcludeRules::default()).is_err()
+        );
         assert!(select_extract(Some(&ctx), "C:\\s", &s(&["A"])).is_err());
-        assert!(select_compress(None, "C:\\s", &s(&["A"])).is_err());
+        assert!(select_compress(None, "C:\\s", &s(&["A"]), &ExcludeRules::default()).is_err());
     }
 
     #[test]
@@ -657,6 +719,7 @@ mod tests {
         let ctx = ScanContext {
             mode: "extract",
             src: PathBuf::from("C:\\s"),
+            rules: ExcludeRules::default(),
             data: ScanData::Extract(ExtractScan {
                 groups: vec![ExtractGroup {
                     resolved: zip_tool_core::extract::ResolvedArchive {
@@ -808,6 +871,7 @@ mod tests {
             random_name: false,
             format: None,
             level: None,
+            excludes: None,
         };
         let mut o = base();
         o.format = Some("7z".into());
@@ -828,5 +892,62 @@ mod tests {
         let mut o = base();
         o.level = Some(10);
         assert!(to_core_options(o).is_err());
+    }
+
+    #[test]
+    fn to_core_options_validates_and_carries_excludes() {
+        let base = || CompressOptions {
+            split_size: None,
+            password: None,
+            random_name: false,
+            format: None,
+            level: None,
+            excludes: Some(vec!["Thumbs.db".into(), "sub/*.log".into()]),
+        };
+        let core = to_core_options(base()).unwrap();
+        assert_eq!(core.exclude.patterns.len(), 2);
+        assert!(!core.exclude.include_hidden, "UI 恒定排除隐藏");
+
+        // 非法模式拒绝
+        let mut o = base();
+        o.excludes = Some(vec!["a/**b".into()]);
+        assert!(to_core_options(o).is_err());
+
+        // 缺省 = 无用户模式
+        let mut o = base();
+        o.excludes = None;
+        assert!(to_core_options(o).unwrap().exclude.patterns.is_empty());
+    }
+
+    #[test]
+    fn select_compress_rejects_rule_mismatch_as_expired() {
+        let ctx = compress_ctx("C:\\s");
+        let rules = ExcludeRules::default();
+        // 规则一致 → 正常
+        assert!(select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &rules).is_ok());
+        // 规则不一致 = 扫描过期(5.4 语义扩展)
+        let other = ExcludeRules { include_hidden: false, patterns: vec!["x".into()] };
+        let err = select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &other).unwrap_err();
+        assert!(err.contains("过期"), "{err}");
+    }
+
+    #[test]
+    fn compress_scan_dto_marks_excluded_items() {
+        let mut a = entry("A", 1, EntryKind::Dir);
+        a.exclude = Some(ExcludeReason::Hidden);
+        let mut b = entry("b.txt", 2, EntryKind::File);
+        b.exclude = Some(ExcludeReason::Pattern("*.log".into()));
+        let report = ScanReport {
+            entries: vec![a, b],
+            total_bytes: 0,
+            warnings: Vec::new(),
+            excluded: Vec::new(),
+        };
+        let dto = compress_scan_dto(&report);
+        assert_eq!(dto.items[0].excluded.as_deref(), Some("隐藏文件"));
+        assert_eq!(
+            dto.items[1].excluded.as_deref(),
+            Some("匹配排除模式: *.log")
+        );
     }
 }
