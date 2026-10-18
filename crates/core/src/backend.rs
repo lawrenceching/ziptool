@@ -315,10 +315,24 @@ impl ExtractBackend for RealExtract {
 /// zip -s 分卷组的兄弟首卷(入口卷 {stem}.zip 同目录下的 {stem}.z01): 存在即认定
 /// 该入口卷是 zip -s 的末卷。分卷组的解压必须走 7z 系(见 extract.rs
 /// `zip_entry_backend` 的路由说明), 本函数只做识别, 供 resolve 层选后端。
+/// 大小写不敏感: 兄弟卷可能来自 NTFS 搬运/用户改名, Linux 大小写敏感文件系统上
+/// 也要认出 B.Z01; 精确名未命中时按目录名单比对一次(无额外 stat, 顶层量级可忽略,
+/// 与 scan_groups 同一假设)。整包旁的无关 .z01 会误判为分卷组 —— 无害: 7z 也能读普通 zip。
 pub(crate) fn split_first_volume(entry: &Path) -> Option<PathBuf> {
     let stem = entry.file_stem()?.to_string_lossy().into_owned();
     let z01 = entry.with_file_name(format!("{stem}.z01"));
-    z01.is_file().then_some(z01)
+    if z01.is_file() {
+        return Some(z01);
+    }
+    let dir = entry.parent()?;
+    let want = format!("{}.z01", stem.to_lowercase());
+    for e in std::fs::read_dir(dir).ok()? {
+        let Ok(e) = e else { continue };
+        if e.file_name().to_string_lossy().to_lowercase() == want && e.path().is_file() {
+            return Some(e.path());
+        }
+    }
+    None
 }
 
 /// 在 PATH 里定位压缩/解压程序, 缺失报 ToolMissing(而不是 spawn 失败的 os error 2)
@@ -479,6 +493,36 @@ mod run_tests {
 
         std::fs::write(root.join("B.z01"), b"x").unwrap();
         assert_eq!(split_first_volume(&zip), Some(root.join("B.z01")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn split_detection_accepts_case_variant_sibling() {
+        // NTFS/Windows 来源的 B.Z01 在 Linux 大小写敏感文件系统上也要认出分卷组
+        let root = std::env::temp_dir().join(format!("zt-split-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let zip = root.join("B.zip");
+        std::fs::write(&zip, b"x").unwrap();
+        std::fs::write(root.join("B.Z01"), b"x").unwrap();
+        let hit = split_first_volume(&zip).expect("大小写变体兄弟卷应识别");
+        assert_eq!(
+            hit.file_name().unwrap().to_string_lossy().to_uppercase(),
+            "B.Z01"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn split_detection_ignores_directory_sibling_and_stemless_paths() {
+        let root = std::env::temp_dir().join(format!("zt-split-edge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("B.zip")).unwrap();
+        std::fs::create_dir_all(root.join("B.z01")).unwrap();
+        // 同名"文件"是目录 → 不算分卷组
+        assert!(split_first_volume(&root.join("B.zip")).is_none());
+        // 无 file_stem 的路径(如 "/")→ None 而非 panic
+        assert!(split_first_volume(Path::new("/")).is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

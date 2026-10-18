@@ -129,7 +129,8 @@ pub fn extract_prepared(
 pub struct ResolvedArchive {
     /// 入口卷路径(.zip / .7z 或分卷首卷 .zip.001 / .7z.001), Step 2/3 均以此为准
     pub path: PathBuf,
-    /// .zip → 平台默认后端; .zip.001 / .7z / .7z.001 → 强制 Backend::SevenZip
+    /// 整包 .zip → 平台默认后端; 其余分卷形态(zip -s 组=旁有 .z01、.zip.001 /
+    /// .7z / .7z.001)→ 强制 Backend::SevenZip(见 [`zip_entry_backend`])
     pub backend: Backend,
 }
 
@@ -1285,6 +1286,22 @@ mod resolve_tests {
             resolve_archive(&d.join("B.zip")).unwrap().backend,
             Backend::SevenZip,
             "有 .z01 兄弟卷 = 分卷组 → 强制 SevenZip"
+        );
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn plain_zip_with_stray_z01_still_extracts_via_sevenzip() {
+        // 整包旁残留同名 .z01(非分卷组)会误判为分卷组路由 7z —— 无害:
+        // 7z 能读普通 zip, 解压结果正确。固化该设计, 防止将来收紧路由时无提示破坏。
+        let d = unique_temp("res-stray-z01");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("B.zip"), b"").unwrap();
+        fs::write(d.join("B.z01"), b"").unwrap();
+        assert_eq!(
+            resolve_archive(&d.join("B.zip")).unwrap().backend,
+            Backend::SevenZip,
+            "误判为分卷组仍走 7z, 行为不变"
         );
         fs::remove_dir_all(&d).unwrap();
     }

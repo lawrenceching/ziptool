@@ -2,7 +2,8 @@
 //! 用系统 zip/7z 工具解压(不使用本工具)→ 校验压缩包生成且内容逐字节一致。
 //!
 //! 运行: cargo test -p zip-tool-e2e
-//! 依赖: Windows 需 7z(NanaZip 兼容);Linux 需 zip / unzip;--format 7z 用例另需 p7zip 的 7z。
+//! 依赖: Windows 需 7z(NanaZip 兼容);Linux 需 zip / unzip 和 p7zip 的 7z
+//! (zip -s 分卷用例的解压端是 7z, unzip 不支持分卷包; --format 7z 用例同样需要)。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
