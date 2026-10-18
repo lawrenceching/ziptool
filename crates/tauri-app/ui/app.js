@@ -86,6 +86,7 @@ const LOCK_IDS = [
   "mode-compress", "mode-extract", "src", "dst",
   "opt-split", "opt-password", "opt-random", "opt-force",
   "preset-compat", "preset-balanced", "opt-advanced", "opt-format", "opt-level",
+  "opt-exclude",
 ];
 // 确认钮两种形态: 常规蓝 / 运行中红色「取消」
 const BTN_CONFIRM =
@@ -137,6 +138,14 @@ function onProgress(ev) {
   renderTable(state.rows);
 }
 
+// 排除模式输入: 换行/逗号分隔, 去空白, 空段剔除(高级区)
+function parseExcludes() {
+  return $("opt-exclude").value
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 // —— 扫描: invoke("scan"), 结果渲染表格并缓存在外壳 ——
 async function doScan(path) {
   clearTable();
@@ -148,7 +157,9 @@ async function doScan(path) {
       status(`已扫描 ${path}: ${state.rows.length} 个条目(浏览器预览假数据)`);
       return;
     }
-    const res = await invoke("scan", { mode: state.mode, path, onProgress: makeChannel() });
+    const args = { mode: state.mode, path, onProgress: makeChannel() };
+    if (state.mode === "compress") args.excludes = parseExcludes();
+    const res = await invoke("scan", args);
     renderTable(res.items);
     let msg = `已扫描 ${path}: ${res.items.length} 个条目, 共 ${fmtBytes(res.totalBytes)}`;
     if (res.warnings.length > 0) {
@@ -209,10 +220,11 @@ function displayStatus(i) {
 
 // —— 表格渲染 ——
 function renderTable(items) {
-  // checked 已有值则保留(全选切换/进度重绘时), 否则默认全选(meta/warning 行除外)
+  // checked 已有值则保留(全选切换/进度重绘时), 否则默认勾选 pending 行
+  // (被标排除行 excluded 显示但默认不勾选; 手动勾选了就会被压缩)
   state.rows = items.map((it, i) => ({
     ...it,
-    checked: state.rows[i]?.checked ?? it.status === "pending",
+    checked: state.rows[i]?.checked ?? (it.status === "pending" && !it.excluded),
   }));
   const tbody = $("rows");
   tbody.textContent = "";
@@ -239,8 +251,8 @@ function renderTable(items) {
 
     const td1 = document.createElement("td");
     td1.className = "py-2 pr-2 truncate max-w-0";
-    // 悬停看全名 + 附注(原名 / 告警原因 / 元数据行数)
-    const tip = [r.original ? `原名 ${r.original}` : null, r.detail]
+    // 悬停看全名 + 附注(排除原因 / 原名 / 告警原因 / 元数据行数)
+    const tip = [r.excluded, r.original ? `原名 ${r.original}` : null, r.detail]
       .filter(Boolean)
       .join(", ");
     td1.title = tip ? `${r.name}(${tip})` : r.name;
@@ -319,6 +331,7 @@ $("confirm").addEventListener("click", async () => {
         randomName: $("opt-random").checked,
         format: $("opt-format").value,
         level: Number($("opt-level").value),
+        excludes: parseExcludes(),
       }
     : {
         password: $("opt-password").value || null,
@@ -401,7 +414,7 @@ $("preset-compat").addEventListener("click", () => applyPreset("compat"));
 $("preset-balanced").addEventListener("click", () => applyPreset("balanced"));
 $("opt-advanced").addEventListener("change", (e) => {
   const show = e.target.checked;
-  for (const id of ["opt-format-wrap", "opt-level-wrap"]) {
+  for (const id of ["opt-format-wrap", "opt-level-wrap", "opt-exclude-wrap"]) {
     $(id).classList.toggle("hidden", !show);
     $(id).classList.toggle("flex", show);
   }
@@ -437,6 +450,8 @@ function mockScan(path) {
         { name: "Novel", kind: "dir", size: 2_600_000_000, status: "pending", original: null, detail: null },
         { name: "media", kind: "dir", size: 890_000_000, status: "pending", original: null, detail: null },
         { name: "photo.jpg", kind: "file", size: 204_800, status: "pending", original: null, detail: null },
+        { name: ".DS_Store", kind: "file", size: 4096, status: "pending", original: null, detail: null, excluded: "隐藏文件" },
+        { name: "cache", kind: "dir", size: 12_000, status: "pending", original: null, detail: null, excluded: "匹配排除模式: cache" },
       ]
     : [
         { name: "Novel.zip", kind: "file", size: 2_600_000_000, status: "pending", original: "Novel", detail: null },

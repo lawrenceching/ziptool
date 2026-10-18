@@ -128,6 +128,14 @@
           class="w-14 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
         />
       </span>
+      <span id="opt-exclude-wrap" class="hidden items-center gap-1.5">
+        <label for="opt-exclude" class="shrink-0">排除</label>
+        <input
+          id="opt-exclude"
+          class="w-64 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
+          placeholder="逗号分隔, 如 Thumbs.db, *.tmp"
+        />
+      </span>
       <label id="opt-force-wrap" class="hidden items-center gap-1.5 cursor-pointer">
         <input id="opt-force" type="checkbox" class="accent-blue-600 align-middle" />
         覆盖已有文件

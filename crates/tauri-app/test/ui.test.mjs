@@ -187,6 +187,7 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
     randomName: true,
     format: "zip",
     level: 9,
+    excludes: [],
   });
   assert.equal(comp.args.src, "C:\\demo\\data");
   assert.equal(comp.args.dst, "C:\\out");
@@ -338,19 +339,25 @@ test("浏览器预览(无 Tauri): mock 扫描与 mock 运行仍可用", async ()
     throw new Error("无 Tauri 环境不应触碰 IPC");
   });
   await pickSource(h);
-  assert.deepEqual(h.badges(), ["待压缩", "待压缩", "待压缩"]);
+  assert.deepEqual(
+    h.badges(),
+    ["待压缩", "待压缩", "待压缩", "待压缩", "待压缩"],
+    "mock 含隐藏/命中行(显示不勾选)"
+  );
+  const boxes = h.rows().map((tr) => tr.querySelector("input"));
+  assert.ok(!boxes[3].checked && !boxes[4].checked, "被标行默认不勾选");
   assert.ok(h.doc.getElementById("msg").textContent.includes("浏览器预览假数据"));
   assert.equal(h.doc.getElementById("ver").textContent, "dev");
 
   h.doc.getElementById("dst").click();
   await h.flush();
   h.doc.getElementById("confirm").click();
-  // mock 每 400ms 一条进度, 3 条约 1.2s; 中途采样一次
+  // mock 每 400ms 一条进度; 勾选名单 = 前 3 行(被标行未勾选), 3 条约 1.2s
   await new Promise((r) => setTimeout(r, 500));
   const mid = h.badges();
   await new Promise((r) => setTimeout(r, 1600));
-  assert.deepEqual(mid, ["完成", "进行中", "待压缩"]);
-  assert.deepEqual(h.badges(), ["完成", "完成", "完成"]);
+  assert.deepEqual(mid, ["完成", "进行中", "待压缩", "待压缩", "待压缩"]);
+  assert.deepEqual(h.badges(), ["完成", "完成", "完成", "待压缩", "待压缩"]);
   assert.ok(h.doc.getElementById("msg").textContent.includes("压缩完成: 3 个压缩包"));
 });
 
@@ -413,6 +420,7 @@ test("契约: 平衡预设的参数透传到 compress 调用", async () => {
     randomName: false,
     format: "7z",
     level: 5,
+    excludes: [],
   });
 });
 
@@ -435,4 +443,59 @@ test("行为: 密码提示随格式切换(zip=ZipCrypto / 7z=AES-256)", async ()
     new h.window.Event("input", { bubbles: true })
   );
   assert.ok(hint.classList.contains("hidden"), "无密码时提示隐藏");
+});
+
+// 带排除标记的扫描结果(与壳层 DTO 的 excluded 字段一致)
+const SCAN_EXCLUDED = {
+  mode: "compress",
+  items: [
+    ITEM("Novel", "dir", 2_600_000_000, "pending"),
+    ITEM(".DS_Store", "file", 4096, "pending", { excluded: "隐藏文件" }),
+    ITEM("cache", "dir", 12_000, "pending", { excluded: "匹配排除模式: cache" }),
+  ],
+  warnings: [],
+  totalBytes: 2_600_004_096,
+};
+
+test("行为: 排除行显示但不勾选, 模式输入透传 scan/compress, 勾选可覆盖", async () => {
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") {
+      // 跨 realm 数组 → 用 JSON 形状比较(见下方 jsonEq 注释)
+      jsonEq(args.excludes, ["Thumbs.db", "*.tmp"]);
+      return SCAN_EXCLUDED;
+    }
+    if (cmd === "compress") return { cancelled: false, entries: [], warnings: [] };
+    return null;
+  });
+
+  // 高级区填排除模式(换行/逗号混排, 带空白)再扫描
+  h.doc.getElementById("opt-advanced").click();
+  h.doc.getElementById("opt-exclude").value = " Thumbs.db,\n*.tmp ";
+  await pickSource(h);
+
+  // 被标行显示(待压缩徽章)但默认不勾选; 名字悬停看原因
+  assert.deepEqual(h.badges(), ["待压缩", "待压缩", "待压缩"]);
+  const boxes = h.rows().map((tr) => tr.querySelector("input"));
+  assert.ok(boxes[0].checked, "普通行默认勾选");
+  assert.ok(!boxes[1].checked, "隐藏行默认不勾选");
+  assert.ok(!boxes[2].checked, "模式命中行默认不勾选");
+  assert.match(h.rows()[1].querySelector("td:nth-child(2)").title, /隐藏文件/);
+  assert.match(h.rows()[2].querySelector("td:nth-child(2)").title, /匹配排除模式: cache/);
+
+  // 全选切换覆盖所有 pending 行(含被标行); 手动勾选了就会被压缩
+  h.doc.getElementById("check-all").click();
+  assert.ok(h.rows().every((tr) => tr.querySelector("input").checked));
+
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+  const comp = h.calls.find((c) => c.cmd === "compress");
+  assert.ok(comp, "应调用 compress");
+  jsonEq(comp.args.entries, ["Novel", ".DS_Store", "cache"]);
+  jsonEq(comp.args.options.excludes, ["Thumbs.db", "*.tmp"]);
 });
