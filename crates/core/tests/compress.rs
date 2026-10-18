@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zip_tool_core::{Options, Progress, compress_dir};
+use zip_tool_core::{CancelFlag, Options, Progress, compress_dir};
 
 static TMP_N: AtomicU64 = AtomicU64::new(0);
 
@@ -44,9 +44,13 @@ fn compresses_each_entry_into_its_own_archive() {
     make_fixture(&root);
     let out = root.join("out");
 
-    let report = compress_dir(&root.join("in"), &out, &Options::default(), &|_| {
-        ControlFlow::Continue(())
-    })
+    let report = compress_dir(
+        &root.join("in"),
+        &out,
+        &Options::default(),
+        &CancelFlag::new(),
+        &|_| ControlFlow::Continue(()),
+    )
     .unwrap();
 
     assert!(!report.cancelled);
@@ -66,6 +70,7 @@ fn reports_one_progress_event_per_completed_entry() {
         &root.join("in"),
         &out,
         &Options::default(),
+        &CancelFlag::new(),
         &|p: &Progress| {
             if p.phase == zip_tool_core::Phase::Compressing {
                 events.borrow_mut().push((p.done, p.total, p.entry.clone()));
@@ -94,13 +99,19 @@ fn stops_when_callback_breaks() {
     make_fixture(&root);
     let out = root.join("out");
 
-    let report = compress_dir(&root.join("in"), &out, &Options::default(), &|p| {
-        if p.done >= 1 {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    })
+    let report = compress_dir(
+        &root.join("in"),
+        &out,
+        &Options::default(),
+        &CancelFlag::new(),
+        &|p| {
+            if p.done >= 1 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
     .unwrap();
 
     assert!(report.cancelled);
@@ -118,12 +129,9 @@ fn random_names_hide_originals_and_mapping_csv_records_them() {
         ..Default::default()
     };
 
-    let report = compress_dir(
-        &root.join("in"),
-        &out,
-        &opts,
-        &|_| ControlFlow::Continue(()),
-    )
+    let report = compress_dir(&root.join("in"), &out, &opts, &CancelFlag::new(), &|_| {
+        ControlFlow::Continue(())
+    })
     .unwrap();
 
     assert_eq!(report.entries.len(), 3);
@@ -163,6 +171,7 @@ fn missing_or_empty_input_is_an_error() {
             &root.join("nope"),
             &root.join("o1"),
             &Options::default(),
+            &CancelFlag::new(),
             &|_| { ControlFlow::Continue(()) }
         )
         .is_err()
@@ -174,6 +183,7 @@ fn missing_or_empty_input_is_an_error() {
             &root.join("empty"),
             &root.join("o2"),
             &Options::default(),
+            &CancelFlag::new(),
             &|_| { ControlFlow::Continue(()) }
         )
         .is_err()

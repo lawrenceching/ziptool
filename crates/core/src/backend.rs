@@ -2,10 +2,15 @@
 //! - [`Backend::Zip`]:Linux 系统 `zip` 命令,分包 `-s`(B.z01..B.zip)
 //! - [`Backend::SevenZip`]:`7z` 命令(Windows),分包 `-v` + `-tzip`(B.zip.001..)
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
-use crate::{CoreError, Options, Result};
+use crate::{CancelFlag, CoreError, Options, Result};
+
+/// 进程轮询间隔, 也是取消生效的延迟上界
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -33,21 +38,50 @@ impl Backend {
         }
     }
 
-    /// 执行外部命令,非零退出视为失败(7z 的 1=warning 视为失败,后续有需要再放宽)
-    pub(crate) fn run(&self, cmd: &mut Command) -> Result<()> {
-        let out = cmd.output()?;
-        if !out.status.success() {
-            let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
-            if text.trim().is_empty() {
-                text = String::from_utf8_lossy(&out.stdout).into_owned();
+    /// 执行外部命令,非零退出视为失败(7z 的 1=warning 视为失败,后续有需要再放宽)。
+    /// `cancel` 置位即 kill 子进程并返回 [`CoreError::Cancelled`](延迟上界 = 轮询间隔);
+    /// 取消即作废:与"刚自然跑完"竞态时也统一按取消返回,由编排层清理半成品。
+    pub(crate) fn run(&self, cmd: &mut Command, cancel: &CancelFlag) -> Result<()> {
+        // spawn 默认继承父进程 stdio(与 output() 的默认管道不同), 必须显式设:
+        // stdin 断开, 防 7z/unzip 的交互提示(如密码)挂住; 输出接管用于报错
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        // 读者线程排空管道: 输出撑满 64K 缓冲会让子进程写阻塞而死锁;
+        // 读进 Vec<u8> 而非 String(输出可能非 UTF-8), 报错时再 lossy 转换
+        let t_out = drain_pipe(child.stdout.take());
+        let t_err = drain_pipe(child.stderr.take());
+        loop {
+            if cancel.is_cancelled() {
+                // 已自行退出的进程 kill 会报错, 忽略; 统一按取消处理
+                let _ = child.kill();
+                // 先回收再返回: Windows 上要等子进程句柄释放, 调用方才能删除半成品
+                let _ = child.wait();
+                let _ = t_out.join();
+                let _ = t_err.join();
+                return Err(CoreError::Cancelled);
             }
-            return Err(CoreError::BackendFailed {
-                program: self.program().into(),
-                status: out.status.to_string(),
-                output: last_lines(&text, 5),
-            });
+            match child.try_wait()? {
+                Some(status) => {
+                    let out = t_out.join().unwrap_or_default();
+                    let err_out = t_err.join().unwrap_or_default();
+                    if !status.success() {
+                        let mut text = String::from_utf8_lossy(&err_out).into_owned();
+                        if text.trim().is_empty() {
+                            text = String::from_utf8_lossy(&out).into_owned();
+                        }
+                        return Err(CoreError::BackendFailed {
+                            program: self.program().into(),
+                            status: status.to_string(),
+                            output: last_lines(&text, 5),
+                        });
+                    }
+                    return Ok(());
+                }
+                None => std::thread::sleep(POLL_INTERVAL),
+            }
         }
-        Ok(())
     }
 
     /// 各后端的分包大小约束:仅 zip -s 有 64k 下限
@@ -165,13 +199,15 @@ pub(crate) trait ExtractBackend {
     fn program(&self, kind: Backend) -> &'static str;
     /// 列入口卷内的条目清单
     fn list(&self, kind: Backend, entry: &Path) -> Result<ArchiveListing>;
-    /// 把入口卷解到 dest(冲突判断在编排层, 覆盖开关恒带)
+    /// 把入口卷解到 dest(冲突判断在编排层, 覆盖开关恒带);
+    /// cancel 透传给进程等待, 取消即 kill
     fn extract(
         &self,
         kind: Backend,
         entry: &Path,
         dest: &Path,
         password: Option<&str>,
+        cancel: &crate::CancelFlag,
     ) -> Result<()>;
 }
 
@@ -214,10 +250,11 @@ impl ExtractBackend for RealExtract {
         entry: &Path,
         dest: &Path,
         password: Option<&str>,
+        cancel: &crate::CancelFlag,
     ) -> Result<()> {
         locate_extract_tool(self.program(kind))?;
         let mut cmd = kind.extract_command(entry, dest, password);
-        kind.run(&mut cmd)
+        kind.run(&mut cmd, cancel)
     }
 }
 
@@ -240,7 +277,7 @@ pub(crate) trait CommandBackend {
         out_zip: &Path,
         opts: &Options,
     ) -> Result<Command>;
-    fn run(&self, cmd: &mut Command) -> Result<()>;
+    fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()>;
     fn check_split_size(&self, size: Option<u64>) -> Result<()>;
 }
 
@@ -255,12 +292,115 @@ impl CommandBackend for Backend {
         Backend::compress_command(self, work_dir, name, out_zip, opts)
     }
 
-    fn run(&self, cmd: &mut Command) -> Result<()> {
-        Backend::run(self, cmd)
+    fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()> {
+        Backend::run(self, cmd, cancel)
     }
 
     fn check_split_size(&self, size: Option<u64>) -> Result<()> {
         Backend::check_split_size(self, size)
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    //! Backend::run 的进程级行为:取消 kill / 自然成功 / 自然失败。
+    //! 用真实子进程验证(不依赖 zip/7z 在 PATH)。
+    use super::*;
+    use crate::CancelFlag;
+    use std::time::{Duration, Instant};
+
+    /// 平台无关的"跑 60 秒"命令
+    fn long_running() -> Command {
+        if cfg!(windows) {
+            let mut c = Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("60");
+            c
+        }
+    }
+
+    /// 平台无关的立即成功命令
+    fn exit_ok() -> Command {
+        if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "exit 0"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg("exit 0");
+            c
+        }
+    }
+
+    /// 平台无关的"输出一行后失败"命令
+    fn echo_boom_exit_2() -> Command {
+        if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo boom & exit 2"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg("echo boom; exit 2");
+            c
+        }
+    }
+
+    #[test]
+    fn already_cancelled_flag_returns_cancelled_without_running_to_completion() {
+        let flag = CancelFlag::new();
+        flag.cancel();
+        let mut cmd = long_running();
+        let start = Instant::now();
+        let err = Backend::native().run(&mut cmd, &flag).unwrap_err();
+        assert!(matches!(err, CoreError::Cancelled), "实际: {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "应立即返回而非跑满 60s"
+        );
+    }
+
+    #[test]
+    fn cancelled_flag_kills_long_running_process() {
+        let flag = CancelFlag::new();
+        let canceller = flag.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            canceller.cancel();
+        });
+        let mut cmd = long_running();
+        let start = Instant::now();
+        let err = Backend::native().run(&mut cmd, &flag).unwrap_err();
+        assert!(matches!(err, CoreError::Cancelled), "实际: {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "60s 的命令应在取消后很快被杀"
+        );
+    }
+
+    #[test]
+    fn natural_success_returns_ok() {
+        let flag = CancelFlag::new();
+        let mut cmd = exit_ok();
+        Backend::native().run(&mut cmd, &flag).unwrap();
+    }
+
+    #[test]
+    fn natural_failure_reports_backend_failed_with_captured_output() {
+        let flag = CancelFlag::new();
+        let mut cmd = echo_boom_exit_2();
+        let err = Backend::native().run(&mut cmd, &flag).unwrap_err();
+        match err {
+            CoreError::BackendFailed { output, .. } => {
+                assert!(
+                    output.contains("boom"),
+                    "stderr/stdout 应被捕获: {output:?}"
+                );
+            }
+            other => panic!("应为 BackendFailed, 实际: {other:?}"),
+        }
     }
 }
 
@@ -288,6 +428,17 @@ pub fn validate_split_size(bytes: u64) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// 起读者线程把子进程管道读到 EOF(读不完会撑满缓冲死锁), 返回收集的字节
+fn drain_pipe<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
 }
 
 /// 取文本最后 n 行(错误输出可能很长)

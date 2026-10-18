@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use zip_tool_core::{Options, Phase, Progress, compress_dir, extract, parse_size};
+use zip_tool_core::{CancelFlag, Options, Phase, Progress, compress_dir, extract, parse_size};
 
 #[derive(Parser)]
 #[command(
@@ -78,29 +78,36 @@ fn main() -> ExitCode {
                 password,
                 random_name,
             };
-            match compress_dir(&input, &output, &opts, &|p: &Progress| {
-                match p.phase {
-                    Phase::Scanning => {
-                        eprint!("\r[scan {}/{}] {}        ", p.done, p.total, p.entry);
+            // CLI 不做交互取消(Ctrl+C 杀整个控制台进程组, 后端子命令一并退出)
+            match compress_dir(
+                &input,
+                &output,
+                &opts,
+                &CancelFlag::new(),
+                &|p: &Progress| {
+                    match p.phase {
+                        Phase::Scanning => {
+                            eprint!("\r[scan {}/{}] {}        ", p.done, p.total, p.entry);
+                        }
+                        Phase::Compressing => {
+                            let size = if p.total_bytes > 0 {
+                                format!(
+                                    " ({}/{})",
+                                    format_bytes(p.done_bytes),
+                                    format_bytes(p.total_bytes)
+                                )
+                            } else {
+                                String::new()
+                            };
+                            eprint!("\r[{}/{}] {}{}        ", p.done, p.total, p.entry, size);
+                        }
+                        Phase::Extracting => {
+                            eprint!("\r[extract {}/{}] {}        ", p.done, p.total, p.entry);
+                        }
                     }
-                    Phase::Compressing => {
-                        let size = if p.total_bytes > 0 {
-                            format!(
-                                " ({}/{})",
-                                format_bytes(p.done_bytes),
-                                format_bytes(p.total_bytes)
-                            )
-                        } else {
-                            String::new()
-                        };
-                        eprint!("\r[{}/{}] {}{}        ", p.done, p.total, p.entry, size);
-                    }
-                    Phase::Extracting => {
-                        eprint!("\r[extract {}/{}] {}        ", p.done, p.total, p.entry);
-                    }
-                }
-                ControlFlow::Continue(())
-            }) {
+                    ControlFlow::Continue(())
+                },
+            ) {
                 Ok(report) => {
                     eprintln!();
                     for w in &report.warnings {
@@ -132,6 +139,7 @@ fn main() -> ExitCode {
                 &output,
                 password.as_deref(),
                 force,
+                &CancelFlag::new(),
                 &|p: &Progress| {
                     if let Phase::Extracting = p.phase {
                         eprint!("\r[extract {}/{}] {}        ", p.done, p.total, p.entry);

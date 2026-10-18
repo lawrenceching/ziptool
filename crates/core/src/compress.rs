@@ -1,7 +1,8 @@
 //! 批量压缩编排:input 下每个顶层条目(目录或文件)各压缩为一个包。
 //!
 //! - 进度:每完成一个条目回调一次 `Progress`(done 从 1 递增,total 为条目总数)
-//! - 取消:回调返回 `ControlFlow::Break` 后不再开始下一个条目,已完成的保留
+//! - 取消两个生效点:条目间由回调 `ControlFlow::Break`(已完成的保留);
+//!   条目内由 `CancelFlag` 置位 kill 后端进程, 当前条目作废并清理半成品
 //! - 随机包名:`zt_<16hex>.zip`,同时在 out_dir 写 `mapping.csv` 记录对应关系
 
 use std::fs;
@@ -9,6 +10,7 @@ use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+use crate::CancelFlag;
 use crate::backend::{Backend, CommandBackend};
 use crate::naming::random_name;
 use crate::progress::{Phase, Progress};
@@ -28,7 +30,7 @@ pub struct CompressedEntry {
 #[derive(Debug, Default)]
 pub struct Report {
     pub entries: Vec<CompressedEntry>,
-    /// 回调要求取消而提前结束时为 true
+    /// 取消而提前结束时为 true(条目间 Break, 或条目内 kill 后端进程)
     pub cancelled: bool,
     /// 扫描阶段的非致命问题(如无权限子树)
     pub warnings: Vec<String>,
@@ -39,9 +41,17 @@ pub fn compress_dir(
     input: &Path,
     out_dir: &Path,
     opts: &Options,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<Report> {
-    compress_with_backend(&Backend::native(), input, out_dir, opts, on_progress)
+    compress_with_backend(
+        &Backend::native(),
+        input,
+        out_dir,
+        opts,
+        cancel,
+        on_progress,
+    )
 }
 
 pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
@@ -49,6 +59,7 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
     input: &Path,
     out_dir: &Path,
     opts: &Options,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<Report> {
     if !input.is_dir() {
@@ -65,8 +76,15 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
 
     // Step 2/3 经分阶段 API 组合(行为与历史实现逐项一致)
     plan(input, out_dir, &mut entries, opts)?;
-    let mut report =
-        compress_entries_with_backend(backend, input, out_dir, &entries, opts, on_progress)?;
+    let mut report = compress_entries_with_backend(
+        backend,
+        input,
+        out_dir,
+        &entries,
+        opts,
+        cancel,
+        on_progress,
+    )?;
     report.warnings = scan.warnings;
     Ok(report)
 }
@@ -101,6 +119,7 @@ pub fn compress_entries(
     out_dir: &Path,
     entries: &[Entry],
     opts: &Options,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<Report> {
     compress_entries_with_backend(
@@ -109,6 +128,7 @@ pub fn compress_entries(
         out_dir,
         entries,
         opts,
+        cancel,
         on_progress,
     )
 }
@@ -119,6 +139,7 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
     out_dir: &Path,
     entries: &[Entry],
     opts: &Options,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<Report> {
     backend.check_split_size(opts.split_size)?;
@@ -145,10 +166,15 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
         let out_zip = out_abs.join(format!("{}.zip", e.dst));
         let result = backend
             .compress_command(&input_abs, &e.name, &out_zip, opts)
-            .and_then(|mut cmd| backend.run(&mut cmd));
+            .and_then(|mut cmd| backend.run(&mut cmd, cancel));
         if let Err(err) = result {
             // 停批并清理半成品: 半成品分卷被误当完整包比少一个包更危险
             cleanup_partial(&out_abs, &e.dst);
+            if matches!(err, CoreError::Cancelled) {
+                // 进程内取消: 当前条目作废(不计进度/不进 mapping), 已完成的保留
+                report.cancelled = true;
+                break;
+            }
             return Err(err);
         }
 
@@ -431,6 +457,7 @@ mod tests {
             &root.join("in"),
             &root.join("in/out"),
             &opts(None),
+            &CancelFlag::new(),
             &noop,
         )
         .unwrap_err();
@@ -449,6 +476,7 @@ mod tests {
             &root.join("in"),
             &root.join("out"),
             &opts(Some(1024)),
+            &CancelFlag::new(),
             &noop,
         )
         .unwrap_err();
@@ -507,7 +535,7 @@ mod fake_tests {
             Ok(Command::new("fake-unused"))
         }
 
-        fn run(&self, _cmd: &mut Command) -> Result<()> {
+        fn run(&self, _cmd: &mut Command, _cancel: &crate::CancelFlag) -> Result<()> {
             Ok(())
         }
 
@@ -544,6 +572,7 @@ mod fake_tests {
             &root.join("in"),
             &root.join("out"),
             &rnd(),
+            &CancelFlag::new(),
             &|p| {
                 events.borrow_mut().push(p.clone());
                 ControlFlow::Continue(())
@@ -589,6 +618,7 @@ mod fake_tests {
             &root.join("in"),
             &root.join("out"),
             &rnd(),
+            &CancelFlag::new(),
             &|_| ControlFlow::Continue(()),
         );
         assert!(err.is_err(), "后端失败应上抛");
@@ -620,19 +650,102 @@ mod fake_tests {
     fn cancel_break_stops_before_next_entry() {
         let root = two_entries_fixture("cancel");
         let fb = FakeBackend::new(&[]);
-        let report =
-            compress_with_backend(&fb, &root.join("in"), &root.join("out"), &rnd(), &|p| {
+        let report = compress_with_backend(
+            &fb,
+            &root.join("in"),
+            &root.join("out"),
+            &rnd(),
+            &CancelFlag::new(),
+            &|p| {
                 if p.phase == Phase::Compressing && p.done >= 1 {
                     ControlFlow::Break(())
                 } else {
                     ControlFlow::Continue(())
                 }
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert!(report.cancelled);
         assert_eq!(*fb.attempted.borrow(), ["A"], "取消后 B 不应开始");
         assert_eq!(report.entries.len(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 取消型假后端:cancel_on 条目写出半成品分卷后返回 Err(Cancelled),
+    /// 模拟"run 期间进程被 kill"
+    struct CancellingBackend {
+        cancel_on: Vec<String>,
+        attempted: RefCell<Vec<String>>,
+    }
+
+    impl CommandBackend for CancellingBackend {
+        fn compress_command(
+            &self,
+            _work: &Path,
+            name: &str,
+            out_zip: &Path,
+            _opts: &Options,
+        ) -> Result<Command> {
+            self.attempted.borrow_mut().push(name.to_string());
+            let stem = out_zip.file_stem().unwrap().to_string_lossy().into_owned();
+            let dir = out_zip.parent().unwrap().to_path_buf();
+            if self.cancel_on.iter().any(|f| *f == name) {
+                fs::write(dir.join(format!("{stem}.z01")), b"part").unwrap();
+                return Err(CoreError::Cancelled);
+            }
+            fs::write(dir.join(format!("{stem}.zip")), b"fake").unwrap();
+            Ok(Command::new("fake-unused"))
+        }
+
+        fn run(&self, _cmd: &mut Command, _cancel: &crate::CancelFlag) -> Result<()> {
+            Ok(())
+        }
+
+        fn check_split_size(&self, _size: Option<u64>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn process_cancel_discards_entry_keeps_done_and_stops_batch() {
+        let root = two_entries_fixture("kill");
+        let be = CancellingBackend {
+            cancel_on: vec!["B".to_string()],
+            attempted: RefCell::new(Vec::new()),
+        };
+        let report = compress_with_backend(
+            &be,
+            &root.join("in"),
+            &root.join("out"),
+            &rnd(),
+            &CancelFlag::new(),
+            &|_| ControlFlow::Continue(()),
+        )
+        .unwrap();
+
+        // Ok 而非 Err: 取消是正常终态, 半成品已清、已完成条目保留
+        assert!(report.cancelled);
+        assert_eq!(report.entries.len(), 1, "被杀的 B 不应计入");
+        assert_eq!(*be.attempted.borrow(), ["A", "B"], "后续条目不应开始");
+        let names: Vec<String> = fs::read_dir(root.join("out"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.starts_with("B.")),
+            "B 的半成品应被清理: {names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.starts_with("zt_") && n.ends_with(".zip"))
+                .count(),
+            1,
+            "A 的产物保留: {names:?}"
+        );
+        let csv = fs::read_to_string(root.join("out/mapping.csv")).unwrap();
+        assert_eq!(csv.lines().count(), 2, "被杀的 B 不应进 mapping: {csv}");
         fs::remove_dir_all(&root).unwrap();
     }
 }
@@ -708,7 +821,7 @@ mod staged_tests {
             Ok(Command::new("fake-unused"))
         }
 
-        fn run(&self, _cmd: &mut Command) -> Result<()> {
+        fn run(&self, _cmd: &mut Command, _cancel: &crate::CancelFlag) -> Result<()> {
             Ok(())
         }
 
@@ -754,6 +867,7 @@ mod staged_tests {
             &root.join("out"),
             &es,
             &opts(),
+            &CancelFlag::new(),
             &noop,
         )
         .unwrap_err();
@@ -775,6 +889,7 @@ mod staged_tests {
             &root.join("in"),
             &root.join("out1"),
             &opts(),
+            &CancelFlag::new(),
             &noop,
         )
         .unwrap();
@@ -793,6 +908,7 @@ mod staged_tests {
             &root.join("out2"),
             &es,
             &opts(),
+            &CancelFlag::new(),
             &|p| {
                 events.borrow_mut().push(p.clone());
                 ControlFlow::Continue(())

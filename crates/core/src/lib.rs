@@ -3,7 +3,8 @@
 //! CLI(`zip-tool-cli`)与 Tauri UI(`zip-tool-tauri`)共用本 crate。
 //! 核心只做逻辑,不依赖任何终端或 UI 设施:
 //! - 进度通过 `on_progress` 回调上报,CLI 画进度条、Tauri 推送事件;
-//! - 取消通过回调返回 `ControlFlow::Break` 实现(CLI Ctrl+C / UI 取消按钮)。
+//! - 取消经 [`CancelFlag`] 触发:条目/组边界由回调返回 `ControlFlow::Break`,
+//!   条目/组内部则终止在跑的后端命令进程并清理半成品(`CoreError::Cancelled`)。
 //!
 //! 压缩后端按平台选择(core 内部抽象,均为调用外部命令):
 //! - Linux: 系统 `zip` 命令
@@ -21,6 +22,7 @@
 //! 两侧输出均为 zip 格式,解压/合并由 `extract` 承担。
 
 pub mod backend;
+pub mod cancel;
 pub mod compress;
 pub mod doctor;
 pub mod extract;
@@ -29,6 +31,7 @@ pub mod progress;
 pub mod scan;
 
 pub use backend::parse_size;
+pub use cancel::CancelFlag;
 pub use compress::{CompressedEntry, Report, compress_dir, compress_entries, plan};
 pub use extract::{
     ExtractGroup, ExtractReport, ExtractScan, MetaFile, ScanIssue, extract, extract_prepared,
@@ -95,6 +98,8 @@ pub enum CoreError {
         status: String,
         output: String,
     },
+    /// 任务被取消:在跑的后端命令进程已被终止并等待回收,半成品由编排层清理
+    Cancelled,
     /// 文件系统 IO 错误
     Io(std::io::Error),
 }
@@ -166,6 +171,7 @@ impl fmt::Display for CoreError {
                 status,
                 output,
             } => write!(f, "{program} failed ({status}):\n{output}"),
+            CoreError::Cancelled => write!(f, "operation cancelled"),
             CoreError::Io(e) => write!(f, "io error: {e}"),
         }
     }

@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zip_tool_core::{Options, Progress, compress_dir, extract};
+use zip_tool_core::{CancelFlag, Options, Progress, compress_dir, extract};
 
 static TMP_N: AtomicU64 = AtomicU64::new(0);
 
@@ -45,12 +45,21 @@ fn round_trip_plain() {
         &root.join("in"),
         &root.join("out"),
         &Options::default(),
+        &CancelFlag::new(),
         &|_| ControlFlow::Continue(()),
     )
     .unwrap();
 
     let dest = root.join("dest");
-    let report = extract(&report.entries[0].archive, &dest, None, false, &noop).unwrap();
+    let report = extract(
+        &report.entries[0].archive,
+        &dest,
+        None,
+        false,
+        &CancelFlag::new(),
+        &noop,
+    )
+    .unwrap();
     assert_eq!(report.groups.len(), 1, "单包输入恰好一组");
     assert_eq!(report.groups[0].files, 1);
 
@@ -70,9 +79,13 @@ fn round_trip_split_volumes() {
         split_size: Some(64 * 1024),
         ..Default::default()
     };
-    let report = compress_dir(&root.join("in"), &root.join("out"), &opts, &|_| {
-        ControlFlow::Continue(())
-    })
+    let report = compress_dir(
+        &root.join("in"),
+        &root.join("out"),
+        &opts,
+        &CancelFlag::new(),
+        &|_| ControlFlow::Continue(()),
+    )
     .unwrap();
 
     let archive = &report.entries[0].archive;
@@ -85,7 +98,7 @@ fn round_trip_split_volumes() {
     assert!(volumes >= 2, "200KB/64KB 应产生多个分卷,实际 {volumes}");
 
     let dest = root.join("dest");
-    extract(archive, &dest, None, false, &noop).unwrap();
+    extract(archive, &dest, None, false, &CancelFlag::new(), &noop).unwrap();
     assert_eq!(
         fs::read(dest.join("Big/b.bin")).unwrap(),
         pseudo_random_bytes(200 * 1024)
@@ -102,9 +115,13 @@ fn round_trip_with_password() {
         password: Some("pw123".into()),
         ..Default::default()
     };
-    let report = compress_dir(&root.join("in"), &root.join("out"), &opts, &|_| {
-        ControlFlow::Continue(())
-    })
+    let report = compress_dir(
+        &root.join("in"),
+        &root.join("out"),
+        &opts,
+        &CancelFlag::new(),
+        &|_| ControlFlow::Continue(()),
+    )
     .unwrap();
 
     let dest = root.join("dest");
@@ -113,6 +130,7 @@ fn round_trip_with_password() {
         &dest,
         Some("pw123"),
         false,
+        &CancelFlag::new(),
         &noop,
     )
     .unwrap();
@@ -129,6 +147,7 @@ fn round_trip_with_password() {
             &bad,
             Some("wrong"),
             false,
+            &CancelFlag::new(),
             &noop
         )
         .is_err(),
@@ -141,6 +160,7 @@ fn round_trip_with_password() {
             &root.join("dest-none"),
             None,
             false,
+            &CancelFlag::new(),
             &noop
         )
         .is_err()

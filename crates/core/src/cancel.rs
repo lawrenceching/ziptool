@@ -1,11 +1,16 @@
-//! 任务取消旗标:把"UI 点击取消"桥接成 core 进度回调的 `ControlFlow::Break`。
+//! 取消旗标:把调用方(UI 取消按钮 / 外壳退出)的"取消"意图桥接进 core。
+//! 两个生效点:
+//! - 条目/组边界:进度回调返回 `ControlFlow::Break`(粒度同旧语义)
+//! - 条目/组内部:[`super::backend`] 的进程轮询发现置位即 kill 后端命令并返回
+//!   `CoreError::Cancelled`,由编排层清理半成品后转为 `report.cancelled`
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zip_tool_core::Progress;
+use crate::Progress;
 
+/// 跨线程取消旗标(`Arc<AtomicBool>` 克隆体,外壳持有原份用于触发)
 #[derive(Debug, Clone, Default)]
 pub struct CancelFlag(Arc<AtomicBool>);
 
@@ -43,8 +48,8 @@ impl CancelFlag {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Phase;
     use std::cell::RefCell;
-    use zip_tool_core::Phase;
 
     #[test]
     fn forwards_progress_until_cancelled() {

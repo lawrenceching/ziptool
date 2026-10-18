@@ -8,6 +8,7 @@
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+use crate::CancelFlag;
 use crate::Result;
 use crate::backend::{ArchiveListing, Backend, ExtractBackend};
 use crate::progress::{Phase, Progress};
@@ -15,12 +16,14 @@ use crate::progress::{Phase, Progress};
 /// 解压入口(见 _docs/extract.md): input 为文件(单包)或目录(批量, 第 7 节)。
 /// dest 会被创建; 默认拒绝覆盖已有文件, force = true 才覆盖(对应 CLI --force)。
 /// password 与压缩时一致; 无密码传 None。
-/// 进度经 on_progress 上报(Phase::Extracting), 取消在组间生效(与 compress 一致)。
+/// 进度经 on_progress 上报(Phase::Extracting)。取消两个生效点:组间由回调
+/// Break 生效;组内则 kill 解压进程并回滚本组已解文件(与 compress 一致)。
 pub fn extract(
     input: &Path,
     dest: &Path,
     password: Option<&str>,
     force: bool,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<ExtractReport> {
     extract_with_backend(
@@ -31,6 +34,7 @@ pub fn extract(
         dest,
         password,
         force,
+        cancel,
         on_progress,
     )
 }
@@ -42,6 +46,7 @@ pub(crate) fn extract_with_backend<B: ExtractBackend + ?Sized>(
     dest: &Path,
     password: Option<&str>,
     force: bool,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<ExtractReport> {
     let (groups, issues) = if input.is_dir() {
@@ -68,7 +73,16 @@ pub(crate) fn extract_with_backend<B: ExtractBackend + ?Sized>(
         .into_iter()
         .map(|i| format!("{}: {}", i.name, i.message))
         .collect();
-    extract_groups(be, &groups, dest, password, force, warnings, on_progress)
+    extract_groups(
+        be,
+        &groups,
+        dest,
+        password,
+        force,
+        warnings,
+        cancel,
+        on_progress,
+    )
 }
 
 /// 批量解压执行(独立阶段, _docs/ui-backend.md 6): 对给定的组做 B2 全量预检 + B3
@@ -79,6 +93,7 @@ pub fn extract_prepared(
     dest: &Path,
     password: Option<&str>,
     force: bool,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<ExtractReport> {
     extract_groups(
@@ -90,6 +105,7 @@ pub fn extract_prepared(
         password,
         force,
         Vec::new(),
+        cancel,
         on_progress,
     )
 }
@@ -274,8 +290,10 @@ pub struct ExtractReport {
 }
 
 /// 依次解压全部组: 先对每组做预检(5.1), 全部通过后再逐组解压 ——
-/// 避免解了一半才发现后面的组冲突。取消在组间生效(与 compress 语义一致)。
+/// 避免解了一半才发现后面的组冲突。取消两个生效点:组间由回调 Break 生效;
+/// 组内由 `cancel` 置位 kill 解压进程, 本组按清单回滚后停止(与 compress 语义一致)。
 /// warnings 作为报告初值(批量扫描的分类警告原样透传)。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_groups<B: ExtractBackend + ?Sized>(
     be: &B,
     groups: &[ExtractGroup],
@@ -283,6 +301,7 @@ pub(crate) fn extract_groups<B: ExtractBackend + ?Sized>(
     password: Option<&str>,
     force: bool,
     warnings: Vec<String>,
+    cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<ExtractReport> {
     // B2 全量预检: 入口卷存在 → dest 可用 → list → zip-slip → 冲突(--force 跳过)
@@ -316,10 +335,15 @@ pub(crate) fn extract_groups<B: ExtractBackend + ?Sized>(
             report.cancelled = true;
             break;
         }
-        if let Err(err) = be.extract(g.resolved.backend, &g.resolved.path, dest, password) {
+        if let Err(err) = be.extract(g.resolved.backend, &g.resolved.path, dest, password, cancel) {
             // 失败按清单清理本次解出的文件(--force 无法区分新旧, 不清理)
             if !force {
                 cleanup_extracted(&listings[i].names, dest);
+            }
+            if matches!(err, crate::CoreError::Cancelled) {
+                // 进程内取消: 本组回滚(不计入), 剩余组不再开始
+                report.cancelled = true;
+                break;
             }
             return Err(err);
         }
@@ -577,6 +601,8 @@ mod orch_tests {
         listing: Vec<String>,
         writes: Vec<String>,
         fail: bool,
+        /// extract 时写出文件后返回 Err(Cancelled), 模拟"进程被 kill"
+        cancel: bool,
         calls: RefCell<Vec<&'static str>>,
     }
 
@@ -586,6 +612,17 @@ mod orch_tests {
                 listing: s(listing),
                 writes: s(writes),
                 fail,
+                cancel: false,
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn new_cancelling(listing: &[&str], writes: &[&str]) -> Self {
+            Self {
+                listing: s(listing),
+                writes: s(writes),
+                fail: false,
+                cancel: true,
                 calls: RefCell::new(Vec::new()),
             }
         }
@@ -611,6 +648,7 @@ mod orch_tests {
             _entry: &Path,
             dest: &Path,
             _pw: Option<&str>,
+            _cancel: &crate::CancelFlag,
         ) -> Result<()> {
             self.calls.borrow_mut().push("extract");
             for w in &self.writes {
@@ -618,7 +656,9 @@ mod orch_tests {
                 fs::create_dir_all(p.parent().unwrap()).unwrap();
                 fs::write(&p, b"x").unwrap();
             }
-            if self.fail {
+            if self.cancel {
+                Err(CoreError::Cancelled)
+            } else if self.fail {
                 Err(CoreError::BackendFailed {
                     program: "fake".into(),
                     status: "exit status: 1".into(),
@@ -660,10 +700,19 @@ mod orch_tests {
         );
         let dest = root.join("restore");
         let events = RefCell::new(Vec::new());
-        let report = extract_groups(&be, &[g], &dest, None, false, Vec::new(), &|p| {
-            events.borrow_mut().push(p.clone());
-            ControlFlow::Continue(())
-        })
+        let report = extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
         .unwrap();
         assert_eq!(report.groups.len(), 1);
         assert_eq!(report.groups[0].entry, "B.zip");
@@ -689,8 +738,17 @@ mod orch_tests {
         let (root, g) = one_group("ex-missing");
         fs::remove_file(&g.resolved.path).unwrap();
         let be = FakeExtract::new(&[], &[], false);
-        let err =
-            extract_groups(&be, &[g], &root.join("r"), None, false, Vec::new(), &noop).unwrap_err();
+        let err = extract_groups(
+            &be,
+            &[g],
+            &root.join("r"),
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap_err();
         assert!(matches!(err, CoreError::ArchiveNotFound(_)));
         assert!(be.calls.borrow().is_empty());
         fs::remove_dir_all(&root).unwrap();
@@ -702,7 +760,17 @@ mod orch_tests {
         let dest = root.join("dest");
         fs::write(&dest, b"f").unwrap();
         let be = FakeExtract::new(&[], &[], false);
-        let err = extract_groups(&be, &[g], &dest, None, false, Vec::new(), &noop).unwrap_err();
+        let err = extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap_err();
         assert!(matches!(err, CoreError::DestNotADirectory(_)));
         assert!(be.calls.borrow().is_empty(), "dest 检查应在 list 之前");
         fs::remove_dir_all(&root).unwrap();
@@ -716,7 +784,17 @@ mod orch_tests {
         fs::create_dir_all(&dest).unwrap();
         fs::write(dest.join("photo.jpg"), b"old").unwrap();
         let be = FakeExtract::new(&["photo.jpg"], &["photo.jpg"], false);
-        let err = extract_groups(&be, &[g], &dest, None, false, Vec::new(), &noop).unwrap_err();
+        let err = extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap_err();
         assert!(matches!(err, CoreError::ExtractConflict(_)));
         assert_eq!(*be.calls.borrow(), ["list"], "只应 list, 不应 extract");
         fs::remove_dir_all(&root).unwrap();
@@ -729,7 +807,17 @@ mod orch_tests {
         fs::create_dir_all(&dest).unwrap();
         fs::write(dest.join("photo.jpg"), b"old").unwrap();
         let be = FakeExtract::new(&["photo.jpg"], &["photo.jpg"], false);
-        extract_groups(&be, &[g], &dest, None, true, Vec::new(), &noop).unwrap();
+        extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            true,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap();
         assert_eq!(*be.calls.borrow(), ["list", "extract"]);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -738,8 +826,17 @@ mod orch_tests {
     fn zip_slip_rejects_before_any_extract() {
         let (root, g) = one_group("ex-slip");
         let be = FakeExtract::new(&["../evil.txt"], &["../evil.txt"], false);
-        let err =
-            extract_groups(&be, &[g], &root.join("r"), None, false, Vec::new(), &noop).unwrap_err();
+        let err = extract_groups(
+            &be,
+            &[g],
+            &root.join("r"),
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap_err();
         assert!(matches!(err, CoreError::UnsafeArchive { .. }));
         assert_eq!(*be.calls.borrow(), ["list"]);
         fs::remove_dir_all(&root).unwrap();
@@ -754,7 +851,17 @@ mod orch_tests {
             true,
         );
         let dest = root.join("restore");
-        let err = extract_groups(&be, &[g], &dest, None, false, Vec::new(), &noop).unwrap_err();
+        let err = extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap_err();
         assert!(matches!(err, CoreError::BackendFailed { .. }));
         assert!(
             !dest.exists() || fs::read_dir(&dest).unwrap().next().is_none(),
@@ -770,7 +877,16 @@ mod orch_tests {
         let be = FakeExtract::new(&["photo.jpg"], &["photo.jpg"], true);
         let dest = root.join("restore");
         fs::create_dir_all(&dest).unwrap();
-        let r = extract_groups(&be, &[g], &dest, None, true, Vec::new(), &noop);
+        let r = extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            true,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        );
         assert!(r.is_err());
         assert!(dest.join("photo.jpg").exists(), "--force 失败不应清理");
         fs::remove_dir_all(&root).unwrap();
@@ -782,8 +898,17 @@ mod orch_tests {
         let be = RealExtract {
             program_override: Some("no-such-tool-xyz-42"),
         };
-        let err =
-            extract_groups(&be, &[g], &root.join("r"), None, false, Vec::new(), &noop).unwrap_err();
+        let err = extract_groups(
+            &be,
+            &[g],
+            &root.join("r"),
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap_err();
         assert!(matches!(err, CoreError::ToolMissing(_)));
         fs::remove_dir_all(&root).unwrap();
     }
@@ -792,9 +917,16 @@ mod orch_tests {
     fn cancel_at_start_event_skips_group() {
         let (root, g) = one_group("ex-cancel-start");
         let be = FakeExtract::new(&["a.txt"], &["a.txt"], false);
-        let report = extract_groups(&be, &[g], &root.join("r"), None, false, Vec::new(), &|_| {
-            ControlFlow::Break(())
-        })
+        let report = extract_groups(
+            &be,
+            &[g],
+            &root.join("r"),
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &|_| ControlFlow::Break(()),
+        )
         .unwrap();
         assert!(report.cancelled);
         assert!(report.groups.is_empty(), "取消在组开始前生效");
@@ -822,6 +954,7 @@ mod orch_tests {
             None,
             false,
             Vec::new(),
+            &CancelFlag::new(),
             &|_| {
                 *seen.borrow_mut() += 1;
                 if *seen.borrow() >= 2 {
@@ -839,6 +972,73 @@ mod orch_tests {
     }
 
     #[test]
+    fn process_cancel_rolls_back_group_and_stops_batch() {
+        let (root, g1) = one_group("ex-kill");
+        let g2 = ExtractGroup {
+            resolved: ResolvedArchive {
+                path: root.join("B.zip"),
+                backend: Backend::SevenZip,
+            },
+            original: None,
+            size: 0,
+        };
+        let be = FakeExtract::new_cancelling(&["Novel/a.txt"], &["Novel/a.txt"]);
+        let dest = root.join("restore");
+        let report = extract_groups(
+            &be,
+            &[g1, g2],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap();
+
+        // Ok 而非 Err: 取消是正常终态; 本组已解文件回滚, 下一组不开始
+        assert!(report.cancelled);
+        assert!(
+            report.groups.is_empty(),
+            "被杀组不应计入: {:?}",
+            report.groups
+        );
+        assert_eq!(
+            *be.calls.borrow(),
+            ["list", "list", "extract"],
+            "第二组不应 extract"
+        );
+        assert!(
+            !dest.join("Novel/a.txt").exists(),
+            "被杀组已解出的文件应按清单回滚"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn process_cancel_with_force_keeps_files_but_marks_cancelled() {
+        let (root, g1) = one_group("ex-kill-force");
+        let be = FakeExtract::new_cancelling(&["a.txt"], &["a.txt"]);
+        let dest = root.join("restore");
+        let report = extract_groups(
+            &be,
+            &[g1],
+            &dest,
+            None,
+            true,
+            Vec::new(),
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap();
+
+        assert!(report.cancelled);
+        assert!(report.groups.is_empty());
+        assert!(dest.join("a.txt").exists(), "--force 无法区分新旧, 不回滚");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn public_entry_accepts_single_file_input() {
         let root = unique_temp("api-file");
         fs::create_dir_all(&root).unwrap();
@@ -850,6 +1050,7 @@ mod orch_tests {
             &root.join("restore"),
             None,
             false,
+            &CancelFlag::new(),
             &noop,
         )
         .unwrap();
@@ -866,8 +1067,16 @@ mod orch_tests {
         fs::write(root.join("B.zip"), b"").unwrap();
         fs::write(root.join("notes.txt"), b"").unwrap();
         let be = FakeExtract::new(&["a.txt"], &["a.txt"], false);
-        let report =
-            extract_with_backend(&be, &root, &root.join("restore"), None, false, &noop).unwrap();
+        let report = extract_with_backend(
+            &be,
+            &root,
+            &root.join("restore"),
+            None,
+            false,
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap();
         assert_eq!(report.groups.len(), 2);
         assert_eq!(report.groups[0].entry, "A.zip");
         assert_eq!(report.groups[1].entry, "B.zip");
@@ -884,8 +1093,16 @@ mod orch_tests {
         let root = unique_temp("api-empty");
         fs::create_dir_all(&root).unwrap();
         let be = FakeExtract::new(&[], &[], false);
-        let err =
-            extract_with_backend(&be, &root, &root.join("r"), None, false, &noop).unwrap_err();
+        let err = extract_with_backend(
+            &be,
+            &root,
+            &root.join("r"),
+            None,
+            false,
+            &CancelFlag::new(),
+            &noop,
+        )
+        .unwrap_err();
         assert!(matches!(err, CoreError::NoArchives(_)));
         fs::remove_dir_all(&root).unwrap();
     }

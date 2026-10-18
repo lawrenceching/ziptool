@@ -3,23 +3,22 @@
 //! - `scan`: 只扫描不执行, 结果缓存在外壳([`ScanContext`] 保鲜)
 //! - `compress` / `extract_archive`: 按勾选名单筛选缓存结果, 走 core 分阶段 API
 //!   (plan + compress_entries / extract_prepared), **不重复扫描**
-//! - `cancel_current`: 取消当前任务(条目间/组间生效)
+//! - `cancel_current`: 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续)
 //!
 //! 命令在 `spawn_blocking` 中调 core, 进度经 `tauri::ipc::Channel` 推给前端;
 //! scan/compress/extract 单任务互斥, 任务结束释放忙闲标志并清空取消旗标。
 
-mod job;
-
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tauri::State;
 use tauri::ipc::Channel;
 
-use job::CancelFlag;
 use zip_tool_core::{
-    Entry, EntryKind, ExtractGroup, ExtractScan, Options, Phase, Progress, ScanReport,
+    CancelFlag, Entry, EntryKind, ExtractGroup, ExtractScan, Options, Phase, Progress, ScanReport,
 };
 
 const POISONED: &str = "state poisoned";
@@ -405,13 +404,15 @@ async fn compress(
     let dst_path = PathBuf::from(&dst);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut selected = selected;
+        let cb_flag = flag.clone();
         zip_tool_core::plan(&src_path, &dst_path, &mut selected, &opts)?;
         zip_tool_core::compress_entries(
             &src_path,
             &dst_path,
             &selected,
             &opts,
-            &flag.into_callback(|p| {
+            &flag,
+            &cb_flag.into_callback(|p| {
                 let _ = on_progress.send(ProgressEvent::from(p));
             }),
         )
@@ -467,12 +468,14 @@ async fn extract_archive(
     }
     let dst_path = PathBuf::from(&dst);
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let cb_flag = flag.clone();
         zip_tool_core::extract_prepared(
             &selected,
             &dst_path,
             password.as_deref(),
             force,
-            &flag.into_callback(|p| {
+            &flag,
+            &cb_flag.into_callback(|p| {
                 let _ = on_progress.send(ProgressEvent::from(p));
             }),
         )
@@ -497,13 +500,31 @@ async fn extract_archive(
     })
 }
 
-/// 取消当前任务(在当前条目/组完成后生效); 无任务时为 no-op
+/// 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续); 无任务时为 no-op
 #[tauri::command]
 fn cancel_current(state: State<'_, AppState>) {
-    if let Ok(current) = state.current.lock() {
-        if let Some(flag) = current.as_ref() {
-            flag.cancel();
+    if let Ok(current) = state.current.lock()
+        && let Some(flag) = current.as_ref()
+    {
+        flag.cancel();
+    }
+}
+
+/// 阻塞等待任务收尾: busy 释放(或超时)后返回是否空闲。
+/// 退出前给"kill 子进程 + 清理半成品"留时间(任务收尾在 spawn_blocking 线程, 无死锁)。
+fn wait_until_idle(busy: &Mutex<Option<&'static str>>, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match busy.lock() {
+            Ok(b) if b.is_none() => return true,
+            // 锁中毒: 无法确认状态, 按失败处理放行退出
+            Err(_) => return false,
+            Ok(_) => {}
         }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -519,8 +540,24 @@ pub fn run() {
             extract_archive,
             cancel_current
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 窗口全部关闭(或 app.exit)时: 取消在跑的任务 —— core 会 kill 在跑的
+            // 后端进程并清理半成品 —— 等其收尾后再退出, 避免孤儿进程占用压缩包。
+            // scan 在跑时 current 为 None(扫描无外部进程, 随进程退出自然终止)。
+            if let tauri::RunEvent::ExitRequested { .. } = event
+                && let Some(state) = app.try_state::<AppState>()
+            {
+                if let Ok(current) = state.current.lock()
+                    && let Some(flag) = current.as_ref()
+                {
+                    flag.cancel();
+                }
+                // 上限兜底: 正常 kill+清理在数百 ms 内完成, 超时放行退出
+                wait_until_idle(&state.busy, Duration::from_secs(5));
+            }
+        });
 }
 
 #[cfg(test)]
@@ -700,5 +737,39 @@ mod tests {
     fn scan_data_enum_holds_both_kinds() {
         let ctx = compress_ctx("x");
         assert!(matches!(ctx.data, ScanData::Compress(_)));
+    }
+
+    #[test]
+    fn wait_until_idle_returns_immediately_when_idle() {
+        let busy: Mutex<Option<&'static str>> = Mutex::new(None);
+        let start = std::time::Instant::now();
+        assert!(wait_until_idle(&busy, Duration::from_secs(1)));
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "空闲应立即返回"
+        );
+    }
+
+    #[test]
+    fn wait_until_idle_times_out_when_busy() {
+        let busy: Mutex<Option<&'static str>> = Mutex::new(Some("compress"));
+        let start = std::time::Instant::now();
+        assert!(!wait_until_idle(&busy, Duration::from_millis(150)));
+        assert!(
+            start.elapsed() >= Duration::from_millis(150),
+            "忙时应等满超时再放行"
+        );
+    }
+
+    #[test]
+    fn wait_until_idle_returns_once_job_releases() {
+        let busy: std::sync::Arc<Mutex<Option<&'static str>>> =
+            std::sync::Arc::new(Mutex::new(Some("compress")));
+        let b = busy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            *b.lock().unwrap() = None;
+        });
+        assert!(wait_until_idle(&busy, Duration::from_secs(5)));
     }
 }

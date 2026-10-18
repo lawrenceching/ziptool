@@ -222,7 +222,7 @@ pub struct ExtractReport {
     pub groups: Vec<ExtractedGroup>,
     /// 孤儿卷 / 非包文件 / mapping 异常等非致命信息
     pub warnings: Vec<String>,
-    /// 批量模式下用户取消(组间生效)
+    /// 批量模式下用户取消(组间 Break 或组内杀进程)
     pub cancelled: bool,
 }
 
@@ -250,8 +250,8 @@ pub struct ExtractedGroup {
 
 ### 8.2 取消
 
-- 回调返回 `ControlFlow::Break`: 批量模式在**组间**生效(当前组让后端跑完, 计入报告, 后续组不开始 —— 与 compress 的取消语义一致); 单包模式仅"开始前"生效
-- 后端运行中无法响应取消 —— 与 compress 的"杀子进程"后续改进合并处理
+- 回调返回 `ControlFlow::Break`: 批量模式在**组间**生效(当前组已解完, 计入报告, 后续组不开始); 单包模式仅"开始前"生效
+- `CancelFlag` 置位: 组内立即 kill 解压进程, 本组按清单回滚(默认; `--force` 无法区分新旧, 不回滚)后停止, 与 compress 的取消语义一致
 - CLI Ctrl+C 是控制台信号, 本进程与后端子进程同组同死, 等效硬中断: dest 留半成品, 重跑需清空 dest 或 `--force`(半成品在下次运行时会被冲突预检拦住, 不会静默覆盖)
 
 **与现状差异**: 现状 `extract` 无进度回调、无取消参与点、无批量模式.
@@ -313,7 +313,7 @@ CLI 退出码沿用: `0` 成功(含 cancelled 完整返回), `1` 一般错误(Co
 
 1. **manifest 校验**: 解压后校验 SHA-256(与 compress.md 11.2 的 manifest 输出配对)
 2. **doctor 增加 unzip 检查项**: Linux 解压依赖 unzip, ToolCheck 列表天然可扩展
-3. **取消杀子进程**: 与 compress 的同名改进合并做(产物按半成品规则清理)
+3. ~~**取消杀子进程**~~: 已实现(2026-10), 与 compress 同步——组内取消 kill 解压进程并按清单回滚
 4. **空间预检**: list 带上条目大小 + 输出盘剩余空间比对(需 fs4 之类依赖, 与零依赖取向冲突)
 5. **选择性解压**: 按 mapping 或通配只解部分条目(批量模式已具备分组与 mapping 基础设施); UI 的勾选筛选是**组级**选择, 已在 _docs/ui-backend.md 落地, 此处指解包内容级的更细粒度
 6. **字节级进度**: 7z 可解析 `-bsp1` 输出, unzip 无机器可读进度, 两后端不统一, 不做

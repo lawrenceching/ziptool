@@ -56,7 +56,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 | `scan` | `(mode, path, on_progress) → ScanResult` | 只扫描不执行, 选源后渲染表格 |
 | `compress` | `(src, dst, entries, options, on_progress) → CompressResult` | 批量压缩勾选项 |
 | `extract_archive` | `(src, dst, entries, options, on_progress) → ExtractResult` | 批量解压勾选项 |
-| `cancel_current` | `()` | 取消当前任务(条目间 / 组间生效) |
+| `cancel_current` | `()` | 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续) |
 
 ### 3.1 scan
 
@@ -76,7 +76,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 
 ### 3.4 cancel_current
 
-语义不变(置 CancelFlag, 当前条目 / 组跑完, 后续不再开始). 补充: 任务结束(成功 / 失败 / 取消)后 `current` 清为 `None`(现状残留已用过的 flag).
+语义升级(2026-10):置 CancelFlag 后 core 立即 kill 在跑的后端进程并清理该条目 / 组半成品(返回 `Err(Cancelled)` 转为 `report.cancelled`), 后续不再开始; 条目 / 组间取消仍经 ControlFlow::Break. 关闭窗口时外壳在 `RunEvent::ExitRequested` 置取消并等任务收尾(上限 5s), 孤儿进程不再残留. 补充: 任务结束(成功 / 失败 / 取消)后 `current` 清为 `None`(现状残留已用过的 flag).
 
 ### 3.5 忙闲互斥
 
@@ -267,6 +267,7 @@ meta / warning 行:      恒定不变
 - **core 单测(无外部命令)**: plan 在筛选集上的各预检变体; compress_entries 存在性复核(删条目 → EntryMissing、整批不开始); scan_groups 的 ExtractScan(size 合计 / meta 行 / issues / 排序不变); extract_prepared 组筛选后 B2 语义; EntryMissing Display
 - **编排测试(注入假后端)**: compress_dir 组合 = plan + compress_entries 的等价性(现有用例不改即应全绿, 是拆分正确性的回归网); extract 同理
 - **壳层单测**: DTO 映射(ScanItem 三种 status / warnings 透传); ScanContext 失配与未知名单拒绝; 忙闲互斥; parse_size 错误路径
+- **UI 单测(node --test + jsdom, `npm test`)**: 前后端契约 + 界面行为。关键设计——**表面真实、传输造假**: `window.__TAURI__` 挂真实 `@tauri-apps/api` / `@tauri-apps/plugin-dialog` 包对象(全局 bundle 就是这些模块), 只 mock 最底层 `__TAURI_INTERNALS__`; 因此 UI 引用不存在的全局 API 路径在测试期必然 TypeError(抓过实际案例: `__TAURI__.ipc.Channel`, Tauri 2 的 Channel 在 core 命名空间), 命令名/参数形状/`__CHANNEL__:<id>` 序列化/进度回放协议(`{index, message}` 对象)全按真实链路校验。UI 逻辑独立为 `ui/app.js`(index.html 外链引用)
 - **UI 走查(chrome-devtools, mock 模式)**: 状态机全迁移、行状态推导(虚拟事件序列驱动)、取消变形按钮、选项行切换
 - **实机验证(用户)**: `cargo run -p zip-tool-tauri` 走通 scan → 表格 → 确认 → 进度 → 取消 / 完成全链路(命令真到 core 与后端工具)
 - **回归**: workspace 全绿; CLI 与 E2E 用例零改动(compress_dir / extract 签名不变)
@@ -291,7 +292,7 @@ meta / warning 行:      恒定不变
 按价值排序, 均不在本次规格内:
 
 1. **扫描可取消**: scan_dir 加取消点(栈式遍历每轮回查), 大目录扫描期间允许反悔
-2. **取消杀子进程 / 关窗收尾**: 与 compress.md 11.1、extract.md 12.3 合并做; 关闭窗口时至少置取消
+2. ~~**取消杀子进程 / 关窗收尾**~~: 已实现(2026-10)——取消立即 kill 后端进程, 关窗时 `ExitRequested` 置取消并等待收尾
 3. **doctor 自检入 UI**: 启动时调 `doctor` 检查后端工具, 缺 7z 提前预警(核心已有 check_backend_tool, 只差暴露与展示)
 4. **打开输出目录**: 完成后一键 reveal 产物(含 mapping.csv 提示)
 5. **dry-run 模式**: scan + plan 后即可渲染"预计包名 / 分卷数"预览表 —— 第 6 节分阶段 API 的直接受益者(与 compress.md 11.6 合流)
