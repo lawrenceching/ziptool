@@ -89,11 +89,20 @@ fn round_trip_split_volumes() {
     .unwrap();
 
     let archive = &report.entries[0].archive;
-    assert!(
-        archive.extension().is_some_and(|e| e == "001"),
-        "分卷时应以首卷 .zip.001 为主文件,得到 {}",
-        archive.display()
-    );
+    // 主文件命名按后端不同: Windows(7z -v)首卷 .zip.001; unix(zip -s)末卷 .zip
+    if cfg!(windows) {
+        assert!(
+            archive.extension().is_some_and(|e| e == "001"),
+            "Windows 分包应以首卷 .zip.001 为主文件,得到 {}",
+            archive.display()
+        );
+    } else {
+        assert!(
+            archive.extension().is_some_and(|e| e == "zip"),
+            "unix 分包应以末卷 .zip 为主文件,得到 {}",
+            archive.display()
+        );
+    }
     let volumes = fs::read_dir(root.join("out")).unwrap().count();
     assert!(volumes >= 2, "200KB/64KB 应产生多个分卷,实际 {volumes}");
 
