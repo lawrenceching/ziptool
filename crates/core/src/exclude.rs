@@ -122,7 +122,11 @@ pub fn matches_pattern(pattern: &str, rel: &str) -> bool {
     }
     let pv: Vec<&str> = pat.split('/').collect();
     let rv: Vec<&str> = rel.split('/').collect();
-    pv.len() == rv.len() && pv.iter().zip(&rv).all(|(p, r)| match_seg(p.as_bytes(), r.as_bytes()))
+    pv.len() == rv.len()
+        && pv
+            .iter()
+            .zip(&rv)
+            .all(|(p, r)| match_seg(p.as_bytes(), r.as_bytes()))
 }
 
 /// 命中任一模式即排除, 返回首个命中的模式(供 `ExcludeReason::Pattern`)
@@ -191,7 +195,12 @@ pub(crate) struct AttrCollector {
 
 impl AttrCollector {
     pub(crate) fn new(entry_name: String) -> Self {
-        Self { entry_name, paths: Vec::new(), chars: 0, overflow: 0 }
+        Self {
+            entry_name,
+            paths: Vec::new(),
+            chars: 0,
+            overflow: 0,
+        }
     }
 
     /// rel 已含条目名前缀(如 `Novel/sub/.hid`)
@@ -264,7 +273,10 @@ pub(crate) fn exclusion_args(
                 let tok = if !p.contains('/') {
                     format!("-xr!{p}")
                 } else if let Some(prefix) = p.strip_suffix("/**") {
-                    format!("-x!{entry_name}{SEP}{}", prefix.replace('/', &SEP.to_string()))
+                    format!(
+                        "-x!{entry_name}{SEP}{}",
+                        prefix.replace('/', &SEP.to_string())
+                    )
                 } else {
                     format!("-x!{entry_name}{SEP}{}", p.replace('/', &SEP.to_string()))
                 };
@@ -298,18 +310,25 @@ mod validate_tests {
 
     #[test]
     fn accepts_legal_patterns() {
-        ok(&["Thumbs.db", "*.tmp", "sub/*.log", "node_modules/**", "a?c", r"win\path"]);
+        ok(&[
+            "Thumbs.db",
+            "*.tmp",
+            "sub/*.log",
+            "node_modules/**",
+            "a?c",
+            r"win\path",
+        ]);
     }
 
     #[test]
     fn rejects_illegal_patterns() {
-        bad(&[""]);            // 空串
-        bad(&["/abs"]);        // 首段空
-        bad(&["dir/"]);        // 尾段空
-        bad(&["a//b"]);        // 中段空
-        bad(&["**"]);          // 单独 **
-        bad(&["a/**/b"]);      // ** 不在结尾
-        bad(&["a**b"]);        // ** 不在结尾
+        bad(&[""]); // 空串
+        bad(&["/abs"]); // 首段空
+        bad(&["dir/"]); // 尾段空
+        bad(&["a//b"]); // 中段空
+        bad(&["**"]); // 单独 **
+        bad(&["a/**/b"]); // ** 不在结尾
+        bad(&["a**b"]); // ** 不在结尾
         // 反斜杠只做归一, 不是非法来源
         ok(&[r"a\b", r"a\b\**"]);
     }
@@ -342,7 +361,10 @@ mod match_tests {
         // 含 / 的模式 = 从条目根锚定的整条相对路径
         assert!(matches_pattern("sub/*.log", "sub/a.log"));
         assert!(!matches_pattern("sub/*.log", "sub/x/y.log"), "* 不跨 /");
-        assert!(!matches_pattern("sub/a.log", "other/sub/a.log"), "锚定不任意深度");
+        assert!(
+            !matches_pattern("sub/a.log", "other/sub/a.log"),
+            "锚定不任意深度"
+        );
         assert!(!matches_pattern("sub/a.log", "sub/a.log2"));
         // prefix/** = prefix 自身或其下
         assert!(matches_pattern("node_modules/**", "node_modules"));

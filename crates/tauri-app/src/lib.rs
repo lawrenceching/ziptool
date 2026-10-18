@@ -251,11 +251,7 @@ fn select_compress(
     rules: &ExcludeRules,
 ) -> Result<Vec<Entry>, String> {
     let ctx = match scan {
-        Some(c)
-            if c.mode == "compress"
-                && c.src == Path::new(src)
-                && rules_eq(&c.rules, rules) =>
-        {
+        Some(c) if c.mode == "compress" && c.src == Path::new(src) && rules_eq(&c.rules, rules) => {
             c
         }
         _ => return Err(EXPIRED.into()),
@@ -697,18 +693,33 @@ mod tests {
     fn select_compress_filters_by_names_and_rejects_mismatch() {
         let ctx = compress_ctx("C:\\s");
         // 正常筛选
-        let sel = select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &ExcludeRules::default()).unwrap();
+        let sel =
+            select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &ExcludeRules::default()).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].name, "A");
         // 未知名 = 过期
-        assert!(select_compress(Some(&ctx), "C:\\s", &s(&["X"]), &ExcludeRules::default()).is_err());
+        assert!(
+            select_compress(Some(&ctx), "C:\\s", &s(&["X"]), &ExcludeRules::default()).is_err()
+        );
         // 重复名 = 过期(严格长度校验)
         assert!(
-            select_compress(Some(&ctx), "C:\\s", &s(&["A", "A"]), &ExcludeRules::default()).is_err()
+            select_compress(
+                Some(&ctx),
+                "C:\\s",
+                &s(&["A", "A"]),
+                &ExcludeRules::default()
+            )
+            .is_err()
         );
         // src 失配 / 模式失配 / 无缓存
         assert!(
-            select_compress(Some(&ctx), "C:\\other", &s(&["A"]), &ExcludeRules::default()).is_err()
+            select_compress(
+                Some(&ctx),
+                "C:\\other",
+                &s(&["A"]),
+                &ExcludeRules::default()
+            )
+            .is_err()
         );
         assert!(select_extract(Some(&ctx), "C:\\s", &s(&["A"])).is_err());
         assert!(select_compress(None, "C:\\s", &s(&["A"]), &ExcludeRules::default()).is_err());
@@ -926,7 +937,10 @@ mod tests {
         // 规则一致 → 正常
         assert!(select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &rules).is_ok());
         // 规则不一致 = 扫描过期(5.4 语义扩展)
-        let other = ExcludeRules { include_hidden: false, patterns: vec!["x".into()] };
+        let other = ExcludeRules {
+            include_hidden: false,
+            patterns: vec!["x".into()],
+        };
         let err = select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &other).unwrap_err();
         assert!(err.contains("过期"), "{err}");
     }

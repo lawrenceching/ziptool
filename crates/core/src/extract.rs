@@ -1224,7 +1224,10 @@ mod resolve_tests {
     #[test]
     fn sevenz_member_volume_without_first_volume_reports_missing() {
         let err = resolve_archive(Path::new("somewhere/B.7z.002")).unwrap_err();
-        assert!(matches!(err, CoreError::EntryVolumeMissing { .. }), "实际: {err:?}");
+        assert!(
+            matches!(err, CoreError::EntryVolumeMissing { .. }),
+            "实际: {err:?}"
+        );
     }
 
     #[test]

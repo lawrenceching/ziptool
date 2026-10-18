@@ -38,7 +38,10 @@ pub fn platform_tools() -> &'static [&'static str] {
 pub fn check_platform_tools() -> Vec<ToolCheck> {
     let dirs: Vec<PathBuf> =
         std::env::split_paths(std::env::var_os("PATH").as_deref().unwrap_or_default()).collect();
-    platform_tools().iter().map(|p| check_tool(p, &dirs)).collect()
+    platform_tools()
+        .iter()
+        .map(|p| check_tool(p, &dirs))
+        .collect()
 }
 
 /// 检查指定工具(搜索目录可注入, 便于测试)

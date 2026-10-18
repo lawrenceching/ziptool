@@ -8,8 +8,8 @@ use crate::exclude::{
     AttrCollector, ExcludeReason, ExcludeRules, ExcludedEntry, is_hidden_attr, is_hidden_name,
     matches_patterns, validate_patterns,
 };
-use crate::{CoreError, Result};
 use crate::progress::{Phase, Progress};
+use crate::{CoreError, Result};
 
 /// 一个待压缩的顶层条目(Step 1 产出, Step 2 补全 dst, Step 3 消费)
 #[derive(Debug, Clone)]
@@ -106,7 +106,9 @@ pub fn scan_dir(
         let hidden = !rules.include_hidden
             && (is_hidden_name(&name)
                 || collect_attrs
-                    && fs::symlink_metadata(&path).map(|m| is_hidden_attr(&m)).unwrap_or(false));
+                    && fs::symlink_metadata(&path)
+                        .map(|m| is_hidden_attr(&m))
+                        .unwrap_or(false));
         let exclude = if hidden {
             Some(ExcludeReason::Hidden)
         } else {
@@ -219,8 +221,8 @@ fn dir_size(
 mod tests {
     use super::*;
     use crate::testutil::unique_temp;
-    use std::cell::RefCell;
     use crate::{CoreError, ExcludeReason, ExcludeRules};
+    use std::cell::RefCell;
 
     fn scan_with(root: &Path, rules: &ExcludeRules) -> ScanReport {
         scan_dir(root, rules, &|_| {}).unwrap()
@@ -251,7 +253,10 @@ mod tests {
         assert_eq!(names, [".file", ".hid"]);
 
         // include_hidden=true: 全部保留不打标
-        let rules = ExcludeRules { include_hidden: true, patterns: vec![] };
+        let rules = ExcludeRules {
+            include_hidden: true,
+            patterns: vec![],
+        };
         let report = scan_with(&root.join("in"), &rules);
         assert!(report.entries.iter().all(|e| e.exclude.is_none()));
         assert_eq!(report.total_bytes, 6);
@@ -280,7 +285,11 @@ mod tests {
 
         let report = scan_with(&root.join("in"), &ExcludeRules::default());
         // 顶层属性隐藏打标(名字口径不生效: . 开头不算)
-        let t = report.entries.iter().find(|e| e.name == "Thumbs.db").unwrap();
+        let t = report
+            .entries
+            .iter()
+            .find(|e| e.name == "Thumbs.db")
+            .unwrap();
         assert_eq!(t.exclude, Some(ExcludeReason::Hidden));
         // 内部隐藏目录: 整树剔除 + 收集为一条条目名前缀相对路径(/ 分隔)
         let o = report.entries.iter().find(|e| e.name == "outer").unwrap();
@@ -289,7 +298,10 @@ mod tests {
         assert_eq!(report.total_bytes, 2, "隐藏的顶层与内部都不计入");
 
         // include_hidden=true: 不收集不打标不剔除
-        let rules = ExcludeRules { include_hidden: true, patterns: vec![] };
+        let rules = ExcludeRules {
+            include_hidden: true,
+            patterns: vec![],
+        };
         let report = scan_with(&root.join("in"), &rules);
         assert!(report.entries.iter().all(|e| e.exclude.is_none()));
         assert!(report.entries.iter().all(|e| e.attr_hidden.is_empty()));
@@ -314,14 +326,37 @@ mod tests {
         };
         let report = scan_with(&root.join("in"), &rules);
         // 顶层打标(Pattern 保留命中模式)
-        let d = report.entries.iter().find(|e| e.name == "drop.log").unwrap();
+        let d = report
+            .entries
+            .iter()
+            .find(|e| e.name == "drop.log")
+            .unwrap();
         assert_eq!(d.exclude, Some(ExcludeReason::Pattern("*.log".into())));
-        assert!(report.entries.iter().find(|e| e.name == "keep").unwrap().exclude.is_none());
+        assert!(
+            report
+                .entries
+                .iter()
+                .find(|e| e.name == "keep")
+                .unwrap()
+                .exclude
+                .is_none()
+        );
         // 目录大小扣除: App 只剩 main.bin(cache 整树不下钻);drop.log 不计入总量
-        assert_eq!(report.entries.iter().find(|e| e.name == "App").unwrap().size, 3);
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .find(|e| e.name == "App")
+                .unwrap()
+                .size,
+            3
+        );
         assert_eq!(report.total_bytes, 5);
         assert_eq!(report.excluded.len(), 1);
-        assert_eq!(report.excluded[0].reason, ExcludeReason::Pattern("*.log".into()));
+        assert_eq!(
+            report.excluded[0].reason,
+            ExcludeReason::Pattern("*.log".into())
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -330,7 +365,10 @@ mod tests {
     fn scan_rejects_invalid_patterns_as_invalid_exclude() {
         let root = unique_temp("scan-badpat");
         fs::create_dir_all(root.join("in")).unwrap();
-        let rules = ExcludeRules { include_hidden: true, patterns: vec!["a/**b".into()] };
+        let rules = ExcludeRules {
+            include_hidden: true,
+            patterns: vec!["a/**b".into()],
+        };
         let err = scan_dir(&root.join("in"), &rules, &|_| {}).unwrap_err();
         assert!(matches!(err, CoreError::InvalidExclude(_)));
         fs::remove_dir_all(&root).unwrap();

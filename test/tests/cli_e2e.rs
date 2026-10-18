@@ -695,7 +695,10 @@ fn compress_exclusion_rules_matrix() {
         assert!(st.success());
         let p = inp.join("Novel/Thumbs.db");
         fill(p.as_path(), 1_000, 5);
-        let st = Command::new("attrib").args(["+H", p.to_str().unwrap()]).status().unwrap();
+        let st = Command::new("attrib")
+            .args(["+H", p.to_str().unwrap()])
+            .status()
+            .unwrap();
         assert!(st.success());
         "Novel/Thumbs.db".to_string()
     } else {
@@ -705,7 +708,13 @@ fn compress_exclusion_rules_matrix() {
     };
 
     // 1) 默认: 隐藏被排除, 其余照常 roundtrip
-    let r = run_tool(&["compress", "-i", inp.to_str().unwrap(), "-o", out1.to_str().unwrap()]);
+    let r = run_tool(&[
+        "compress",
+        "-i",
+        inp.to_str().unwrap(),
+        "-o",
+        out1.to_str().unwrap(),
+    ]);
     assert!(r.ok, "压缩失败:\n{}", r.stderr);
     assert!(
         r.stderr.contains("excluded (hidden)"),
@@ -716,7 +725,10 @@ fn compress_exclusion_rules_matrix() {
     for name in ["Novel", "media", "photo.jpg"] {
         extract_archive(&out1.join(format!("{name}.zip")), &restore1, None);
     }
-    assert_file_eq(&inp.join("Novel/book.txt"), &restore1.join("Novel/book.txt"));
+    assert_file_eq(
+        &inp.join("Novel/book.txt"),
+        &restore1.join("Novel/book.txt"),
+    );
     assert!(
         !restore1.join(&hidden_top).exists() && !restore1.join(&hidden_inner).exists(),
         "隐藏文件不应进包(顶层与树内)"
@@ -728,7 +740,11 @@ fn compress_exclusion_rules_matrix() {
 
     // 2) --include-hidden-files: 隐藏回来
     let r = run_tool(&[
-        "compress", "-i", inp.to_str().unwrap(), "-o", out2.to_str().unwrap(),
+        "compress",
+        "-i",
+        inp.to_str().unwrap(),
+        "-o",
+        out2.to_str().unwrap(),
         "--include-hidden-files",
     ]);
     assert!(r.ok, "压缩失败:\n{}", r.stderr);
@@ -747,8 +763,15 @@ fn compress_exclusion_rules_matrix() {
 
     // 3) --exclude 与隐藏集叠加: 树内 *.tmp + 顶层 photo.jpg
     let r = run_tool(&[
-        "compress", "-i", inp.to_str().unwrap(), "-o", out3.to_str().unwrap(),
-        "--exclude", "*.tmp", "--exclude", "photo.jpg",
+        "compress",
+        "-i",
+        inp.to_str().unwrap(),
+        "-o",
+        out3.to_str().unwrap(),
+        "--exclude",
+        "*.tmp",
+        "--exclude",
+        "photo.jpg",
     ]);
     assert!(r.ok, "压缩失败:\n{}", r.stderr);
     assert!(
@@ -756,7 +779,10 @@ fn compress_exclusion_rules_matrix() {
         "应打印模式排除提示: {}",
         r.stderr
     );
-    assert!(!out3.join("photo.jpg.zip").exists(), "顶层命中模式的条目不产出包");
+    assert!(
+        !out3.join("photo.jpg.zip").exists(),
+        "顶层命中模式的条目不产出包"
+    );
     let restore3 = fx.root.join("restore3");
     for name in ["Novel", "media"] {
         extract_archive(&out3.join(format!("{name}.zip")), &restore3, None);
@@ -765,6 +791,12 @@ fn compress_exclusion_rules_matrix() {
         !restore3.join("Novel/notes.tmp").exists(),
         "*.tmp 应被模式排除"
     );
-    assert_file_eq(&inp.join("media/clip.bin"), &restore3.join("media/clip.bin"));
-    assert_file_eq(&inp.join("Novel/book.txt"), &restore3.join("Novel/book.txt"));
+    assert_file_eq(
+        &inp.join("media/clip.bin"),
+        &restore3.join("media/clip.bin"),
+    );
+    assert_file_eq(
+        &inp.join("Novel/book.txt"),
+        &restore3.join("Novel/book.txt"),
+    );
 }

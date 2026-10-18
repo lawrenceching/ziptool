@@ -138,15 +138,7 @@ pub fn compress_entries(
 ) -> Result<Report> {
     let backend = opts.format.backend();
     crate::backend::ensure_tool_available(backend.program())?;
-    compress_entries_with_backend(
-        &backend,
-        input,
-        out_dir,
-        entries,
-        opts,
-        cancel,
-        on_progress,
-    )
+    compress_entries_with_backend(&backend, input, out_dir, entries, opts, cancel, on_progress)
 }
 
 pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
@@ -321,7 +313,8 @@ fn assign_dsts_with(
 
 /// 该 dst 的压缩包(不分卷主文件, 或分卷首卷 {dst}.{ext}.001)是否已存在
 fn target_exists(out_dir: &Path, dst: &str, ext: &str) -> bool {
-    out_dir.join(format!("{dst}.{ext}")).exists() || out_dir.join(format!("{dst}.{ext}.001")).exists()
+    out_dir.join(format!("{dst}.{ext}")).exists()
+        || out_dir.join(format!("{dst}.{ext}.001")).exists()
 }
 
 /// 相对路径转为绝对路径(基于当前工作目录)。
@@ -560,7 +553,10 @@ mod tests {
         fs::write(root.join("A.7z"), b"x").unwrap();
 
         cleanup_partial(&root, "A", "7z");
-        assert!(root.join("A.z01").exists(), ".zNN 是 zip -s 专属, 7z 清理不碰");
+        assert!(
+            root.join("A.z01").exists(),
+            ".zNN 是 zip -s 专属, 7z 清理不碰"
+        );
 
         cleanup_partial(&root, "A", "zip");
         let left = names_in(&root);
@@ -592,12 +588,12 @@ mod tests {
 #[cfg(test)]
 mod fake_tests {
     use super::*;
+    use crate::ExcludeReason;
     use crate::backend::CommandBackend;
     use crate::progress::Phase;
     use crate::testutil::unique_temp;
     use std::cell::RefCell;
     use std::process::Command;
-    use crate::ExcludeReason;
 
     /// 假后端:成功时写出 {dst}.zip;fail_on 中的条目写出半成品分卷后报错
     struct FakeBackend {
@@ -624,7 +620,11 @@ mod fake_tests {
             _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
-            let stem = out_archive.file_stem().unwrap().to_string_lossy().into_owned();
+            let stem = out_archive
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             let ext = out_archive
                 .extension()
                 .map(|e| e.to_string_lossy().into_owned())
@@ -799,7 +799,11 @@ mod fake_tests {
             _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
-            let stem = out_archive.file_stem().unwrap().to_string_lossy().into_owned();
+            let stem = out_archive
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             let ext = out_archive
                 .extension()
                 .map(|e| e.to_string_lossy().into_owned())
@@ -924,9 +928,15 @@ mod fake_tests {
         );
         // 进度权重只含保留条目(压缩阶段 total=1, 字节 1)
         let ev = events.borrow();
-        let comp: Vec<_> = ev.iter().filter(|p| p.phase == Phase::Compressing).collect();
+        let comp: Vec<_> = ev
+            .iter()
+            .filter(|p| p.phase == Phase::Compressing)
+            .collect();
         assert_eq!(comp.len(), 1);
-        assert_eq!((comp[0].done, comp[0].total, comp[0].total_bytes), (1, 1, 1));
+        assert_eq!(
+            (comp[0].done, comp[0].total, comp[0].total_bytes),
+            (1, 1, 1)
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -948,7 +958,10 @@ mod fake_tests {
             &|_| ControlFlow::Continue(()),
         )
         .unwrap_err();
-        assert!(matches!(err, CoreError::NoEntries(_)), "全排除 = 无条目可压");
+        assert!(
+            matches!(err, CoreError::NoEntries(_)),
+            "全排除 = 无条目可压"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 }
@@ -961,9 +974,9 @@ mod staged_tests {
     use crate::backend::CommandBackend;
     use crate::scan::{Entry, EntryKind, scan_dir};
     use crate::testutil::unique_temp;
+    use crate::{ExcludeReason, ExcludeRules};
     use std::cell::RefCell;
     use std::process::Command;
-    use crate::{ExcludeReason, ExcludeRules};
 
     fn entry(name: &str, size: u64) -> Entry {
         Entry {
@@ -1150,9 +1163,15 @@ mod staged_tests {
         fs::create_dir_all(root.join("in/junk")).unwrap();
         fs::write(root.join("in/junk/b.tmp"), "bb").unwrap();
 
-        let rules = ExcludeRules { include_hidden: true, patterns: vec!["junk".into()] };
+        let rules = ExcludeRules {
+            include_hidden: true,
+            patterns: vec!["junk".into()],
+        };
         let scan = scan_dir(&root.join("in"), &rules, &|_| {}).unwrap();
-        assert_eq!(scan.entries[0].exclude, Some(ExcludeReason::Pattern("junk".into())));
+        assert_eq!(
+            scan.entries[0].exclude,
+            Some(ExcludeReason::Pattern("junk".into()))
+        );
 
         // 照常 plan + compress_entries(带标条目勾选了就压)
         let mut es = scan.entries;

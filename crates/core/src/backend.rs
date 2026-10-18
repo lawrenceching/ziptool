@@ -652,7 +652,10 @@ mod tests {
             password: password.map(String::from),
             random_name: false,
             // 命令形状测试不涉排除; Unix 隐藏注入由专门用例覆盖
-            exclude: crate::ExcludeRules { include_hidden: true, patterns: vec![] },
+            exclude: crate::ExcludeRules {
+                include_hidden: true,
+                patterns: vec![],
+            },
             ..Options::default()
         }
     }
@@ -710,11 +713,19 @@ mod tests {
         assert_eq!(
             args_of(&cmd),
             [
-                "-r", "/out/A.zip", "A",
+                "-r",
+                "/out/A.zip",
+                "A",
                 // basename 模式发双开关(目录下钻行为不确定, 两条兜底)
-                "-x", "*/Thumbs.db", "-x", "*/Thumbs.db/*",
+                "-x",
+                "*/Thumbs.db",
+                "-x",
+                "*/Thumbs.db/*",
                 // 锚定模式同样双开关; * 不需改写(zip 的 * 天然跨 /)
-                "-x", "*/sub/*.log", "-x", "*/sub/*.log/*",
+                "-x",
+                "*/sub/*.log",
+                "-x",
+                "*/sub/*.log/*",
             ]
         );
     }
@@ -729,7 +740,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             args_of(&cmd),
-            ["-r", "/out/A.zip", "A", "-x", "*/node_modules", "-x", "*/node_modules/*"]
+            [
+                "-r",
+                "/out/A.zip",
+                "A",
+                "-x",
+                "*/node_modules",
+                "-x",
+                "*/node_modules/*"
+            ]
         );
     }
 
@@ -745,11 +764,15 @@ mod tests {
         assert_eq!(
             args_of(&cmd),
             [
-                "a", "-t7z", "-m0=LZMA2",
+                "a",
+                "-t7z",
+                "-m0=LZMA2",
                 // basename → -xr!(任意深度);锚定 → 条目名前缀精确路径
                 "-xr!Thumbs.db",
                 &format!("-x!A{s}sub{s}*.log"),
-                "--", "E:/out/A.7z", "A",
+                "--",
+                "E:/out/A.7z",
+                "A",
             ]
         );
     }
@@ -782,7 +805,10 @@ mod tests {
             .unwrap();
         let s = sep();
         let args = args_of(&cmd);
-        assert!(args.contains(&format!("-x!A{s}old{s}secret.bin")), "{args:?}");
+        assert!(
+            args.contains(&format!("-x!A{s}old{s}secret.bin")),
+            "{args:?}"
+        );
         assert!(args.contains(&"-xr!*.tmp".to_string()), "{args:?}");
     }
 
@@ -833,13 +859,7 @@ mod tests {
         let mut o = opts_fmt(Format::SevenZ, None);
         o.exclude.include_hidden = true; // 命令形状测试不涉排除; Unix 隐藏注入另测
         let cmd = Backend::SevenZip
-            .compress_command(
-                Path::new("D:/data"),
-                "A",
-                Path::new("E:/out/A.7z"),
-                &o,
-                &[],
-            )
+            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o, &[])
             .unwrap();
         assert_eq!(cmd.get_program(), "7z");
         assert_eq!(
@@ -861,7 +881,15 @@ mod tests {
         assert_eq!(
             args_of(&cmd),
             [
-                "a", "-t7z", "-m0=LZMA2", "-v2g", "-ppw", "-mx=9", "--", "E:/out/B.7z", "B"
+                "a",
+                "-t7z",
+                "-m0=LZMA2",
+                "-v2g",
+                "-ppw",
+                "-mx=9",
+                "--",
+                "E:/out/B.7z",
+                "B"
             ]
         );
     }
@@ -891,13 +919,7 @@ mod tests {
         let mut o = opts_fmt(Format::Zip, Some(9));
         o.exclude.include_hidden = true;
         let cmd = Backend::Zip
-            .compress_command(
-                Path::new("/in"),
-                "A",
-                Path::new("/out/A.zip"),
-                &o,
-                &[],
-            )
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
             .unwrap();
         assert_eq!(args_of(&cmd), ["-r", "-9", "/out/A.zip", "A"]);
     }
@@ -907,13 +929,7 @@ mod tests {
         let mut o = opts_fmt(Format::Zip, Some(0));
         o.exclude.include_hidden = true;
         let cmd = Backend::Zip
-            .compress_command(
-                Path::new("/in"),
-                "A",
-                Path::new("/out/A.zip"),
-                &o,
-                &[],
-            )
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
             .unwrap();
         assert_eq!(args_of(&cmd), ["-r", "-0", "/out/A.zip", "A"]);
     }
