@@ -727,14 +727,16 @@ mod tests {
 
     #[test]
     fn select_extract_filters_by_entry_volume_names() {
+        // 路径用 join 构造而非硬编码分隔符: unix 上反斜杠不是分隔符,
+        // file_name 提取会拿整串, 过滤断言就失真了
         let ctx = ScanContext {
             mode: "extract",
-            src: PathBuf::from("C:\\s"),
+            src: PathBuf::from("s"),
             rules: ExcludeRules::default(),
             data: ScanData::Extract(ExtractScan {
                 groups: vec![ExtractGroup {
                     resolved: zip_tool_core::extract::ResolvedArchive {
-                        path: PathBuf::from("C:\\s\\Novel.zip"),
+                        path: PathBuf::from("s").join("Novel.zip"),
                         backend: zip_tool_core::backend::Backend::native(),
                     },
                     original: Some("Novel".into()),
@@ -744,9 +746,9 @@ mod tests {
                 issues: Vec::new(),
             }),
         };
-        let sel = select_extract(Some(&ctx), "C:\\s", &s(&["Novel.zip"])).unwrap();
+        let sel = select_extract(Some(&ctx), "s", &s(&["Novel.zip"])).unwrap();
         assert_eq!(sel.len(), 1);
-        assert!(select_extract(Some(&ctx), "C:\\s", &s(&["zt_x.zip"])).is_err());
+        assert!(select_extract(Some(&ctx), "s", &s(&["zt_x.zip"])).is_err());
     }
 
     #[test]
@@ -784,7 +786,8 @@ mod tests {
         let scan = ExtractScan {
             groups: vec![ExtractGroup {
                 resolved: zip_tool_core::extract::ResolvedArchive {
-                    path: PathBuf::from("C:\\s\\Novel.zip"),
+                    // join 构造: 保证两平台 file_name 都是 "Novel.zip"
+                    path: PathBuf::from("s").join("Novel.zip"),
                     backend: zip_tool_core::backend::Backend::native(),
                 },
                 original: Some("Novel".into()),
