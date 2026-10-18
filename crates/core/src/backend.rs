@@ -267,7 +267,7 @@ impl ExtractBackend for RealExtract {
 
     fn list(&self, kind: Backend, entry: &Path) -> Result<ArchiveListing> {
         let program = self.program(kind);
-        locate_extract_tool(program)?;
+        ensure_tool_available(program)?;
         let out = kind
             .list_command(entry)
             .stdin(std::process::Stdio::null())
@@ -294,14 +294,14 @@ impl ExtractBackend for RealExtract {
         password: Option<&str>,
         cancel: &crate::CancelFlag,
     ) -> Result<()> {
-        locate_extract_tool(self.program(kind))?;
+        ensure_tool_available(self.program(kind))?;
         let mut cmd = kind.extract_command(entry, dest, password);
         kind.run(&mut cmd, cancel)
     }
 }
 
-/// 在 PATH 里定位解压程序, 缺失报 ToolMissing(而不是 spawn 失败的 os error 2)
-fn locate_extract_tool(program: &str) -> Result<()> {
+/// 在 PATH 里定位压缩/解压程序, 缺失报 ToolMissing(而不是 spawn 失败的 os error 2)
+pub(crate) fn ensure_tool_available(program: &str) -> Result<()> {
     let dirs: Vec<PathBuf> =
         std::env::split_paths(std::env::var_os("PATH").as_deref().unwrap_or_default()).collect();
     match crate::doctor::locate_tool(program, &dirs) {
@@ -658,6 +658,15 @@ mod tests {
         // SevenZ 格式两平台统一 7z
         assert_eq!(Format::Zip.backend(), Backend::native());
         assert_eq!(Format::SevenZ.backend(), Backend::SevenZip);
+    }
+
+    #[test]
+    fn ensure_tool_available_reports_missing_tool() {
+        let err = ensure_tool_available("no-such-tool-xyz").unwrap_err();
+        assert!(
+            matches!(err, CoreError::ToolMissing(ref p) if p == "no-such-tool-xyz"),
+            "实际: {err:?}"
+        );
     }
 
     fn opts_fmt(format: Format, level: Option<u8>) -> Options {

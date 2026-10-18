@@ -3,7 +3,7 @@
 //! - 进度:每完成一个条目回调一次 `Progress`(done 从 1 递增,total 为条目总数)
 //! - 取消两个生效点:条目间由回调 `ControlFlow::Break`(已完成的保留);
 //!   条目内由 `CancelFlag` 置位 kill 后端进程, 当前条目作废并清理半成品
-//! - 随机包名:`zt_<16hex>.zip`,同时在 out_dir 写 `mapping.csv` 记录对应关系
+//! - 随机包名:`zt_<16hex>.{zip|7z}`,同时在 out_dir 写 `mapping.csv` 记录对应关系
 
 use std::fs;
 use std::io::Write;
@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use crate::CancelFlag;
-use crate::backend::{Backend, CommandBackend};
+use crate::backend::CommandBackend;
 use crate::naming::random_name;
 use crate::progress::{Phase, Progress};
 use crate::scan::{Entry, scan_dir};
@@ -20,7 +20,7 @@ use crate::{CoreError, Options, Result};
 /// 一个完成的条目:压缩包路径与原始名字(随机命名时二者不同)
 #[derive(Debug, Clone)]
 pub struct CompressedEntry {
-    /// 压缩包主文件(.zip;分卷时 zip -s 为末卷 .zip,7z -v 为首卷 .zip.001)
+    /// 压缩包主文件({dst}.{ext};分卷时 zip -s 为末卷,7z -v 为首卷 .001)
     pub archive: PathBuf,
     /// 原始条目名
     pub original: String,
@@ -44,14 +44,9 @@ pub fn compress_dir(
     cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<Report> {
-    compress_with_backend(
-        &Backend::native(),
-        input,
-        out_dir,
-        opts,
-        cancel,
-        on_progress,
-    )
+    let backend = opts.format.backend();
+    crate::backend::ensure_tool_available(backend.program())?;
+    compress_with_backend(&backend, input, out_dir, opts, cancel, on_progress)
 }
 
 pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
@@ -109,7 +104,7 @@ pub fn plan(input: &Path, out_dir: &Path, entries: &mut Vec<Entry>, opts: &Optio
     }
 
     // 生成 dst + 预检(DuplicateDst / OutputExists), 全部在任何压缩开始之前
-    assign_dsts(entries, &out_abs, opts.random_name)
+    assign_dsts(entries, &out_abs, opts.random_name, opts.format.extension())
 }
 
 /// Step 3(独立阶段): 逐条目压缩, 开始前对每个条目做顶层存在性复核 ——
@@ -122,8 +117,10 @@ pub fn compress_entries(
     cancel: &CancelFlag,
     on_progress: &dyn Fn(&Progress) -> ControlFlow<()>,
 ) -> Result<Report> {
+    let backend = opts.format.backend();
+    crate::backend::ensure_tool_available(backend.program())?;
     compress_entries_with_backend(
-        &Backend::native(),
+        &backend,
         input,
         out_dir,
         entries,
@@ -159,17 +156,18 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
     }
     let total = entries.len();
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
+    let ext = opts.format.extension();
     let mut report = Report::default();
     let mut done_bytes = 0u64;
 
     for (i, e) in entries.iter().enumerate() {
-        let out_zip = out_abs.join(format!("{}.zip", e.dst));
+        let out_archive = out_abs.join(format!("{}.{}", e.dst, ext));
         let result = backend
-            .compress_command(&input_abs, &e.name, &out_zip, opts)
+            .compress_command(&input_abs, &e.name, &out_archive, opts)
             .and_then(|mut cmd| backend.run(&mut cmd, cancel));
         if let Err(err) = result {
             // 停批并清理半成品: 半成品分卷被误当完整包比少一个包更危险
-            cleanup_partial(&out_abs, &e.dst);
+            cleanup_partial(&out_abs, &e.dst, ext);
             if matches!(err, CoreError::Cancelled) {
                 // 进程内取消: 当前条目作废(不计进度/不进 mapping), 已完成的保留
                 report.cancelled = true;
@@ -178,7 +176,7 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
             return Err(err);
         }
 
-        let archive = resolve_primary_archive(&out_abs, &e.dst);
+        let archive = resolve_primary_archive(&out_abs, &e.dst, ext);
         if opts.random_name {
             let fname = archive
                 .file_name()
@@ -225,17 +223,19 @@ fn mapping_append(out_dir: &Path, archive: &str, original: &str) -> Result<()> {
     Ok(())
 }
 
-/// 删除某条目压缩失败后的半成品: <dst>.zip / <dst>.zNN(zip 分卷) / <dst>.zip.NNN(7z 分卷)
-fn cleanup_partial(out_dir: &Path, dst: &str) {
+/// 删除某条目压缩失败后的半成品: 主文件 {dst}.{ext}、zip -s 的 {dst}.zNN、分卷 {dst}.{ext}.NNN
+fn cleanup_partial(out_dir: &Path, dst: &str, ext: &str) {
     let Ok(rd) = fs::read_dir(out_dir) else {
         return;
     };
-    let z_prefix = format!("{dst}.z");
-    let vol_prefix = format!("{dst}.zip.");
+    let main_name = format!("{dst}.{ext}");
+    let vol_prefix = format!("{dst}.{ext}.");
+    let z_prefix = format!("{dst}.z"); // 仅 zip -s(Linux)产生 .zNN
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let is_ours = name == format!("{dst}.zip")
-            || (name.starts_with(&z_prefix)
+        let is_ours = name == main_name
+            || (ext == "zip"
+                && name.starts_with(&z_prefix)
                 && name.len() == dst.len() + 4
                 && name[z_prefix.len()..].bytes().all(|c| c.is_ascii_digit()))
             || (name.starts_with(&vol_prefix)
@@ -247,10 +247,10 @@ fn cleanup_partial(out_dir: &Path, dst: &str) {
     }
 }
 
-/// Step 2: 生成每个条目的压缩包基础名(不带扩展名)。
+/// Step 2: 生成每个条目的压缩包基础名(不带扩展名)并填充格式。
 /// 随机名 = "zt_" + 64 bit 随机量(16 hex); 非随机 = 原条目名。
-fn assign_dsts(entries: &mut [Entry], out_dir: &Path, random: bool) -> Result<()> {
-    assign_dsts_with(entries, out_dir, random, &mut || {
+fn assign_dsts(entries: &mut [Entry], out_dir: &Path, random: bool, ext: &str) -> Result<()> {
+    assign_dsts_with(entries, out_dir, random, ext, &mut || {
         format!("zt_{}", random_name())
     })
 }
@@ -260,6 +260,7 @@ fn assign_dsts_with(
     entries: &mut [Entry],
     out_dir: &Path,
     random: bool,
+    ext: &str,
     next_name: &mut dyn FnMut() -> String,
 ) -> Result<()> {
     if !random {
@@ -278,18 +279,19 @@ fn assign_dsts_with(
         }
     }
     for e in entries.iter_mut() {
+        e.format = ext.to_string(); // 格式由 plan 统一填充
         e.dst = if random {
             // 撞上已有产物则重新生成(碰撞概率 ~10^-12, 重试只为兜底)
             loop {
                 let candidate = next_name();
-                if !target_exists(out_dir, &candidate) {
+                if !target_exists(out_dir, &candidate, ext) {
                     break candidate;
                 }
             }
         } else {
-            if target_exists(out_dir, &e.name) {
+            if target_exists(out_dir, &e.name, ext) {
                 return Err(CoreError::OutputExists(
-                    out_dir.join(format!("{}.zip", e.name)),
+                    out_dir.join(format!("{}.{}", e.name, ext)),
                 ));
             }
             e.name.clone()
@@ -298,9 +300,9 @@ fn assign_dsts_with(
     Ok(())
 }
 
-/// 该 dst 的压缩包(不分卷 .zip, 或 7z 分卷首卷 .zip.001)是否已存在
-fn target_exists(out_dir: &Path, dst: &str) -> bool {
-    out_dir.join(format!("{dst}.zip")).exists() || out_dir.join(format!("{dst}.zip.001")).exists()
+/// 该 dst 的压缩包(不分卷主文件, 或分卷首卷 {dst}.{ext}.001)是否已存在
+fn target_exists(out_dir: &Path, dst: &str, ext: &str) -> bool {
+    out_dir.join(format!("{dst}.{ext}")).exists() || out_dir.join(format!("{dst}.{ext}.001")).exists()
 }
 
 /// 相对路径转为绝对路径(基于当前工作目录)。
@@ -324,14 +326,14 @@ fn path_within(child: &Path, parent: &Path) -> bool {
     cc.len() >= pc.len() && cc[..pc.len()] == pc[..]
 }
 
-/// 返回压缩包主文件:优先 base.zip(zip -s 的末卷 / 不分卷),
-/// 否则是 7z -v 的首卷 base.zip.001。
-fn resolve_primary_archive(out_dir: &Path, base: &str) -> PathBuf {
-    let plain = out_dir.join(format!("{base}.zip"));
+/// 返回压缩包主文件:优先 {base}.{ext}(zip -s 的末卷 / 不分卷),
+/// 否则分卷首卷 {base}.{ext}.001。
+fn resolve_primary_archive(out_dir: &Path, base: &str, ext: &str) -> PathBuf {
+    let plain = out_dir.join(format!("{base}.{ext}"));
     if plain.exists() {
         return plain;
     }
-    let first_volume = out_dir.join(format!("{base}.zip.001"));
+    let first_volume = out_dir.join(format!("{base}.{ext}.001"));
     if first_volume.exists() {
         return first_volume;
     }
@@ -356,7 +358,7 @@ mod dst_tests {
                 },
                 size: 1,
                 dst: String::new(),
-                format: "zip".into(),
+                format: String::new(),
             })
             .collect()
     }
@@ -364,7 +366,7 @@ mod dst_tests {
     #[test]
     fn assign_dsts_keeps_original_names_without_random() {
         let mut es = entries(&["Novel", "C.jpg"]);
-        assign_dsts(&mut es, Path::new("out"), false).unwrap();
+        assign_dsts(&mut es, Path::new("out"), false, "zip").unwrap();
         assert_eq!(es[0].dst, "Novel");
         assert_eq!(es[1].dst, "C.jpg");
     }
@@ -372,7 +374,7 @@ mod dst_tests {
     #[test]
     fn assign_dsts_generates_zt_prefixed_64bit_random_names() {
         let mut es = entries(&["A", "B"]);
-        assign_dsts(&mut es, Path::new("out"), true).unwrap();
+        assign_dsts(&mut es, Path::new("out"), true, "zip").unwrap();
         for e in &es {
             assert!(e.dst.starts_with("zt_"), "随机名应有 zt_ 前缀: {e:?}");
             let rand = &e.dst[3..];
@@ -386,7 +388,7 @@ mod dst_tests {
     fn assign_dsts_rejects_case_insensitive_duplicate_names() {
         // 源盘可能是大小写敏感的 ext4, 输出盘可能是 NTFS; 在源头报错优于压到一半失败
         let mut es = entries(&["Novel", "novel"]);
-        let err = assign_dsts(&mut es, Path::new("out"), false).unwrap_err();
+        let err = assign_dsts(&mut es, Path::new("out"), false, "zip").unwrap_err();
         assert!(matches!(err, CoreError::DuplicateDst(_)));
     }
 
@@ -398,7 +400,7 @@ mod dst_tests {
         std::fs::write(root.join("out/A.zip"), b"old").unwrap();
 
         let mut es = entries(&["A"]);
-        let err = assign_dsts(&mut es, &root.join("out"), false).unwrap_err();
+        let err = assign_dsts(&mut es, &root.join("out"), false, "zip").unwrap_err();
         assert!(matches!(err, CoreError::OutputExists(_)));
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -415,7 +417,7 @@ mod dst_tests {
         let mut es = entries(&["A"]);
         // 生产路径的闭包无法定向撞名, 这里直接测带生成器的内部版本
         let mut candidates = ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"].iter();
-        let err_free = assign_dsts_with(&mut es, &root.join("out"), true, &mut || {
+        let err_free = assign_dsts_with(&mut es, &root.join("out"), true, "zip", &mut || {
             candidates
                 .next()
                 .map(|c| format!("zt_{c}"))
@@ -426,12 +428,34 @@ mod dst_tests {
 
         std::fs::remove_dir_all(&root).unwrap();
     }
+
+    #[test]
+    fn assign_dsts_fills_format_from_extension() {
+        let mut es = entries(&["A"]);
+        assign_dsts(&mut es, Path::new("out"), false, "7z").unwrap();
+        assert_eq!(es[0].dst, "A");
+        assert_eq!(es[0].format, "7z");
+    }
+
+    #[test]
+    fn assign_dsts_rejects_existing_7z_target() {
+        let root = crate::testutil::unique_temp("dst-exists-7z");
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        std::fs::write(root.join("out/A.7z"), b"old").unwrap();
+
+        let mut es = entries(&["A"]);
+        let err = assign_dsts(&mut es, &root.join("out"), false, "7z").unwrap_err();
+        assert!(matches!(err, CoreError::OutputExists(_)));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Options;
+    use crate::backend::Backend;
 
     fn opts(split: Option<u64>) -> Options {
         Options {
@@ -484,6 +508,63 @@ mod tests {
         assert!(matches!(err, CoreError::SplitSizeTooSmall(1024)));
         fs::remove_dir_all(&root).unwrap();
     }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn cleanup_partial_removes_7z_main_and_volumes_only() {
+        let root = crate::testutil::unique_temp("cleanup-7z");
+        fs::create_dir_all(&root).unwrap();
+        for n in ["A.7z", "A.7z.001", "A.7z.002"] {
+            fs::write(root.join(n), b"x").unwrap();
+        }
+        fs::write(root.join("B.7z"), b"x").unwrap();
+
+        cleanup_partial(&root, "A", "7z");
+        let left = names_in(&root);
+        assert_eq!(left, ["B.7z".to_string()], "只清 A 的半成品: {left:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_partial_znn_volumes_only_apply_to_zip() {
+        let root = crate::testutil::unique_temp("cleanup-znn");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("A.z01"), b"x").unwrap();
+        fs::write(root.join("A.7z"), b"x").unwrap();
+
+        cleanup_partial(&root, "A", "7z");
+        assert!(root.join("A.z01").exists(), ".zNN 是 zip -s 专属, 7z 清理不碰");
+
+        cleanup_partial(&root, "A", "zip");
+        let left = names_in(&root);
+        assert!(left.is_empty(), "zip 清理应删 .zNN: {left:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_primary_archive_prefers_plain_then_first_volume_for_7z() {
+        let root = crate::testutil::unique_temp("primary-7z");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("A.7z.001"), b"x").unwrap();
+        assert_eq!(
+            resolve_primary_archive(&root, "A", "7z"),
+            root.join("A.7z.001"),
+            "无整包时取首卷"
+        );
+        fs::write(root.join("A.7z"), b"x").unwrap();
+        assert_eq!(
+            resolve_primary_archive(&root, "A", "7z"),
+            root.join("A.7z"),
+            "有整包时优先整包"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 /// 编排测试:注入假后端, 断言 Step1→Step2→Step3 的串联行为
@@ -516,23 +597,27 @@ mod fake_tests {
             &self,
             _work: &Path,
             name: &str,
-            out_zip: &Path,
+            out_archive: &Path,
             _opts: &Options,
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
-            let stem = out_zip.file_stem().unwrap().to_string_lossy().into_owned();
-            let dir = out_zip.parent().unwrap().to_path_buf();
+            let stem = out_archive.file_stem().unwrap().to_string_lossy().into_owned();
+            let ext = out_archive
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let dir = out_archive.parent().unwrap().to_path_buf();
             if self.fail_on.iter().any(|f| *f == name) {
-                // 模拟分卷写一半崩溃:留下 .z01/.z02
-                fs::write(dir.join(format!("{stem}.z01")), b"part").unwrap();
-                fs::write(dir.join(format!("{stem}.z02")), b"part").unwrap();
+                // 模拟分卷写一半崩溃:按 out_archive 的实际扩展名留下 .001/.002
+                fs::write(dir.join(format!("{stem}.{ext}.001")), b"part").unwrap();
+                fs::write(dir.join(format!("{stem}.{ext}.002")), b"part").unwrap();
                 return Err(CoreError::BackendFailed {
                     program: "fake".into(),
                     status: "exit status: 1".into(),
                     output: "boom".into(),
                 });
             }
-            fs::write(dir.join(format!("{stem}.zip")), b"fake").unwrap();
+            fs::write(out_archive, b"fake").unwrap();
             Ok(Command::new("fake-unused"))
         }
 
@@ -686,17 +771,21 @@ mod fake_tests {
             &self,
             _work: &Path,
             name: &str,
-            out_zip: &Path,
+            out_archive: &Path,
             _opts: &Options,
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
-            let stem = out_zip.file_stem().unwrap().to_string_lossy().into_owned();
-            let dir = out_zip.parent().unwrap().to_path_buf();
+            let stem = out_archive.file_stem().unwrap().to_string_lossy().into_owned();
+            let ext = out_archive
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let dir = out_archive.parent().unwrap().to_path_buf();
             if self.cancel_on.iter().any(|f| *f == name) {
-                fs::write(dir.join(format!("{stem}.z01")), b"part").unwrap();
+                fs::write(dir.join(format!("{stem}.{ext}.001")), b"part").unwrap();
                 return Err(CoreError::Cancelled);
             }
-            fs::write(dir.join(format!("{stem}.zip")), b"fake").unwrap();
+            fs::write(out_archive, b"fake").unwrap();
             Ok(Command::new("fake-unused"))
         }
 
@@ -750,6 +839,29 @@ mod fake_tests {
         assert_eq!(csv.lines().count(), 2, "被杀的 B 不应进 mapping: {csv}");
         fs::remove_dir_all(&root).unwrap();
     }
+
+    #[test]
+    fn sevenz_options_produce_7z_artifacts() {
+        let root = two_entries_fixture("orch-7z");
+        let mut o = rnd();
+        o.format = crate::Format::SevenZ;
+        let report = compress_with_backend(
+            &FakeBackend::new(&[]),
+            &root.join("in"),
+            &root.join("out"),
+            &o,
+            &CancelFlag::new(),
+            &|_| ControlFlow::Continue(()),
+        )
+        .unwrap();
+        assert_eq!(report.entries.len(), 2);
+        for e in &report.entries {
+            let s = e.archive.to_string_lossy().into_owned();
+            assert!(s.ends_with(".7z"), "产物应为 .7z: {s}");
+            assert!(e.archive.exists(), "主卷路径应真实存在: {s}");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 /// 分阶段 API 测试(_docs/ui-backend.md 5.3/6): scan → plan → compress_entries
@@ -769,7 +881,7 @@ mod staged_tests {
             kind: EntryKind::Dir,
             size,
             dst: String::new(),
-            format: "zip".into(),
+            format: String::new(),
         }
     }
 
@@ -814,13 +926,11 @@ mod staged_tests {
             &self,
             _work: &Path,
             name: &str,
-            out_zip: &Path,
+            out_archive: &Path,
             _opts: &Options,
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
-            let stem = out_zip.file_stem().unwrap().to_string_lossy().into_owned();
-            let dir = out_zip.parent().unwrap().to_path_buf();
-            fs::write(dir.join(format!("{stem}.zip")), b"fake").unwrap();
+            fs::write(out_archive, b"fake").unwrap();
             Ok(Command::new("fake-unused"))
         }
 

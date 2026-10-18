@@ -17,7 +17,7 @@ pub struct Entry {
     pub size: u64,
     /// 压缩包基础名(不带扩展名), 由 Step 2 填充; 扫描后为空串
     pub dst: String,
-    /// 压缩包格式, 当前恒为 "zip"
+    /// 压缩包格式("zip"/"7z"), 由 Step 2 按 Options.format 填充; 扫描后为空串
     pub format: String,
 }
 
@@ -73,7 +73,7 @@ pub fn scan_dir(input: &Path, on_progress: &dyn Fn(&Progress)) -> Result<ScanRep
             kind,
             size,
             dst: String::new(),
-            format: "zip".into(),
+            format: String::new(),
         });
         report.total_bytes += size;
 
@@ -163,9 +163,9 @@ mod tests {
         assert_eq!(report.entries[2].size, 0);
         assert_eq!(report.total_bytes, 8);
         assert!(report.warnings.is_empty());
-        // dst 由 Step 2 填充, 扫描后为空; format 恒为 zip
+        // dst 与 format 均由 Step 2 填充, 扫描不感知格式
         assert_eq!(report.entries[0].dst, "");
-        assert_eq!(report.entries[0].format, "zip");
+        assert_eq!(report.entries[0].format, "");
 
         // 扫描进度:每个顶层条目回调一次, phase=Scanning, done 递增
         let s = seen.borrow();

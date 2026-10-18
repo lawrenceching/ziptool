@@ -84,7 +84,7 @@ pub enum CoreError {
     },
     /// 解压:目标目录已有同名文件, 不覆盖(提示 --force)
     ExtractConflict(Vec<String>),
-    /// 解压:解压程序(unzip / 7z)不在 PATH
+    /// 压缩/解压:所需工具(zip / 7z / unzip)不在 PATH
     ToolMissing(String),
     /// 解压:输入目录里没有任何压缩包组
     NoArchives(PathBuf),
