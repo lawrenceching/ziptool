@@ -272,7 +272,7 @@ test("五种语言占位符与 zh-CN 一致", () => {
   );
   const zh = catalogs["zh-CN"];
   const placeholders = (value) =>
-    new Set([...value.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]));
+    [...value.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]);
 
   for (const code of LOCALES) {
     for (const [key, value] of Object.entries(catalogs[code])) {
@@ -280,10 +280,19 @@ test("五种语言占位符与 zh-CN 一致", () => {
       const reference = zh[base] ?? zh[`${base}_other`];
       assert.ok(reference, `${code}: ${key} 没有 zh-CN 参考`);
       assert.deepEqual(
-        [...placeholders(value)].sort(),
-        [...placeholders(reference)].sort(),
+        placeholders(value).sort(),
+        placeholders(reference).sort(),
         `${code}: ${key} 占位符与 zh-CN 不一致`
       );
+    }
+  }
+});
+
+test("英文/俄语词条不含中文字符", () => {
+  for (const code of ["en", "ru"]) {
+    const catalog = flatten(localeCatalog(code));
+    for (const [key, value] of Object.entries(catalog)) {
+      assert.ok(!/[\u4e00-\u9fff]/.test(value), `${code}: ${key} 含中文: ${value}`);
     }
   }
 });

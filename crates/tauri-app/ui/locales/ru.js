@@ -31,7 +31,7 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
       "presetCompatTitle": "Формат zip + максимальное сжатие; открывается в любой системе",
       "presetBalanced": "Баланс",
       "presetBalancedTitle": "Формат 7z (LZMA2), выше степень сжатия; для извлечения нужны инструменты 7z",
-      "presetCustom": "Вручную",
+      "presetCustom": "Пользовательский",
       "advanced": "Дополнительно",
       "format": "Формат",
       "level": "Уровень",
@@ -40,7 +40,7 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
       "exclude": "Исключить",
       "excludePlaceholder": "Через запятую, например Thumbs.db, *.tmp",
       "force": "Перезаписывать существующие файлы",
-      "pwHintZip": "Формат zip: шифрование ZipCrypto (лучшая совместимость, слабее)",
+      "pwHintZip": "Формат zip: шифрование ZipCrypto (лучшая совместимость, менее надёжное шифрование)",
       "pwHint7z": "Формат 7z: шифрование AES-256"
     },
     "table": {
@@ -70,7 +70,7 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
       "selectDst": "Выберите папку назначения"
     },
     "status": {
-      "ready": "Готово",
+      "ready": "Готов к работе",
       "scanning": "Сканирование {{done}}/{{total}} {{entry}}",
       "scanningStart": "Сканирование…",
       "compressing": "Сжатие {{done}}/{{total}} {{entry}} ({{doneBytes}} / {{totalBytes}})",

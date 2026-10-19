@@ -40,7 +40,7 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "exclude": "Exclude",
       "excludePlaceholder": "Comma-separated, e.g. Thumbs.db, *.tmp",
       "force": "Overwrite existing files",
-      "pwHintZip": "zip format: ZipCrypto encryption (best compatibility, weaker)",
+      "pwHintZip": "zip format: ZipCrypto encryption (best compatibility, less secure)",
       "pwHint7z": "7z format: AES-256 encryption"
     },
     "table": {
