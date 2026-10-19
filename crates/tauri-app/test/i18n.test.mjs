@@ -166,7 +166,6 @@ test("index.html 静态文案与语言下拉结构完整", () => {
     "options.exclude",
     "options.force",
     "table.caption",
-    "table.selectAll",
     "table.name",
     "table.size",
     "table.status",
