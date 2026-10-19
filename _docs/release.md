@@ -84,8 +84,8 @@ verify job 需显式 `permissions: {contents: read, actions: read}`——顶层�
 
 | 平台 | CLI | Tauri |
 |---|---|---|
-| ubuntu-latest | `ziptool-cli-0.1.0-x86_64-unknown-linux-gnu.tar.gz` | `ziptool_0.1.0_amd64.deb` / `.rpm` / `.AppImage` |
-| ubuntu-24.04-arm | `…-aarch64-unknown-linux-gnu.tar.gz` | 同上, `arm64` |
+| ubuntu-latest | `ziptool-cli-0.1.0-x86_64-unknown-linux-gnu.tar.gz` | `ziptool_0.1.0_amd64.deb` / `ziptool-0.1.0-1.x86_64.rpm` / `ziptool_0.1.0_amd64.AppImage` |
+| ubuntu-24.04-arm | `…-aarch64-unknown-linux-gnu.tar.gz` | 同上, 注意 rpm 的 arch 名是 `aarch64`(`ziptool-0.1.0-1.aarch64.rpm`), deb/AppImage 用 `arm64`/`amd64` 风格 |
 | windows-latest | `ziptool-cli-0.1.0-x86_64-pc-windows-msvc.zip` | `ziptool_0.1.0_x64-setup.exe` / `_x64_en-US.msi` |
 | windows-11-arm | `…-aarch64-pc-windows-msvc.zip` | 同上, `arm64` |
 | macos-latest | `ziptool-cli-0.1.0-aarch64-apple-darwin.tar.gz` | `ziptool_0.1.0_aarch64.dmg` |
@@ -100,11 +100,11 @@ verify job 需显式 `permissions: {contents: read, actions: read}`——顶层�
 
 ## 7. 发版操作手册
 
-1. 改版本号(两处必须同步): 根 `Cargo.toml` `[workspace.package] version` + `crates/tauri-app/tauri.conf.json` `version`
+1. 改版本号(两处必须同步): 根 `Cargo.toml` `[workspace.package] version` + `crates/tauri-app/tauri.conf.json` `version`; 跑任意 cargo 命令(如 `cargo check`)让 `Cargo.lock` 内成员包版本同步, 一并提交
 2. 提交并推 main, 等 CI 绿
-3. `git tag v<版本> && git push origin v<版本>`
+3. `git tag v<版本> && git push origin v<版本>`(推 tag 本身会再触发一次 CI, 同一 SHA)
 4. Actions → Release → Run workflow → 选 main, 输入 `v<版本>`
-5. verify 等 CI(同一 commit 已绿则秒过)→ 5 平台构建 → Release 挂出全部附件
+5. verify 等 CI → 5 平台构建 → Release 挂出全部附件. 注意: verify 轮询取该 SHA 的**最新** run, dispatch 时第 3 步触发的 CI 往往还在跑, 通常要完整等一轮(~10-15 分钟), 不是秒过(2026-10-19 实测两次分别为 9m58s 与 14m39s)
 
 ## 8. 风险与兜底
 
