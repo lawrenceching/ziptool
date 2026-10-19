@@ -178,7 +178,19 @@ fn main() -> ExitCode {
                 &CancelFlag::new(),
                 &|p: &Progress| {
                     if let Phase::Extracting = p.phase {
-                        eprint!("\r[extract {}/{}] {}        ", p.done, p.total, p.entry);
+                        let size = if p.total_bytes > 0 {
+                            format!(
+                                " ({}/{})",
+                                format_bytes(p.done_bytes),
+                                format_bytes(p.total_bytes)
+                            )
+                        } else {
+                            String::new()
+                        };
+                        eprint!(
+                            "\r[extract {}/{}] {}{}        ",
+                            p.done, p.total, p.entry, size
+                        );
                     }
                     ControlFlow::Continue(())
                 },

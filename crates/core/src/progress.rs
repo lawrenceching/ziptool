@@ -16,14 +16,17 @@ pub enum Phase {
 pub struct Progress {
     pub phase: Phase,
     /// 条目计数:扫描 = 已扫描条目;压缩完成帧 = 已完成条目数(1 基),
-    /// 条目内 tick 帧 = 进行中条目的 0 基序号
+    /// 条目内 tick 帧 = 进行中条目的 0 基序号;
+    /// 解压完成帧 = 已完成组数(1 基),解压组内 tick 帧 = 进行中组的 0 基序号
     pub done: usize,
     /// 条目总数
     pub total: usize,
     /// 已累计的原始字节数:压缩完成帧 = 已完成条目的 size 之和,
-    /// 条目内 tick 帧 = 基础累计 + 条目内字节加权(size × 百分比)
+    /// 条目内 tick 帧 = 基础累计 + 条目内字节加权(size × 百分比);
+    /// 解压(7z 系)= 已完成组字节之和 + 组内预扫加权;unzip 路径恒为 0
     pub done_bytes: u64,
-    /// 条目总字节数(扫描阶段未知,为 0;展示层应退化为 done/total)
+    /// 条目总字节数(扫描阶段未知,为 0;展示层应退化为 done/total);
+    /// 解压阶段 = 预扫清单字节和(unzip 路径为 0,展示层按 0 隐藏字节段)
     pub total_bytes: u64,
     /// 当前条目名
     pub entry: String,
