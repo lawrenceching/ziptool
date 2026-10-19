@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use crate::sevenz_progress::{SevenZProgressParser, SevenZTick};
 use crate::{CancelFlag, CoreError, Options, Result};
 
 /// 进程轮询间隔, 也是取消生效的延迟上界
@@ -138,6 +139,80 @@ impl Backend {
         }
     }
 
+    /// 流式执行外部命令:stdout 按 7z 进度流协议解析(命令需带 -bso0 -bsp1 -bse1,
+    /// 见 _docs/progress.md),每帧回调 on_tick;非零退出与 [`Backend::run`] 同语义,
+    /// stderr 为空时用解析器的非进度尾巴兜底(WARNING 走 stdout 的实测坑)。
+    /// 线程模型:读者线程只把 tick 发进 mpsc,回调在本次轮询线程触发 ——
+    /// 公共 API 的 `&dyn Fn` 回调因此不需要 Sync。
+    pub(crate) fn run_streaming(
+        &self,
+        cmd: &mut Command,
+        cancel: &CancelFlag,
+        on_tick: &mut dyn FnMut(&SevenZTick),
+    ) -> Result<()> {
+        no_window(cmd);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let t_err = drain_pipe(child.stderr.take());
+        let (tx, rx) = std::sync::mpsc::channel::<SevenZTick>();
+        let stdout = child.stdout.take();
+        let reader = std::thread::spawn(move || {
+            let mut parser = SevenZProgressParser::new();
+            if let Some(mut out) = stdout {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match out.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => parser.feed(&buf[..n], &mut |t| {
+                            let _ = tx.send(t.clone());
+                        }),
+                    }
+                }
+            }
+            parser.finish(&mut |t| {
+                let _ = tx.send(t.clone());
+            })
+        });
+        loop {
+            if cancel.is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = t_err.join();
+                let _ = reader.join();
+                return Err(CoreError::Cancelled);
+            }
+            // 读者线程攒的帧在本线程回调(回调方拿到的 &dyn Fn 无需跨线程)
+            while let Ok(tick) = rx.try_recv() {
+                on_tick(&tick);
+            }
+            match child.try_wait()? {
+                Some(status) => {
+                    // EOF 已到, join 不会久等;残余帧回调完再归因
+                    let other_tail = reader.join().unwrap_or_default();
+                    while let Ok(tick) = rx.try_recv() {
+                        on_tick(&tick);
+                    }
+                    let err_buf = t_err.join().unwrap_or_default();
+                    if !status.success() {
+                        let mut text = String::from_utf8_lossy(&err_buf).into_owned();
+                        if text.trim().is_empty() {
+                            text = other_tail;
+                        }
+                        return Err(CoreError::BackendFailed {
+                            program: cmd.get_program().to_string_lossy().into_owned(),
+                            status: status.to_string(),
+                            output: last_lines(&text, 5),
+                        });
+                    }
+                    return Ok(());
+                }
+                None => std::thread::sleep(POLL_INTERVAL),
+            }
+        }
+    }
+
     /// 默认结构校验: 整包 zip(Linux zip 后端, 无分卷)用 `unzip -l`;
     /// zip -s 分卷与 7z 形态用 `7z l`(与解压端路由一致)。
     fn verify_program(&self, opts: &Options) -> &'static str {
@@ -252,6 +327,8 @@ impl Backend {
                 if let Some(n) = opts.level {
                     cmd.arg(format!("-mx={n}"));
                 }
+                // 进度流: 关 stdout 文件清单/错误流, 开进度(实测协议见 _docs/progress.md)
+                cmd.args(["-bso0", "-bsp1", "-bse1"]);
                 // 排除开关在 -- 之前(既有 flags 之后)
                 for tok in crate::exclude::exclusion_args(*self, name, &opts.exclude, attr_hidden) {
                     cmd.arg(tok);
@@ -286,6 +363,8 @@ impl Backend {
                     cmd.arg(format!("-p{pw}"));
                 }
                 cmd.arg(format!("-o{}", dest.display()));
+                // 进度流(同压缩端): x 模式下 stdout 只剩 "  N% - name" 帧
+                cmd.args(["-bso0", "-bsp1", "-bse1"]);
                 cmd.arg("--").arg(archive);
             }
         }
@@ -428,6 +507,17 @@ pub(crate) trait CommandBackend {
         attr_hidden: &[String],
     ) -> Result<Command>;
     fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()>;
+    /// 执行压缩命令;7z 系后端把百分比进度帧(0-100, 已钳位单调)回调给 on_percent,
+    /// 其他实现退化为一次性 run(无条目内进度)
+    fn run_with_percent(
+        &self,
+        cmd: &mut Command,
+        cancel: &crate::CancelFlag,
+        on_percent: &mut dyn FnMut(u8),
+    ) -> Result<()> {
+        let _ = on_percent;
+        self.run(cmd, cancel)
+    }
     fn verify(&self, entry: &Path, opts: &Options, cancel: &crate::CancelFlag) -> Result<()>;
     fn check_split_size(&self, size: Option<u64>) -> Result<()>;
 }
@@ -446,6 +536,22 @@ impl CommandBackend for Backend {
 
     fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()> {
         Backend::run(self, cmd, cancel)
+    }
+
+    fn run_with_percent(
+        &self,
+        cmd: &mut Command,
+        cancel: &crate::CancelFlag,
+        on_percent: &mut dyn FnMut(u8),
+    ) -> Result<()> {
+        match self {
+            Backend::SevenZip => self.run_streaming(cmd, cancel, &mut |t| {
+                if let Some(p) = t.percent {
+                    on_percent(p);
+                }
+            }),
+            Backend::Zip => Backend::run(self, cmd, cancel),
+        }
     }
 
     fn verify(&self, entry: &Path, opts: &Options, cancel: &crate::CancelFlag) -> Result<()> {
@@ -558,7 +664,7 @@ mod run_tests {
     use std::time::{Duration, Instant};
 
     /// 平台无关的"跑 60 秒"命令
-    fn long_running() -> Command {
+    pub(super) fn long_running() -> Command {
         if cfg!(windows) {
             let mut c = Command::new("ping");
             c.args(["-n", "60", "127.0.0.1"]);
@@ -571,7 +677,7 @@ mod run_tests {
     }
 
     /// 平台无关的立即成功命令
-    fn exit_ok() -> Command {
+    pub(super) fn exit_ok() -> Command {
         if cfg!(windows) {
             let mut c = Command::new("cmd");
             c.args(["/C", "exit 0"]);
@@ -584,7 +690,7 @@ mod run_tests {
     }
 
     /// 平台无关的"输出一行后失败"命令
-    fn echo_boom_exit_2() -> Command {
+    pub(super) fn echo_boom_exit_2() -> Command {
         if cfg!(windows) {
             let mut c = Command::new("cmd");
             c.args(["/C", "echo boom & exit 2"]);
@@ -1023,6 +1129,9 @@ mod tests {
                 "a",
                 "-t7z",
                 "-m0=LZMA2",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
                 // basename → -xr!(任意深度);锚定 → 条目名前缀精确路径
                 "-xr!Thumbs.db",
                 &format!("-x!A{s}sub{s}*.log"),
@@ -1107,7 +1216,19 @@ mod tests {
                 &[],
             )
             .unwrap();
-        assert_eq!(args_of(&cmd), ["a", "-tzip", "--", "E:/out/A.zip", "A"]);
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "a",
+                "-tzip",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
+                "--",
+                "E:/out/A.zip",
+                "A"
+            ]
+        );
     }
 
     #[test]
@@ -1120,7 +1241,17 @@ mod tests {
         assert_eq!(cmd.get_program(), "7z");
         assert_eq!(
             args_of(&cmd),
-            ["a", "-t7z", "-m0=LZMA2", "--", "E:/out/A.7z", "A"]
+            [
+                "a",
+                "-t7z",
+                "-m0=LZMA2",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
+                "--",
+                "E:/out/A.7z",
+                "A"
+            ]
         );
         assert_eq!(cmd.get_current_dir(), Some(Path::new("D:/data")));
     }
@@ -1143,6 +1274,9 @@ mod tests {
                 "-v2g",
                 "-ppw",
                 "-mx=9",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
                 "--",
                 "E:/out/B.7z",
                 "B"
@@ -1165,7 +1299,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             args_of(&cmd),
-            ["a", "-tzip", "-mx=9", "--", "E:/out/A.zip", "A"]
+            [
+                "a",
+                "-tzip",
+                "-mx=9",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
+                "--",
+                "E:/out/A.zip",
+                "A"
+            ]
         );
     }
 
@@ -1202,7 +1346,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cmd.get_program(), "7z");
-        assert_eq!(args_of(&cmd), ["a", "-tzip", "--", "E:/out/A.zip", "A"]);
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "a",
+                "-tzip",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
+                "--",
+                "E:/out/A.zip",
+                "A"
+            ]
+        );
         assert_eq!(cmd.get_current_dir(), Some(Path::new("D:/data")));
     }
 
@@ -1219,7 +1375,18 @@ mod tests {
             .unwrap();
         assert_eq!(
             args_of(&cmd),
-            ["a", "-tzip", "-v2g", "-ppw", "--", "E:/out/B.zip", "B"]
+            [
+                "a",
+                "-tzip",
+                "-v2g",
+                "-ppw",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
+                "--",
+                "E:/out/B.zip",
+                "B"
+            ]
         );
     }
 
@@ -1270,7 +1437,19 @@ mod tests {
         let cmd =
             Backend::SevenZip.extract_command(Path::new("B.zip.001"), Path::new("D:\\d"), None);
         assert_eq!(cmd.get_program(), "7z");
-        assert_eq!(args_of(&cmd), ["x", "-aoa", "-oD:\\d", "--", "B.zip.001"]);
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "x",
+                "-aoa",
+                "-oD:\\d",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
+                "--",
+                "B.zip.001"
+            ]
+        );
     }
 
     #[test]
@@ -1302,5 +1481,119 @@ mod tests {
         assert_eq!(format_split_size(500 * 1024 * 1024), "500m");
         assert_eq!(format_split_size(64 * 1024), "64k");
         assert_eq!(format_split_size(100_000), "100000");
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    //! 进度流执行:成功帧回调 / 失败归因(含 stdout 兜底)/ 取消 kill。
+    use super::run_tests::{echo_boom_exit_2, exit_ok, long_running};
+    use super::*;
+    use crate::CancelFlag;
+    use std::time::{Duration, Instant};
+
+    /// 往 stdout 打一帧进度后成功退出(Windows echo 会补 \n, 由 finish 结算)
+    fn print_progress_frames() -> Command {
+        if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo  42% 1 + a.txt"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "printf '  42%% 1 + a.txt\\r'"]);
+            c
+        }
+    }
+
+    /// 往 stdout 打 WARNING 后以 2 退出(stderr 空):验证 other_tail 兜底
+    fn warn_to_stdout_exit_2() -> Command {
+        if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo WARNING: no such file & exit 2"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "printf 'WARNING: no such file\\n'; exit 2"]);
+            c
+        }
+    }
+
+    #[test]
+    fn streaming_success_emits_ticks() {
+        let mut ticks = Vec::new();
+        let r = Backend::SevenZip.run_streaming(
+            &mut print_progress_frames(),
+            &CancelFlag::new(),
+            &mut |t| ticks.push(t.clone()),
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(
+            ticks,
+            [SevenZTick {
+                percent: Some(42),
+                entry: Some("a.txt".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn streaming_failure_attributes_stderr() {
+        // 复用 run_tests 的 echo_boom_exit_2():boom 走 stderr
+        let r = Backend::SevenZip.run_streaming(
+            &mut echo_boom_exit_2(),
+            &CancelFlag::new(),
+            &mut |_| {},
+        );
+        match r {
+            Err(CoreError::BackendFailed {
+                program, output, ..
+            }) => {
+                assert_eq!(program, echo_boom_exit_2().get_program().to_string_lossy());
+                assert!(output.contains("boom"), "{output}");
+            }
+            o => panic!("应为 BackendFailed: {o:?}"),
+        }
+    }
+
+    #[test]
+    fn streaming_failure_falls_back_to_stdout_tail() {
+        // -bse1 也拦不住 WARNING 走 stdout(实测):stderr 空时用 other_tail 兜底
+        let r = Backend::SevenZip.run_streaming(
+            &mut warn_to_stdout_exit_2(),
+            &CancelFlag::new(),
+            &mut |_| {},
+        );
+        match r {
+            Err(CoreError::BackendFailed { output, .. }) => {
+                assert!(output.contains("WARNING: no such file"), "{output}");
+            }
+            o => panic!("应为 BackendFailed: {o:?}"),
+        }
+    }
+
+    #[test]
+    fn streaming_cancel_kills_child_and_returns_cancelled() {
+        let cancel = CancelFlag::new();
+        let c = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            c.cancel();
+        });
+        let start = Instant::now();
+        let r = Backend::SevenZip.run_streaming(&mut long_running(), &cancel, &mut |_| {});
+        assert!(matches!(r, Err(CoreError::Cancelled)), "实际: {r:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "取消应远早于命令自然结束"
+        );
+    }
+
+    #[test]
+    fn zip_backend_run_with_percent_emits_no_ticks() {
+        let mut ticks = Vec::new();
+        let r = Backend::Zip
+            .run_with_percent(&mut exit_ok(), &CancelFlag::new(), &mut |p| ticks.push(p));
+        assert!(r.is_ok(), "{r:?}");
+        assert!(ticks.is_empty(), "Info-ZIP 无流式进度: {ticks:?}");
     }
 }
