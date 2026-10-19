@@ -62,6 +62,8 @@
 
 环境: `GH_TOKEN: ${{ github.token }}`、`GH_REPO: ${{ github.repository }}`. 不引第三方等待 action, 纯 bash + gh.
 
+verify job 需显式 `permissions: {contents: read, actions: read}`——顶层限定后未声明权限归 none, 而 `gh run list` 查 Actions API 需要 `actions: read`.
+
 ## 5. build job(5 平台矩阵)
 
 `needs: verify`, `timeout-minutes: 60`, `fail-fast: false`. 每个 job:
@@ -76,7 +78,7 @@
 4. **Tauri 包**: `setup-node@v4`(node 22, npm 缓存)→ `npm ci`(crates/tauri-app)→ `npx tauri build`
    - 前置: `crates/tauri-app/package.json` 增加 devDependency `@tauri-apps/cli: "^2"`, 本地 `npm install` 重生成 package-lock 后提交(npm 装平台预编译二进制, 5 平台全覆盖, 附赠本地 `npx tauri build` 能力)
    - 产物位置(workspace 根): `target/release/bundle/{deb,rpm,appimage,dmg,nsis,msi}/`
-5. **归集**: 把 CLI 归档与 bundle 按 glob 拷入平铺的 `dist/`(`*.deb` `*.rpm` `*.AppImage` `*.dmg` `*-setup.exe` `*.msi`), `upload-artifact@v4` 上传, artifact 名 `bundle-<triple>`. macOS 只取 `.dmg`(不传 `.app` 目录)
+5. **归集**: 把 CLI 归档与 bundle 按 glob 拷入平铺的 `dist/`(`*.deb` `*.rpm` `*.AppImage` `*.dmg` `*-setup.exe` `*.msi`), `upload-artifact@v4` 上传, artifact 名 `bundle-<os>`(`matrix.os`, 已足够区分平台, 免去跨 step 传递 triple). macOS 只取 `.dmg`(不传 `.app` 目录)
 
 产出物一览:
 
