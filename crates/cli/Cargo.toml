@@ -8,5 +8,5 @@ zip-tool-core = { workspace = true }
 clap = { workspace = true }
 
 [[bin]]
-name = "zip-tool"
+name = "ziptool"
 path = "src/main.rs"

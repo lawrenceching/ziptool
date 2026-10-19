@@ -1,4 +1,4 @@
-//! 端到端测试:在系统临时目录构造测试夹具 → 调用 zip-tool CLI 二进制压缩 →
+//! 端到端测试:在系统临时目录构造测试夹具 → 调用 ziptool CLI 二进制压缩 →
 //! 用系统 zip/7z 工具解压(不使用本工具)→ 校验压缩包生成且内容逐字节一致。
 //!
 //! 运行: cargo test -p zip-tool-e2e
@@ -40,9 +40,9 @@ fn tool_binary() -> &'static PathBuf {
             String::from_utf8_lossy(&out.stderr)
         );
         let bin = target.join("debug").join(if cfg!(windows) {
-            "zip-tool.exe"
+            "ziptool.exe"
         } else {
-            "zip-tool"
+            "ziptool"
         });
         assert!(bin.exists(), "未找到 CLI 二进制: {}", bin.display());
         bin
@@ -107,7 +107,7 @@ fn run_with(f: impl FnOnce(&mut Command)) -> Run {
     let mut cmd = Command::new(tool_binary());
     cmd.stdin(Stdio::null());
     f(&mut cmd);
-    let out = cmd.output().expect("无法启动 zip-tool");
+    let out = cmd.output().expect("无法启动 ziptool");
     Run {
         ok: out.status.success(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),

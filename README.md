@@ -39,7 +39,7 @@ D (7z 格式) -> D.7z
 Rust workspace, 核心逻辑与外壳分离, 同一套核心同时支撑命令行和 Tauri UI:
 
 - `crates/core` — 核心库: 批量压缩 / 分包 / 密码 / 随机包名 / zip 与 7z 格式 / 进度回调与取消 (封装系统压缩命令: Linux 用 zip/7z, Windows 用 7z)
-- `crates/cli` — 命令行外壳 (clap), 二进制名 `zip-tool`
+- `crates/cli` — 命令行外壳 (clap), 二进制名 `ziptool`
 - `crates/tauri-app` — Tauri 2 桌面应用, `#[tauri::command]` 包装核心库
 
 核心库通过回调上报进度与取消, CLI 画进度条, Tauri 用 Channel 推送到前端.
@@ -59,32 +59,32 @@ cargo run -p zip-tool-tauri            # 桌面应用
 cargo build --release -p zip-tool-cli
 ```
 
-产物: `target/release/zip-tool.exe` (Linux 下为 `zip-tool`), 单文件可直接复制使用.
+产物: `target/release/ziptool.exe` (Linux 下为 `ziptool`), 单文件可直接复制使用.
 
 ```
 # 批量压缩: 分包 2g + 密码 + 随机包名
-zip-tool compress -i D:\data -o E:\out --split 2g -p 密码 --random-name
+ziptool compress -i D:\data -o E:\out --split 2g -p 密码 --random-name
 
 # 7z 格式 (LZMA2) + 压缩级别 9 (0=仅存储, 缺省用后端默认)
-zip-tool compress -i D:\data -o E:\out --format 7z --level 9
+ziptool compress -i D:\data -o E:\out --format 7z --level 9
 
 # 解压 (支持 .zip/.7z 与 .zip.001/.7z.001 分卷; 传成员卷 .zNN / .zip.NNN / .7z.NNN 自动归一到入口卷)
-zip-tool extract -i E:\out\zt_xxx.zip.001 -o D:\restore -p 密码
+ziptool extract -i E:\out\zt_xxx.zip.001 -o D:\restore -p 密码
 
 # 批量解压: 输入传目录, 恢复压缩前的整棵树 (随机包名经 mapping.csv 还原原名)
-zip-tool extract -i E:\out -o D:\restore -p 密码
+ziptool extract -i E:\out -o D:\restore -p 密码
 
 # 默认拒绝覆盖目标已有文件; 确认后用 --force 覆盖
-zip-tool extract -i E:\out -o D:\restore --force
+ziptool extract -i E:\out -o D:\restore --force
 
 # 排除规则: --exclude 可重复(不含/ = 任意深度文件名, 含/ = 从源根锚定路径)
-zip-tool compress -i D:\data -o E:\out --exclude Thumbs.db --exclude "*.tmp" --exclude node_modules/**
+ziptool compress -i D:\data -o E:\out --exclude Thumbs.db --exclude "*.tmp" --exclude node_modules/**
 
 # 默认排除隐藏文件(Windows=隐藏属性, Linux/mac=. 开头); --include-hidden-files 关闭
-zip-tool compress -i D:\data -o E:\out --include-hidden-files
+ziptool compress -i D:\data -o E:\out --include-hidden-files
 
 # 环境自检: 定位并试运行后端工具, 打印路径与可用性 (全部正常时退出码 0)
-zip-tool doctor
+ziptool doctor
 ```
 
 ## 构建桌面应用

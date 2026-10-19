@@ -10,7 +10,7 @@ use zip_tool_core::{
 
 #[derive(Parser)]
 #[command(
-    name = "zip-tool",
+    name = "ziptool",
     version,
     about = "Batch-compress directories before moving a large data disk"
 )]
