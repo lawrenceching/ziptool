@@ -37,6 +37,8 @@ test("语言标签匹配: 港/台/简与英语俄语", () => {
     ["zh-Hant-CN", "zh-TW"],
     ["zh-CN", "zh-CN"],
     ["zh-Hans-HK", "zh-CN"],
+    ["zh-HK-u-nu-hanidec", "zh-HK"],
+    ["zh-Hant-TW-u-ca-chinese", "zh-TW"],
     ["zh-SG", "zh-CN"],
     ["zh", "zh-CN"],
     ["en-GB", "en"],
@@ -326,4 +328,19 @@ test("五种语言启动时关键文案与词条一致", () => {
       copy.table.name
     );
   }
+});
+
+test("i18next 缺失时仍解除首屏隐藏, 保留静态中文", () => {
+  const dom = new JSDOM(read("../ui/index.html"), {
+    url: "http://localhost/",
+    runScripts: "outside-only",
+  });
+  const w = dom.window;
+  w.localStorage.setItem("ziptool.locale", "zh-CN");
+  w.eval(read("../ui/locales/zh-CN.js"));
+  w.eval(read("../ui/i18n.js"));
+
+  assert.equal(w.document.documentElement.getAttribute("data-i18n-ready"), "1");
+  assert.equal(w.zipToolI18n.t("header.compress"), "header.compress");
+  assert.equal(w.document.getElementById("mode-compress").textContent.trim(), "压缩");
 });

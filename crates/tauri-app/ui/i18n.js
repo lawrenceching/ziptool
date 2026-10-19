@@ -26,6 +26,8 @@
     let script = null;
     let region = null;
     for (const chunk of chunks.slice(1)) {
+      // 单字母子标签开始 extension / private-use 区段 (如 -u-nu-hanidec), 之后不再解析
+      if (chunk.length === 1) break;
       if (/^[A-Za-z]{4}$/.test(chunk)) script = chunk.toLowerCase();
       else if (/^([A-Za-z]{2}|\d{3})$/.test(chunk)) region = chunk.toUpperCase();
     }
@@ -83,11 +85,31 @@
     return preference === "system" ? resolveLocale(systemTags()) : preference;
   }
 
+  const hasI18next =
+    typeof i18next !== "undefined" && typeof i18next.init === "function";
+  let currentLocale = hasI18next ? localeFor(readPreference()) : "zh-CN";
+  let initialized = false;
+
+  function getLocale() {
+    return hasI18next && i18next.language ? i18next.language : currentLocale;
+  }
+
   function t(key, params) {
-    return i18next.t(key, params);
+    if (!initialized) return key;
+    try {
+      return i18next.t(key, params);
+    } catch {
+      return key;
+    }
   }
 
   function applyDom(root) {
+    if (!root || root === document) {
+      // 首屏防闪: 先解除隐藏, 即使 i18next 初始化失败也不留白屏
+      document.documentElement.dataset.i18nReady = "1";
+    }
+    if (!initialized) return;
+
     const scope = root || document;
     for (const el of scope.querySelectorAll("[data-i18n]")) {
       el.textContent = t(el.getAttribute("data-i18n"));
@@ -102,15 +124,13 @@
       el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria-label")));
     }
     if (!root || root === document) {
-      document.documentElement.lang = i18next.language;
-      // 首屏防闪: CSS 在 data-i18n-ready 出现前隐藏 body
-      document.documentElement.dataset.i18nReady = "1";
+      document.documentElement.lang = getLocale();
     }
   }
 
   function notify() {
     window.dispatchEvent(
-      new window.CustomEvent("localechange", { detail: { locale: i18next.language } })
+      new window.CustomEvent("localechange", { detail: { locale: getLocale() } })
     );
   }
 
@@ -118,26 +138,48 @@
     const preference =
       choice === "system" || SUPPORTED.includes(choice) ? choice : "system";
     const target = localeFor(preference);
+    const previous = getLocale();
+
+    if (hasI18next && initialized && target !== previous) {
+      try {
+        await i18next.changeLanguage(target);
+        currentLocale = i18next.language;
+      } catch (err) {
+        console.error("i18n changeLanguage failed", err);
+        return previous;
+      }
+    } else if (!hasI18next) {
+      currentLocale = "zh-CN";
+    }
+
     writePreference(preference);
-    if (i18next.language !== target) await i18next.changeLanguage(target);
     applyDom();
-    notify();
-    return i18next.language;
+    if (target !== previous) notify();
+    return getLocale();
   }
 
   function init() {
-    const preference = readPreference();
-    i18next.init({
-      resources: window.__ZIPTOOL_LOCALES__ || {},
-      lng: localeFor(preference),
-      fallbackLng: FALLBACK,
-      supportedLngs: SUPPORTED,
-      initAsync: false,
-      returnEmptyString: false,
-      interpolation: { escapeValue: false },
-    });
+    if (!hasI18next) {
+      applyDom();
+      return currentLocale;
+    }
+    try {
+      i18next.init({
+        resources: window.__ZIPTOOL_LOCALES__ || {},
+        lng: currentLocale,
+        fallbackLng: FALLBACK,
+        supportedLngs: SUPPORTED,
+        initAsync: false,
+        returnEmptyString: false,
+        interpolation: { escapeValue: false },
+      });
+      initialized = true;
+      currentLocale = i18next.language;
+    } catch (err) {
+      console.error("i18n init failed", err);
+    }
     applyDom();
-    return i18next.language;
+    return currentLocale;
   }
 
   window.zipToolI18n = {
@@ -154,7 +196,7 @@
     setLocale,
     applyDom,
     get locale() {
-      return i18next.language;
+      return getLocale();
     },
   };
 

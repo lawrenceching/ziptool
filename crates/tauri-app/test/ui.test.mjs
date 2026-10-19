@@ -147,6 +147,16 @@ async function pickSource(h, path = "C:\\demo\\data") {
   assert.equal(h.doc.getElementById("src").value, path);
 }
 
+/** 通过语言下拉切换语言并等 changeLanguage/重渲染完成 */
+async function switchLang(h, code) {
+  h.doc.getElementById("lang").value = code;
+  h.doc
+    .getElementById("lang")
+    .dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  await h.flush();
+  await h.flush();
+}
+
 /**
  * 模拟一次原生拖拽(enter → over → drop)。
  * target=null 表示落在两个投放区之外; jsdom 无布局, elementFromPoint 用 mock 指向目标行。
@@ -697,21 +707,48 @@ test("i18n: 切换语言重渲染最后状态与按钮", async () => {
   await h.flush();
 
   assert.equal(h.doc.documentElement.lang, "en");
-  assert.ok(
-    h.doc.getElementById("msg").textContent.startsWith("Scanned C:\\demo\\data: 3 items"),
-    h.doc.getElementById("msg").textContent
+  assert.equal(
+    h.doc.getElementById("msg").textContent,
+    "Scanned C:\\demo\\data: 3 items, 3.25 GB"
+  );
+  assert.deepEqual(h.badges(), [
+    "Pending compression",
+    "Pending compression",
+    "Pending compression",
+  ]);
+  assert.equal(
+    h.rows()[0].querySelector("input").getAttribute("aria-label"),
+    "Select Novel"
   );
   assert.equal(h.doc.getElementById("confirm").textContent, "Confirm");
   assert.equal(h.window.localStorage.getItem("ziptool.locale"), "en");
 });
 
-test("i18n: 切换语言后表格/密码提示/文件选择框/拖拽提示同步", async () => {
+test("i18n: 已显示内容在切换语言后同步刷新", async () => {
   const h = makeHarness(true, ({ cmd }) => {
     if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
     if (cmd === "scan") return SCAN_COMPRESS;
     return null;
   });
 
+  // 先用中文渲染出全部动态内容
+  await pickSource(h);
+  h.doc.getElementById("opt-password").value = "pw";
+  h.doc
+    .getElementById("opt-password")
+    .dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.ok(h.doc.getElementById("pw-hint").textContent.includes("ZipCrypto"));
+  assert.deepEqual(h.badges(), ["待压缩", "待压缩", "待压缩"]);
+
+  const srcRow = h.doc.querySelector('[data-drop="src"]');
+  h.doc.elementFromPoint = () => srcRow;
+  await h.emit(TauriEvent.DRAG_ENTER, {
+    paths: ["D:\\data"],
+    position: { x: 1, y: 1 },
+  });
+  assert.equal(h.doc.getElementById("src").placeholder, "松开鼠标以选择此文件夹");
+
+  // 再切换英文: 状态栏/徽章/aria/密码提示/拖拽占位都应重渲染
   h.window.i18next.addResourceBundle(
     "en",
     "translation",
@@ -728,52 +765,134 @@ test("i18n: 切换语言后表格/密码提示/文件选择框/拖拽提示同�
       path: { dropRelease: "Release to choose this folder" },
       row: {
         status: { pendingCompress: "Pending", pendingExtract: "Pending extract" },
-        original: "Original: {{name}}",
         select: "Select {{name}}",
       },
     },
     true,
     true
   );
+  await switchLang(h, "en");
 
-  h.doc.getElementById("lang").value = "en";
-  h.doc
-    .getElementById("lang")
-    .dispatchEvent(new h.window.Event("change", { bubbles: true }));
-  await h.flush();
-  await h.flush();
-
-  // 文件选择框标题
-  h.doc.getElementById("src").click();
-  await h.flush();
-  await h.flush();
-  const dlg = h.calls.find((c) => c.cmd === "plugin:dialog|open");
-  assert.equal(dlg.args.options.title, "Select folder to compress");
-
-  // 密码提示
-  h.doc.getElementById("opt-password").value = "pw";
-  h.doc
-    .getElementById("opt-password")
-    .dispatchEvent(new h.window.Event("input", { bubbles: true }));
-  assert.equal(h.doc.getElementById("pw-hint").textContent, "zip format: ZipCrypto");
-
-  // 表格徽章/aria
+  assert.ok(
+    h.doc
+      .getElementById("msg")
+      .textContent.includes("Scanned C:\\demo\\data: 3 items, 3.25 GB"),
+    h.doc.getElementById("msg").textContent
+  );
   assert.deepEqual(h.badges(), ["Pending", "Pending", "Pending"]);
   assert.equal(
     h.rows()[0].querySelector("input").getAttribute("aria-label"),
     "Select Novel"
   );
-
-  // 拖拽高亮占位
-  const srcRow = h.doc.querySelector('[data-drop="src"]');
-  h.doc.elementFromPoint = () => srcRow;
-  await h.emit(TauriEvent.DRAG_ENTER, {
-    paths: ["D:\\data"],
-    position: { x: 1, y: 1 },
-  });
+  assert.equal(h.doc.getElementById("pw-hint").textContent, "zip format: ZipCrypto");
   assert.equal(
     h.doc.getElementById("src").placeholder,
     "Release to choose this folder"
   );
   await h.emit(TauriEvent.DRAG_LEAVE, {});
+
+  // 文件选择框标题在下次打开时使用新语言
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  const dlg = h.calls.filter((c) => c.cmd === "plugin:dialog|open").at(-1);
+  assert.equal(dlg.args.options.title, "Select folder to compress");
+});
+
+test("i18n: 运行中切换语言刷新进度与取消按钮", async () => {
+  let resolveCompress;
+  const pending = new Promise((resolve) => (resolveCompress = resolve));
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") {
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    }
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "compress") {
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "compressing",
+        done: 1,
+        total: 2,
+        doneBytes: 1_300_000_000,
+        totalBytes: 2_600_204_800,
+        entry: "Novel",
+      });
+      return pending;
+    }
+    return null;
+  });
+
+  await pickSource(h);
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(h.doc.getElementById("dst").value, "C:\\out");
+
+  h.window.i18next.addResourceBundle(
+    "en",
+    "translation",
+    {
+      status: {
+        compressing:
+          "Compressing {{done}}/{{total}} {{entry}} ({{doneBytes}} / {{totalBytes}})",
+      },
+      header: { cancel: "Cancel" },
+    },
+    true,
+    true
+  );
+
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(h.doc.getElementById("confirm").textContent, "取消");
+  assert.ok(
+    h.doc.getElementById("msg").textContent.startsWith("压缩中 1/2 Novel"),
+    h.doc.getElementById("msg").textContent
+  );
+
+  await switchLang(h, "en");
+  assert.equal(h.doc.getElementById("confirm").textContent, "Cancel");
+  assert.ok(
+    h.doc.getElementById("msg").textContent.startsWith("Compressing 1/2 Novel"),
+    h.doc.getElementById("msg").textContent
+  );
+
+  resolveCompress({
+    cancelled: false,
+    entries: [{ archive: "C:\\out\\Novel.zip", original: "Novel" }],
+    warnings: [],
+  });
+  await h.flush();
+  await h.flush();
+});
+
+test("i18n: 表格大小按语言格式化字节与单位", async () => {
+  const make = (locale) =>
+    makeHarness(
+      true,
+      ({ cmd }) => {
+        if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+        if (cmd === "scan") return SCAN_COMPRESS;
+        return null;
+      },
+      { locale }
+    );
+
+  const en = make("en");
+  await pickSource(en);
+  assert.deepEqual(
+    en.rows().map((tr) => tr.children[2].textContent),
+    ["2.42 GB", "848.8 MB", "200.0 KB"]
+  );
+
+  const ru = make("ru");
+  await pickSource(ru);
+  assert.deepEqual(
+    ru.rows().map((tr) => tr.children[2].textContent),
+    ["2,42 ГБ", "848,8 МБ", "200,0 КБ"]
+  );
+  assert.ok(
+    ru.doc.getElementById("msg").textContent.includes("3,25 ГБ"),
+    ru.doc.getElementById("msg").textContent
+  );
 });
