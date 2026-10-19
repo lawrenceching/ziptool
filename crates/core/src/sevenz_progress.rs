@@ -1,13 +1,18 @@
 //! 7z 进度流解析(协议见 _docs/progress.md):
-//! `-bso0 -bsp1 -bse1` 下 stdout 只剩 `\r` 分段的进度帧
-//! `  45% 2 + Novel\book.txt`。两个实测坑:压缩收尾百分比回退(钳位单调);
-//! WARNING/ERROR 走 stdout(非进度尾巴兜底报错)。
+//! `-bso0 -bsp1 -bse1` 下 stdout 只剩进度帧 `  45% 2 + Novel\book.txt`。
+//! 帧分隔符随构建而异: Windows 7-Zip 用 `\r`, Unix(p7zip / 7zz)用 `\b` 退格擦除重绘。
+//! 两个实测坑:压缩收尾百分比回退(钳位单调);WARNING/ERROR 走 stdout(非进度尾巴兜底报错)。
 
 /// 一帧进度:百分比与条目名都可有可无(7z 只在变化时输出对应部分)
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SevenZTick {
     pub percent: Option<u8>,
     pub entry: Option<String>,
+}
+
+/// 帧分隔符: Windows 7-Zip 用 `\r`; Unix(p7zip / 7zz)用 `\b` 退格擦除重绘。
+fn is_frame_sep(b: u8) -> bool {
+    b == b'\r' || b == 0x08
 }
 
 /// 非进度尾巴(WARNING/ERROR 兜底)保留上限
@@ -35,16 +40,16 @@ impl SevenZProgressParser {
         }
     }
 
-    /// 喂一段 stdout;完整的 `\r` 段立即结算,不完整尾部留待下次
+    /// 喂一段 stdout;完整的帧(以 `\r` 或 `\b` 结束)立即结算,不完整尾部留待下次
     pub(crate) fn feed(&mut self, chunk: &[u8], on_tick: &mut dyn FnMut(&SevenZTick)) {
         self.buf.extend_from_slice(chunk);
-        // 防御:异常 7z 构建 `-bs*` 未生效时流可全程无 `\r`,超 BUF_CAP 直接整段结算,
+        // 防御:异常 7z 构建 `-bs*` 未生效时流可全程无分隔符,超 BUF_CAP 直接整段结算,
         // 文本归入 other_tail(自带 4KB 上限),避免 buf 无限增长
-        if self.buf.len() > BUF_CAP && !self.buf.contains(&b'\r') {
+        if self.buf.len() > BUF_CAP && !self.buf.iter().copied().any(is_frame_sep) {
             let rest = std::mem::take(&mut self.buf);
             self.take_segment(&rest, on_tick);
         }
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\r') {
+        while let Some(pos) = self.buf.iter().position(|&b| is_frame_sep(b)) {
             let seg: Vec<u8> = self.buf.drain(..=pos).collect();
             self.take_segment(&seg[..seg.len() - 1], on_tick);
         }
@@ -134,6 +139,29 @@ mod tests {
                 },
                 SevenZTick {
                     percent: Some(46),
+                    entry: Some("Novel/book.txt".into())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_frames_separated_by_backspaces() {
+        // Unix 7-Zip(p7zip / 7zz)用退格擦除重绘: 帧之间是 `\b` 序列, 整流没有 `\r`。
+        let mut p = SevenZProgressParser::new();
+        let ticks = feed_all(
+            &mut p,
+            "  0M Scan \u{8}\u{8}\u{8}\u{8}\u{8}\u{8}          \u{8}\u{8}\u{8}\u{8}\u{8}\u{8}  0% \u{8}\u{8}\u{8}\u{8}    \u{8}\u{8}\u{8}\u{8} 21% + Novel/book.txt \u{8}\u{8}\u{8}",
+        );
+        assert_eq!(
+            ticks,
+            [
+                SevenZTick {
+                    percent: Some(0),
+                    entry: None
+                },
+                SevenZTick {
+                    percent: Some(21),
                     entry: Some("Novel/book.txt".into())
                 },
             ]
