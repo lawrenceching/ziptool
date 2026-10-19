@@ -1,4 +1,4 @@
-//! 进度载荷:扫描与压缩两阶段共用,经 `on_progress` 回调上报给外壳(CLI / Tauri)。
+//! 进度载荷:扫描/压缩/解压三阶段共用,经 `on_progress` 回调上报给外壳(CLI / Tauri)。
 
 /// 压缩/解压流程的阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

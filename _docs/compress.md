@@ -286,16 +286,18 @@ pub enum Phase { Scanning, Compressing }
 
 pub struct Progress {
     pub phase: Phase,
-    pub done: usize,        // 条目计数: 扫描=已扫描, 压缩=已完成
+    pub done: usize,        // 条目计数: 扫描=已扫描; 压缩完成帧=已完成条目数(1 基), 条目内 tick 帧=进行中条目的 0 基序号(7z 系)
     pub total: usize,       // 条目总数
-    pub done_bytes: u64,    // 压缩阶段: 已完成条目的 size 累计(扫描阶段为已扫描字节)
+    pub done_bytes: u64,    // 完成帧=已完成条目的 size 累计(扫描阶段为已扫描字节); tick 帧=基础累计 + 条目内字节加权(size × 百分比)
     pub total_bytes: u64,   // Step 1 汇总
     pub entry: String,      // 当前条目名
 }
 ```
 
 - 展示层: 完成度优先 `done_bytes / total_bytes`(total_bytes 为 0 时退化为 done/total); CLI 单行刷新 `[3/17] Novel (2.1GB/26GB)`, Tauri 经 Channel 推送
-- 粒度仍是**条目级**: 一个条目压缩期间进度不动. 字节级见 7.2
+- 粒度分后端: zip 后端仍是**条目级**, 一个条目压缩期间进度不动; 7z 系后端解析 `-bsp1` 百分比流, 条目内按 size × 百分比推进 `done_bytes`
+
+进度流协议与实测结论见 [progress.md](progress.md)(7z 百分比流 + 解压条目信号加权).
 
 ### 7.2 取消
 
