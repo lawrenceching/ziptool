@@ -196,6 +196,21 @@ test("index.html 静态文案与语言下拉结构完整", () => {
     [...w.document.querySelectorAll("#lang option")].map((o) => o.value),
     ["system", "zh-CN", "zh-HK", "zh-TW", "en", "ru"]
   );
+
+  const lang = w.document.getElementById("lang");
+  const ver = w.document.getElementById("ver");
+  assert.ok(
+    w.document.querySelector("footer").contains(lang),
+    "语言选择框应在状态栏"
+  );
+  assert.ok(
+    !w.document.querySelector("header").contains(lang),
+    "语言选择框不应在顶栏"
+  );
+  assert.ok(
+    lang.compareDocumentPosition(ver) & w.Node.DOCUMENT_POSITION_FOLLOWING,
+    "语言选择框应在版本号左侧"
+  );
 });
 
 test("英文界面关键文案为英文, 不支持语言回退英文", () => {
