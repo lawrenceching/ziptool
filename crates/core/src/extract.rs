@@ -335,36 +335,62 @@ pub(crate) fn extract_groups<B: ExtractBackend + ?Sized>(
 
     // B3 逐组解压(顺序执行: 机械盘/USB 上顺序 IO 优先)
     let total = groups.len();
+    // 全量预扫的字节加权基准(清单无大小/无信号时退化为组级计数, 字节恒 0)
+    let total_bytes: u64 = listings.iter().map(|l| l.sizes.iter().sum::<u64>()).sum();
     let mut report = ExtractReport {
         warnings,
         ..ExtractReport::default()
     };
+    let mut done_bytes = 0u64;
     for (i, g) in groups.iter().enumerate() {
         let entry = g
             .original
             .clone()
             .unwrap_or_else(|| file_name_of(&g.resolved.path));
-        let fire = |done: usize| -> ControlFlow<()> {
+        let fire = |done: usize, bytes: u64| -> ControlFlow<()> {
             on_progress(&Progress {
                 phase: Phase::Extracting,
                 done,
                 total,
-                done_bytes: 0,
-                total_bytes: 0,
+                done_bytes: bytes,
+                total_bytes,
                 entry: entry.clone(),
             })
         };
-        if fire(i) == ControlFlow::Break(()) {
+        if fire(i, done_bytes) == ControlFlow::Break(()) {
             report.cancelled = true;
             break;
         }
-        if let Err(err) = be.extract(g.resolved.backend, &g.resolved.path, dest, password, cancel) {
+        // 组内字节账本: 首见条目名才计重(去重靠 remove; 目录名/未知名字自动忽略)
+        let mut pending: std::collections::HashMap<String, u64> = listings[i]
+            .names
+            .iter()
+            .zip(&listings[i].sizes)
+            .filter(|(_, s)| **s > 0)
+            .map(|(n, s)| (n.trim_end_matches('/').to_string(), *s))
+            .collect();
+        let mut partial = 0u64;
+        let result = be.extract_with_entries(
+            g.resolved.backend,
+            &g.resolved.path,
+            dest,
+            password,
+            cancel,
+            &mut |name| {
+                if let Some(sz) = pending.remove(name.trim_end_matches('/')) {
+                    partial += sz;
+                    // tick 不响应回调 Break: 组内取消仍走 CancelFlag(kill 子进程)
+                    let _ = fire(i, done_bytes + partial);
+                }
+            },
+        );
+        if let Err(err) = result {
             // 失败按清单清理本次解出的文件(--force 无法区分新旧, 不清理)
             if !force {
                 cleanup_extracted(&listings[i].names, dest);
             }
             if matches!(err, crate::CoreError::Cancelled) {
-                // 进程内取消: 本组回滚(不计入), 剩余组不再开始
+                // 进程内取消: 本组回滚(不计进度/不进报告), 剩余组不再开始
                 report.cancelled = true;
                 break;
             }
@@ -376,7 +402,8 @@ pub(crate) fn extract_groups<B: ExtractBackend + ?Sized>(
             original: g.original.clone(),
             files: listing.files,
         });
-        if fire(i + 1) == ControlFlow::Break(()) {
+        done_bytes += listing.sizes.iter().sum::<u64>();
+        if fire(i + 1, done_bytes) == ControlFlow::Break(()) {
             report.cancelled = true;
             break;
         }
@@ -625,6 +652,10 @@ mod orch_tests {
     /// 假后端:list 返回 canned 清单; extract 模拟解出 writes 文件后视 fail 决定成败
     struct FakeExtract {
         listing: Vec<String>,
+        /// 与 listing 平行的条目大小(空 = 全 0), 进度加权用
+        sizes: Vec<u64>,
+        /// extract 时逐个回调的条目名(模拟 7z 进度流的名字信号)
+        ticks: Vec<String>,
         writes: Vec<String>,
         fail: bool,
         /// extract 时写出文件后返回 Err(Cancelled), 模拟"进程被 kill"
@@ -636,6 +667,8 @@ mod orch_tests {
         fn new(listing: &[&str], writes: &[&str], fail: bool) -> Self {
             Self {
                 listing: s(listing),
+                sizes: Vec::new(),
+                ticks: Vec::new(),
                 writes: s(writes),
                 fail,
                 cancel: false,
@@ -646,11 +679,23 @@ mod orch_tests {
         fn new_cancelling(listing: &[&str], writes: &[&str]) -> Self {
             Self {
                 listing: s(listing),
+                sizes: Vec::new(),
+                ticks: Vec::new(),
                 writes: s(writes),
                 fail: false,
                 cancel: true,
                 calls: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_sizes(mut self, sizes: &[u64]) -> Self {
+            self.sizes = sizes.to_vec();
+            self
+        }
+
+        fn with_ticks(mut self, ticks: &[&str]) -> Self {
+            self.ticks = s(ticks);
+            self
         }
     }
 
@@ -662,21 +707,31 @@ mod orch_tests {
         fn list(&self, _kind: Backend, _entry: &Path) -> Result<ArchiveListing> {
             self.calls.borrow_mut().push("list");
             let files = self.listing.iter().filter(|n| !n.ends_with('/')).count();
+            let sizes = if self.sizes.is_empty() {
+                vec![0; self.listing.len()]
+            } else {
+                self.sizes.clone()
+            };
             Ok(ArchiveListing {
                 names: self.listing.clone(),
                 files,
+                sizes,
             })
         }
 
-        fn extract(
+        fn extract_with_entries(
             &self,
             _kind: Backend,
             _entry: &Path,
             dest: &Path,
             _pw: Option<&str>,
             _cancel: &crate::CancelFlag,
+            on_entry: &mut dyn FnMut(&str),
         ) -> Result<()> {
             self.calls.borrow_mut().push("extract");
+            for t in &self.ticks {
+                on_entry(t);
+            }
             for w in &self.writes {
                 let p = dest.join(w);
                 fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -756,6 +811,75 @@ mod orch_tests {
         assert_eq!(ev[0].phase, Phase::Extracting);
         assert_eq!((ev[0].done, ev[0].total), (0, 1));
         assert_eq!((ev[1].done, ev[1].total), (1, 1));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn extract_reports_byte_progress_from_entry_signals() {
+        let (root, g) = one_group("ex-bytes");
+        let be = FakeExtract::new(
+            &["Novel/", "Novel/book.txt", "photo.jpg"],
+            &["Novel/book.txt", "photo.jpg"],
+            false,
+        )
+        .with_sizes(&[0, 100, 40])
+        .with_ticks(&["Novel/book.txt", "photo.jpg"]);
+        let dest = root.join("restore");
+        let events = RefCell::new(Vec::new());
+        let report = extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.groups.len(), 1);
+        let ev = events.borrow();
+        // 预扫总 140;首见名字逐个加 size;目录(0)与组完成帧不重复计
+        assert_eq!(
+            ev.iter()
+                .map(|p| (p.done, p.done_bytes, p.total_bytes))
+                .collect::<Vec<_>>(),
+            [(0, 0, 140), (0, 100, 140), (0, 140, 140), (1, 140, 140)],
+            "{ev:?}"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_entry_signals_are_not_double_counted() {
+        let (root, g) = one_group("ex-dup");
+        let be = FakeExtract::new(&["a.txt"], &["a.txt"], false)
+            .with_sizes(&[50])
+            .with_ticks(&["a.txt", "a.txt"]);
+        let events = RefCell::new(Vec::new());
+        extract_groups(
+            &be,
+            &[g],
+            &root.join("r"),
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        let ev = events.borrow();
+        assert_eq!(
+            ev.iter().map(|p| p.done_bytes).collect::<Vec<_>>(),
+            [0, 50, 50],
+            "同一名字第二次信号不再计重: {ev:?}"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

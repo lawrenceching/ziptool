@@ -407,14 +407,16 @@ pub(crate) trait ExtractBackend {
     /// 列入口卷内的条目清单
     fn list(&self, kind: Backend, entry: &Path) -> Result<ArchiveListing>;
     /// 把入口卷解到 dest(冲突判断在编排层, 覆盖开关恒带);
-    /// cancel 透传给进程等待, 取消即 kill
-    fn extract(
+    /// cancel 透传给进程等待, 取消即 kill;每解出一个条目回调一次名字
+    /// (7z 系来自进度流帧, Info-ZIP 无信号则不回调), 供编排层做字节加权
+    fn extract_with_entries(
         &self,
         kind: Backend,
         entry: &Path,
         dest: &Path,
         password: Option<&str>,
         cancel: &crate::CancelFlag,
+        on_entry: &mut dyn FnMut(&str),
     ) -> Result<()>;
 }
 
@@ -450,17 +452,27 @@ impl ExtractBackend for RealExtract {
         Ok(parse_listing(&kind, &String::from_utf8_lossy(&out.stdout)))
     }
 
-    fn extract(
+    fn extract_with_entries(
         &self,
         kind: Backend,
         entry: &Path,
         dest: &Path,
         password: Option<&str>,
         cancel: &crate::CancelFlag,
+        on_entry: &mut dyn FnMut(&str),
     ) -> Result<()> {
         ensure_tool_available(self.program(kind))?;
         let mut cmd = kind.extract_command(entry, dest, password);
-        kind.run(&mut cmd, cancel)
+        match kind {
+            // 7z 系: 进度流帧里的条目名 → on_entry(名字已由解析器归一为 /)
+            Backend::SevenZip => kind.run_streaming(&mut cmd, cancel, &mut |t| {
+                if let Some(name) = &t.entry {
+                    on_entry(name);
+                }
+            }),
+            // Info-ZIP: unzip 无流式信号, 与旧行为一致
+            Backend::Zip => kind.run(&mut cmd, cancel),
+        }
     }
 }
 
@@ -870,6 +882,9 @@ pub(crate) struct ArchiveListing {
     pub names: Vec<String>,
     /// 非目录条目数
     pub files: usize,
+    /// 与 names 平行的原始大小(目录为 0; unzip -Z1 清单无大小, 全 0)。
+    /// 解压进度的预扫加权基准, 见 _docs/progress.md
+    pub sizes: Vec<u64>,
 }
 
 /// 解析 list 命令的机器可读输出:
@@ -877,40 +892,54 @@ pub(crate) struct ArchiveListing {
 /// - 7z `l -ba -slt`: 空行分隔的条目块, `Path =` 行取名字, `Folder = +` 表示目录
 pub(crate) fn parse_listing(backend: &Backend, text: &str) -> ArchiveListing {
     let mut names: Vec<String> = Vec::new();
+    let mut sizes: Vec<u64> = Vec::new();
     match backend {
         Backend::Zip => {
             for line in text.lines() {
                 let name = line.replace('\\', "/");
                 if !name.trim().is_empty() {
                     names.push(name);
+                    sizes.push(0);
                 }
             }
         }
         Backend::SevenZip => {
-            let mut cur: Option<(String, bool)> = None;
-            let flush = |cur: &mut Option<(String, bool)>, names: &mut Vec<String>| {
-                if let Some((path, is_dir)) = cur.take() {
+            let mut cur: Option<(String, bool, u64)> = None;
+            let flush = |cur: &mut Option<(String, bool, u64)>,
+                         names: &mut Vec<String>,
+                         sizes: &mut Vec<u64>| {
+                if let Some((path, is_dir, size)) = cur.take() {
                     names.push(if is_dir { format!("{path}/") } else { path });
+                    sizes.push(if is_dir { 0 } else { size });
                 }
             };
             for line in text.lines() {
                 let line = line.trim_end();
                 if let Some(v) = line.strip_prefix("Path = ") {
-                    flush(&mut cur, &mut names);
-                    cur = Some((v.trim().replace('\\', "/"), false));
+                    flush(&mut cur, &mut names, &mut sizes);
+                    cur = Some((v.trim().replace('\\', "/"), false, 0));
                 } else if line == "Folder = +" {
-                    if let Some((_, is_dir)) = &mut cur {
+                    if let Some((_, is_dir, _)) = &mut cur {
                         *is_dir = true;
                     }
+                } else if let Some(v) = line.strip_prefix("Size = ") {
+                    // "Packed Size = " 前缀不同, 不会误配
+                    if let Some((_, _, size)) = &mut cur {
+                        *size = v.trim().parse().unwrap_or(0);
+                    }
                 } else if line.is_empty() {
-                    flush(&mut cur, &mut names);
+                    flush(&mut cur, &mut names, &mut sizes);
                 }
             }
-            flush(&mut cur, &mut names);
+            flush(&mut cur, &mut names, &mut sizes);
         }
     }
     let files = names.iter().filter(|n| !n.ends_with('/')).count();
-    ArchiveListing { names, files }
+    ArchiveListing {
+        names,
+        files,
+        sizes,
+    }
 }
 
 /// 解析 "2g"/"500m"/"64k"/"65536" 形式的分包大小为字节;0 或非法格式报错
@@ -956,6 +985,7 @@ mod listing_tests {
             ]
         );
         assert_eq!(l.files, 3);
+        assert_eq!(l.sizes, [0, 0, 0, 0, 0], "zipinfo 清单无大小");
     }
 
     #[test]
@@ -966,6 +996,7 @@ mod listing_tests {
         let l = parse_listing(&Backend::SevenZip, text);
         assert_eq!(l.names, ["Novel/", "Novel/book.txt", "photo.jpg"]);
         assert_eq!(l.files, 2);
+        assert_eq!(l.sizes, [0, 2_500_000, 200_000], "目录为 0, 文件取 Size =");
     }
 
     #[test]
@@ -973,6 +1004,14 @@ mod listing_tests {
         let l = parse_listing(&Backend::Zip, "");
         assert!(l.names.is_empty());
         assert_eq!(l.files, 0);
+        assert!(l.sizes.is_empty());
+    }
+
+    #[test]
+    fn unparsable_size_falls_back_to_zero() {
+        let text = "Path = x\nFolder = -\nSize = abc\n";
+        let l = parse_listing(&Backend::SevenZip, text);
+        assert_eq!(l.sizes, [0]);
     }
 }
 

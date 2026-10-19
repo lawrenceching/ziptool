@@ -7,7 +7,7 @@ pub enum Phase {
     Scanning,
     /// Step 3 逐条目压缩
     Compressing,
-    /// 解压(单包或批量;组/条目级粒度, 组内无增量)
+    /// 解压(单包或批量;7z 系组内按预扫大小加权出增量, unzip 退化为组级计数)
     Extracting,
 }
 
