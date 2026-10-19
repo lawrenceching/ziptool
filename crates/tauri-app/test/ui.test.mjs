@@ -401,6 +401,17 @@ test("浏览器预览(无 Tauri): mock 扫描与 mock 运行仍可用", async ()
   assert.ok(h.doc.getElementById("msg").textContent.includes("压缩完成: 3 个压缩包"));
 });
 
+test("行为: 首次打开(未点过模式)— 压缩模式控件初始可见, 无需切换模式触发", () => {
+  // 回归: opt-preset-wrap / opt-advanced-wrap 初始 hidden 只能被 setMode 解除,
+  // 启动时不调 setMode 的话, 第一次打开要切去解压再切回来才看得到
+  const h = makeHarness(false, () => null);
+  assert.ok(!h.doc.getElementById("opt-preset-wrap").classList.contains("hidden"), "「模式」预设开关初始可见");
+  assert.ok(!h.doc.getElementById("opt-advanced-wrap").classList.contains("hidden"), "「高级」checkbox 初始可见");
+  assert.ok(h.doc.getElementById("opt-split-wrap").classList.contains("hidden") === false);
+  assert.ok(h.doc.getElementById("opt-force-wrap").classList.contains("hidden"), "解压专属「覆盖」初始隐藏");
+  assert.ok(h.doc.getElementById("opt-format-wrap").classList.contains("hidden"), "高级子项仍等勾选展开");
+});
+
 test("行为: 压缩模式预设 — 默认最大兼容性, 预设联动参数, 手动改参数变自定义", async () => {
   const h = makeHarness(false, () => null);
   // 默认 = 最大兼容性预设(zip + 强度 9)

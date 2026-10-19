@@ -547,7 +547,10 @@ function updatePwHint() {
 }
 $("opt-password").addEventListener("input", updatePwHint);
 $("opt-format").addEventListener("change", updatePwHint);
-// 初始状态 = 最大兼容性预设
+// 初始状态 = 压缩模式 + 最大兼容性预设
+// 显隐统一由 setMode 管理, 启动必须跑一次: 否则 preset/advanced 的初始 hidden 不会解除,
+// 首次打开要切去解压再切回来才看得到
+setMode(state.mode);
 applyPreset("compat");
 
 // ———— 浏览器预览 mock(无 Tauri 环境): 假扫描 + 定时器推进度 ————
