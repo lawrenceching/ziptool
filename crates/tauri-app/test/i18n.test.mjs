@@ -137,3 +137,55 @@ test("五份词条 base key 集合一致, 且每个复数 key 都有 _other", ()
     }
   }
 });
+
+test("index.html 静态文案与语言下拉结构完整", () => {
+  const w = makeDom();
+  assert.equal(w.document.documentElement.getAttribute("data-i18n-ready"), "1");
+  const keys = new Set(
+    [...w.document.querySelectorAll("[data-i18n]")].map((el) =>
+      el.getAttribute("data-i18n")
+    )
+  );
+  for (const key of [
+    "header.compress",
+    "header.extract",
+    "header.confirm",
+    "path.src",
+    "path.dst",
+    "options.split",
+    "options.password",
+    "options.randomName",
+    "options.verify",
+    "options.preset",
+    "options.presetCompat",
+    "options.presetBalanced",
+    "options.presetCustom",
+    "options.advanced",
+    "options.format",
+    "options.level",
+    "options.exclude",
+    "options.force",
+    "table.caption",
+    "table.selectAll",
+    "table.name",
+    "table.size",
+    "table.status",
+    "table.empty",
+    "status.ready",
+    "lang.system",
+  ]) {
+    assert.ok(keys.has(key), `缺少 data-i18n: ${key}`);
+  }
+  assert.ok(w.document.querySelector('[data-i18n-placeholder="path.srcPlaceholder"]'));
+  assert.ok(w.document.querySelector('[data-i18n-placeholder="path.dstPlaceholder"]'));
+  assert.ok(w.document.querySelector('[data-i18n-title="options.verifyTitle"]'));
+  assert.ok(w.document.querySelector('[data-i18n-title="options.presetCompatTitle"]'));
+  assert.ok(w.document.querySelector('[data-i18n-title="options.presetBalancedTitle"]'));
+  assert.ok(w.document.querySelector('[data-i18n-title="options.levelTitle"]'));
+  assert.ok(w.document.querySelector('[data-i18n-aria-label="header.language"]'));
+  assert.ok(w.document.querySelector('[data-i18n-aria-label="table.selectAll"]'));
+  assert.deepEqual(
+    [...w.document.querySelectorAll("#lang option")].map((o) => o.value),
+    ["system", "zh-CN", "zh-HK", "zh-TW", "en", "ru"]
+  );
+});

@@ -6,47 +6,67 @@
     <link rel="stylesheet" href="app.css" />
   </head>
   <body class="h-screen flex flex-col bg-white text-slate-800 text-sm">
-    <!-- 顶栏: 压缩/解压模式切换 + 确认(运行中变取消) -->
+    <!-- 顶栏: 压缩/解压模式切换 + 语言选择 + 确认(运行中变取消) -->
     <header class="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200">
       <div class="flex rounded-lg border border-slate-300 overflow-hidden">
         <button
           id="mode-compress"
+          data-i18n="header.compress"
           class="px-5 py-1.5 font-medium bg-blue-600 text-white transition-colors"
         >
           压缩
         </button>
         <button
           id="mode-extract"
+          data-i18n="header.extract"
           class="px-5 py-1.5 font-medium bg-white text-slate-600 hover:bg-slate-50 transition-colors border-l border-slate-300"
         >
           解压
         </button>
       </div>
-      <button
-        id="confirm"
-        disabled
-        class="px-6 py-1.5 rounded-lg bg-blue-600 text-white font-medium enabled:hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-      >
-        确认
-      </button>
+      <div class="flex items-center gap-3">
+        <select
+          id="lang"
+          aria-label="语言"
+          data-i18n-aria-label="header.language"
+          class="w-36 px-2 py-1.5 rounded-md border border-slate-300 bg-white text-slate-700 text-sm focus:outline-none focus:border-blue-400"
+        >
+          <option value="system" data-i18n="lang.system">跟随系统</option>
+          <option value="zh-CN">简体中文</option>
+          <option value="zh-HK">繁體中文（香港）</option>
+          <option value="zh-TW">繁體中文（台灣）</option>
+          <option value="en">English</option>
+          <option value="ru">Русский</option>
+        </select>
+        <button
+          id="confirm"
+          data-i18n="header.confirm"
+          disabled
+          class="px-6 py-1.5 rounded-lg bg-blue-600 text-white font-medium enabled:hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          确认
+        </button>
+      </div>
     </header>
 
     <!-- 路径区: 点击输入框弹出系统文件夹选择; 整行也是原生拖拽投放区 -->
     <div class="px-4 py-3 bg-white space-y-2.5">
       <div class="flex items-center gap-3 rounded-md" data-drop="src">
-        <label for="src" class="w-20 shrink-0 text-slate-500">源文件夹</label>
+        <label for="src" data-i18n="path.src" class="w-20 shrink-0 text-slate-500">源文件夹</label>
         <input
           id="src"
           readonly
+          data-i18n-placeholder="path.srcPlaceholder"
           class="flex-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-slate-50 text-slate-600 cursor-pointer hover:border-blue-400 focus:outline-none"
           placeholder="点击选择, 或拖入要压缩 / 解压的文件夹"
         />
       </div>
       <div class="flex items-center gap-3 rounded-md" data-drop="dst">
-        <label for="dst" class="w-20 shrink-0 text-slate-500">目标文件夹</label>
+        <label for="dst" data-i18n="path.dst" class="w-20 shrink-0 text-slate-500">目标文件夹</label>
         <input
           id="dst"
           readonly
+          data-i18n-placeholder="path.dstPlaceholder"
           class="flex-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-slate-50 text-slate-600 cursor-pointer hover:border-blue-400 focus:outline-none"
           placeholder="点击选择, 或拖入目标文件夹"
         />
@@ -59,19 +79,21 @@
       class="px-4 py-2 bg-white border-b border-slate-200 flex items-center gap-x-5 gap-y-1.5 flex-wrap text-xs text-slate-500"
     >
       <span id="opt-split-wrap" class="flex items-center gap-1.5">
-        <label for="opt-split" class="shrink-0">分包</label>
+        <label for="opt-split" data-i18n="options.split" class="shrink-0">分包</label>
         <input
           id="opt-split"
+          data-i18n-placeholder="options.splitPlaceholder"
           class="w-40 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
           placeholder="如 2g / 500m,留空不分包"
         />
       </span>
       <span id="opt-password-wrap" class="flex items-center gap-1.5">
-        <label for="opt-password" class="shrink-0">密码</label>
+        <label for="opt-password" data-i18n="options.password" class="shrink-0">密码</label>
         <input
           id="opt-password"
           type="password"
           autocomplete="off"
+          data-i18n-placeholder="options.passwordPlaceholder"
           class="w-36 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
           placeholder="留空不加密"
         />
@@ -79,23 +101,26 @@
       <span id="pw-hint" class="hidden text-amber-600"></span>
       <label id="opt-random-wrap" class="flex items-center gap-1.5 cursor-pointer">
         <input id="opt-random" type="checkbox" class="accent-blue-600 align-middle" />
-        随机包名
+        <span data-i18n="options.randomName">随机包名</span>
       </label>
       <label
         id="opt-verify-wrap"
         class="flex items-center gap-1.5 cursor-pointer"
         title="压缩完成后检查压缩包结构, 提前发现不完整的包"
+        data-i18n-title="options.verifyTitle"
       >
         <input id="opt-verify" type="checkbox" class="accent-blue-600 align-middle" checked />
-        压缩成功后校验
+        <span data-i18n="options.verify">压缩成功后校验</span>
       </label>
       <span id="opt-preset-wrap" class="hidden items-center gap-1.5">
-        <label class="shrink-0">模式</label>
+        <label data-i18n="options.preset" class="shrink-0">模式</label>
         <span class="flex rounded-md border border-slate-300 overflow-hidden">
           <button
             type="button"
             id="preset-compat"
             title="zip 格式 + 最大压缩强度; 所有系统都能打开"
+            data-i18n-title="options.presetCompatTitle"
+            data-i18n="options.presetCompat"
             class="px-2 py-1 bg-blue-600 text-white"
           >
             最大兼容性
@@ -104,19 +129,21 @@
             type="button"
             id="preset-balanced"
             title="7z 格式(LZMA2), 压缩率更高; 需 7z 系工具解压"
+            data-i18n-title="options.presetBalancedTitle"
+            data-i18n="options.presetBalanced"
             class="px-2 py-1 bg-white text-slate-600 border-l border-slate-300"
           >
             平衡
           </button>
         </span>
-        <span id="opt-preset-custom" class="hidden text-slate-400">自定义</span>
+        <span id="opt-preset-custom" data-i18n="options.presetCustom" class="hidden text-slate-400">自定义</span>
       </span>
       <label id="opt-advanced-wrap" class="hidden items-center gap-1.5 cursor-pointer">
         <input id="opt-advanced" type="checkbox" class="accent-blue-600 align-middle" />
-        高级
+        <span data-i18n="options.advanced">高级</span>
       </label>
       <span id="opt-format-wrap" class="hidden items-center gap-1.5">
-        <label for="opt-format" class="shrink-0">格式</label>
+        <label for="opt-format" data-i18n="options.format" class="shrink-0">格式</label>
         <select
           id="opt-format"
           class="px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
@@ -126,7 +153,7 @@
         </select>
       </span>
       <span id="opt-level-wrap" class="hidden items-center gap-1.5">
-        <label for="opt-level" class="shrink-0">强度</label>
+        <label for="opt-level" data-i18n="options.level" class="shrink-0">强度</label>
         <input
           id="opt-level"
           type="number"
@@ -134,27 +161,30 @@
           max="9"
           placeholder="默认"
           title="留空 = 后端默认强度(zip 6 / 7z 5)"
+          data-i18n-placeholder="options.levelPlaceholder"
+          data-i18n-title="options.levelTitle"
           class="w-14 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
         />
       </span>
       <span id="opt-exclude-wrap" class="hidden items-center gap-1.5">
-        <label for="opt-exclude" class="shrink-0">排除</label>
+        <label for="opt-exclude" data-i18n="options.exclude" class="shrink-0">排除</label>
         <input
           id="opt-exclude"
+          data-i18n-placeholder="options.excludePlaceholder"
           class="w-64 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
           placeholder="逗号分隔, 如 Thumbs.db, *.tmp"
         />
       </span>
       <label id="opt-force-wrap" class="hidden items-center gap-1.5 cursor-pointer">
         <input id="opt-force" type="checkbox" class="accent-blue-600 align-middle" />
-        覆盖已有文件
+        <span data-i18n="options.force">覆盖已有文件</span>
       </label>
     </div>
 
     <!-- 条目表格: 通栏铺满剩余空间 -->
     <main class="flex-1 min-h-0 overflow-auto">
       <table class="w-full">
-        <caption class="sr-only">条目列表</caption>
+        <caption class="sr-only" data-i18n="table.caption">条目列表</caption>
         <thead class="sticky top-0 bg-slate-50 text-slate-500 text-xs">
           <tr class="border-b border-slate-200">
             <th class="w-10 py-2">
@@ -163,27 +193,36 @@
                 type="checkbox"
                 disabled
                 aria-label="全选"
+                data-i18n-aria-label="table.selectAll"
                 class="accent-blue-600 align-middle"
               />
+              <span class="sr-only" data-i18n="table.selectAll">全选</span>
             </th>
-            <th class="py-2 pr-2 text-left font-medium">文件名</th>
-            <th class="py-2 pr-4 text-right font-medium">大小</th>
-            <th class="w-24 py-2 pr-4 text-left font-medium">状态</th>
+            <th data-i18n="table.name" class="py-2 pr-2 text-left font-medium">文件名</th>
+            <th data-i18n="table.size" class="py-2 pr-4 text-right font-medium">大小</th>
+            <th data-i18n="table.status" class="w-24 py-2 pr-4 text-left font-medium">状态</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
       </table>
-      <div id="empty" class="py-16 text-center text-slate-400">
+      <div id="empty" data-i18n="table.empty" class="py-16 text-center text-slate-400">
         点击「源文件夹」选择目录, 也可直接拖入文件夹
       </div>
     </main>
 
     <!-- 状态栏 -->
     <footer class="flex items-center justify-between px-4 py-1.5 bg-white border-t border-slate-200 text-xs text-slate-500">
-      <span id="msg" class="truncate min-w-0" title="">就绪</span>
+      <span id="msg" data-i18n="status.ready" class="truncate min-w-0" title="">就绪</span>
       <span id="ver" class="shrink-0 pl-4"></span>
     </footer>
 
+    <script src="vendor/i18next.min.js"></script>
+    <script src="locales/zh-CN.js"></script>
+    <script src="locales/zh-HK.js"></script>
+    <script src="locales/zh-TW.js"></script>
+    <script src="locales/en.js"></script>
+    <script src="locales/ru.js"></script>
+    <script src="i18n.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

@@ -1,3 +1,8 @@
 /* Tailwind 入口:只扫描 index.html,产出按需裁剪的静态 CSS */
 @import "tailwindcss";
 @source "../ui/index.html";
+
+/* 多语言脚本应用前隐藏, 避免非中文系统首屏闪中文 */
+html:not([data-i18n-ready]) body {
+  visibility: hidden;
+}
