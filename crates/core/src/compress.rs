@@ -173,9 +173,26 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
 
     for (i, e) in entries.iter().enumerate() {
         let out_archive = out_abs.join(format!("{}.{}", e.dst, ext));
+        let base_bytes = done_bytes;
+        let entry_size = e.size;
         let result = backend
             .compress_command(&input_abs, &e.name, &out_archive, opts, &e.attr_hidden)
-            .and_then(|mut cmd| backend.run(&mut cmd, cancel))
+            .and_then(|mut cmd| {
+                backend.run_with_percent(&mut cmd, cancel, &mut |pct| {
+                    // 条目内进度: 扫描期大小 × 百分比(7z 帧约 10Hz; 0 字节条目无帧, 跳过)。
+                    // tick 不响应回调 Break: 条目内取消仍走 CancelFlag(kill 子进程)
+                    if entry_size > 0 {
+                        let _ = on_progress(&Progress {
+                            phase: Phase::Compressing,
+                            done: i,
+                            total,
+                            done_bytes: base_bytes + entry_size * u64::from(pct) / 100,
+                            total_bytes,
+                            entry: e.name.clone(),
+                        });
+                    }
+                })
+            })
             .and_then(|()| {
                 // 压缩成功后、记入产物前做结构校验:坏包不进入 Report/mapping
                 let archive = resolve_primary_archive(&out_abs, &e.dst, ext);
@@ -706,6 +723,109 @@ mod fake_tests {
         fn check_split_size(&self, _size: Option<u64>) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// run 时发一帧 50% 的假后端:验证百分比 → 字节加权映射(委托其余行为给 FakeBackend)
+    struct PercentBackend(FakeBackend);
+
+    impl PercentBackend {
+        fn new(fail_on: &[&str]) -> Self {
+            Self(FakeBackend::new(fail_on))
+        }
+    }
+
+    impl CommandBackend for PercentBackend {
+        fn compress_command(
+            &self,
+            work: &Path,
+            name: &str,
+            out_archive: &Path,
+            opts: &Options,
+            attr_hidden: &[String],
+        ) -> Result<Command> {
+            self.0
+                .compress_command(work, name, out_archive, opts, attr_hidden)
+        }
+
+        fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()> {
+            self.0.run(cmd, cancel)
+        }
+
+        fn verify(&self, entry: &Path, opts: &Options, cancel: &crate::CancelFlag) -> Result<()> {
+            self.0.verify(entry, opts, cancel)
+        }
+
+        fn check_split_size(&self, size: Option<u64>) -> Result<()> {
+            self.0.check_split_size(size)
+        }
+
+        fn run_with_percent(
+            &self,
+            _cmd: &mut Command,
+            _cancel: &crate::CancelFlag,
+            on_percent: &mut dyn FnMut(u8),
+        ) -> Result<()> {
+            on_percent(50);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn percent_ticks_map_into_byte_weighted_progress() {
+        // two_entries_fixture: A=3 字节, B=4 字节, 总 7
+        let root = two_entries_fixture("percent-tick");
+        let entries = [
+            Entry {
+                name: "A".into(),
+                kind: crate::scan::EntryKind::Dir,
+                size: 3,
+                dst: "A".into(),
+                format: String::new(),
+                exclude: None,
+                attr_hidden: Vec::new(),
+            },
+            Entry {
+                name: "B".into(),
+                kind: crate::scan::EntryKind::Dir,
+                size: 4,
+                dst: "B".into(),
+                format: String::new(),
+                exclude: None,
+                attr_hidden: Vec::new(),
+            },
+        ];
+        let events = RefCell::new(Vec::new());
+        // 直调 compress_entries_with_backend(不经 plan), mapping.csv 需要输出目录已存在
+        fs::create_dir_all(root.join("out")).unwrap();
+        let report = compress_entries_with_backend(
+            &PercentBackend::new(&[]),
+            &root.join("in"),
+            &root.join("out"),
+            &entries,
+            &rnd(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.entries.len(), 2);
+        let ev = events.borrow();
+        let compressing: Vec<_> = ev
+            .iter()
+            .filter(|p| p.phase == Phase::Compressing)
+            .collect();
+        // A 50% → 3*50/100=1;A 完成 → 3;B 50% → 3+4*50/100=5;B 完成 → 7
+        assert_eq!(
+            compressing
+                .iter()
+                .map(|p| (p.done, p.done_bytes, p.total_bytes))
+                .collect::<Vec<_>>(),
+            [(0, 1, 7), (1, 3, 7), (1, 5, 7), (2, 7, 7)],
+            "{ev:?}"
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// in/A/(1+2=3 字节) 与 in/B/(4 字节), 总计 7 字节

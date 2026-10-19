@@ -144,6 +144,7 @@ impl Backend {
     /// stderr 为空时用解析器的非进度尾巴兜底(WARNING 走 stdout 的实测坑)。
     /// 线程模型:读者线程只把 tick 发进 mpsc,回调在本次轮询线程触发 ——
     /// 公共 API 的 `&dyn Fn` 回调因此不需要 Sync。
+    /// 回调在本轮询线程执行,须保持廉价:回调时长会拉长取消延迟上界(轮询间隔)。
     pub(crate) fn run_streaming(
         &self,
         cmd: &mut Command,
@@ -1534,6 +1535,18 @@ mod streaming_tests {
                 entry: Some("a.txt".into())
             }]
         );
+    }
+
+    #[test]
+    fn sevenzip_run_with_percent_forwards_percent_frames() {
+        let mut percents = Vec::new();
+        let r = Backend::SevenZip.run_with_percent(
+            &mut print_progress_frames(),
+            &CancelFlag::new(),
+            &mut |p| percents.push(p),
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(percents, [42]);
     }
 
     #[test]
