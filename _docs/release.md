@@ -24,8 +24,9 @@
 | `crates/cli/Cargo.toml` | `[[bin]] name = "zip-tool"` → `"ziptool"` |
 | `crates/cli/src/main.rs` | clap `#[command(name = "zip-tool")]` → `"ziptool"` |
 | `crates/tauri-app/tauri.conf.json` | `"productName": "zip-tool"` → `"ziptool"`(安装包 / deb / dmg 文件名随之变 `ziptool_*`) |
+| `crates/tauri-app/tauri.conf.json`(顶层) | 增加 `"mainBinaryName": "ziptool"`(安装包内部主程序名,缺省是 crate bin 名 `zip-tool-tauri`;注意是顶层字段,不属 `bundle` 段) |
 | `test/tests/cli_e2e.rs` | 二进制名 `"zip-tool.exe"` / `"zip-tool"` → `"ziptool.exe"` / `"ziptool"` |
-| `README.md` | 用法示例与产物路径. 注意 `zip-tool-tauri.exe` 是 crate bin 名, **不改** |
+| `README.md` | 用法示例与产物路径. 注意 `zip-tool-tauri` 作为 crate bin 名不改; 「独立可执行文件」产物行随 mainBinaryName 更新为 `ziptool.exe`(两者同路径, 后构建覆盖先构建) |
 
 - `Cargo.lock` 不受影响(bin 名不进 lock)
 - 命名注意区分三个层面: crate 名(不改)/ CLI bin 名(改 `ziptool`)/ Tauri productName(改 `ziptool`)
@@ -112,6 +113,7 @@
 | 版本漂移(tag ≠ Cargo.toml ≠ tauri.conf) | verify 第 2 步三方校验直接 fail, 不会带病发布 |
 | 同一 tag 重复 dispatch 竞争 | `concurrency: release-<tag>` 取消旧 run; release job 的 view/upload 分支幂等 |
 | tauri build 首次运行下载 NSIS / WiX 工具慢 | 计入 build timeout 60 分钟余量; rust-cache 不缓存该目录, 接受每次下载 |
+| CLI 与 GUI 独立可执行文件同为 target/release/ziptool.exe, 后构建覆盖先构建 | Release 流程 CLI 归档步骤固定先于 tauri build(顺序写死在 yml 并加注释) |
 
 ## 9. 验证方式(bootstrap)
 

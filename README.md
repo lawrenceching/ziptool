@@ -1,4 +1,4 @@
-# Zip Tool
+# ziptool
 
 本工具用于大数据盘搬运前, 批量压缩磁盘里的各个目录.
 
@@ -15,7 +15,7 @@
 **为什么不分包压缩整个磁盘**
 一个分包失败或者错误, 可能会导致全部数据无法解压, 导致丢失所有数据.
 
-Zip Tool 调用系统已有的压缩命令, 不自带压缩实现.
+ziptool 调用系统已有的压缩命令, 不自带压缩实现.
 
 压缩后端 (分包使用各后端原生能力, 保持默认命名):
 - Linux: zip 格式用系统 zip 命令, 分包 -s (B.z01, B.z02, ..., B.zip, 最后一卷是 .zip); 7z 格式用 7z 命令
@@ -110,17 +110,17 @@ cd crates/tauri-app && npm install && npm test
 正式打包:
 
 ```
-npm install -g @tauri-apps/cli      # 或: cargo install tauri-cli --version "^2"
-cargo tauri build
+cd crates/tauri-app && npx tauri build     # @tauri-apps/cli 已在 devDependencies, 无需全局安装
 ```
 
 产物:
-- Windows 安装包: `target/release/bundle/msi/*.msi` 与 `nsis/*.exe`
+- Windows 安装包: `target/release/bundle/msi/*.msi` 与 `nsis/*-setup.exe`
 - Linux 包: `target/release/bundle/deb|rpm|appimage/`
-- 独立可执行文件: `target/release/zip-tool-tauri.exe` (前端资源已内嵌, 可单独分发)
+- macOS 包: `target/release/bundle/dmg/*.dmg`
+- 独立可执行文件: `target/release/ziptool.exe` (前端资源已内嵌, 可单独分发; tauri build 会把 crate bin `zip-tool-tauri` 改名为 `ziptool.exe`, 与 CLI 构建产物同路径, 后构建者覆盖先构建者)
 
 ## 环境要求
 
-- 构建: Rust 1.85+ (edition 2024); Windows 需 MSVC Build Tools; 打包桌面应用需 tauri-cli
+- 构建: Rust 1.85+ (edition 2024); Windows 需 MSVC Build Tools; 打包桌面应用需 @tauri-apps/cli (已在 crates/tauri-app devDependencies)
 - 桌面应用运行: Windows 10/11 自带 WebView2, 无需额外安装
 - 压缩/解压通过外部命令完成 (见"压缩后端"): Windows 需 7z (7-Zip 或 NanaZip 均可), Linux 需系统 zip / unzip, 7z 系命令 (7z 格式压缩与解 .7z 需要)
