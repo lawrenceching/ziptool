@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "zip-tool",
+  "productName": "ziptool",
   "version": "0.1.0",
   "identifier": "com.ziptool.desktop",
   "build": {
