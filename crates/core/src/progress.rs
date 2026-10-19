@@ -11,7 +11,7 @@ pub enum Phase {
     Extracting,
 }
 
-/// 单条进度(条目级粒度, 见技术文档 _docs/compress.md 第 7 节)
+/// 单条进度(条目级粒度, 7z 系条目内 tick 帧更细, 见技术文档 _docs/compress.md 第 7 节)
 #[derive(Debug, Clone)]
 pub struct Progress {
     pub phase: Phase,

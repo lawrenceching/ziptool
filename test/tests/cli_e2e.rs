@@ -793,6 +793,9 @@ fn compress_exclusion_rules_matrix() {
 fn compress_emits_progress_stream_frames() {
     // 两个 64MB 不可压条目: 7z 压缩各约 1s+, 进度帧约 10Hz → 几十帧;
     // 无进度流时整批只有个位数 \r(每条目 scan+compress 各一帧)。阈值 12 留足余量。
+    // 固定 --format 7z: 进度流是 7z 系特性, Info-ZIP(zip 后端)无机器可读进度,
+    // 非 Windows 默认格式走 zip 会只有个位数帧; 且 LZMA2 对随机数据更慢,
+    // 帧数余量更大(实测 ~60 帧/11.5s, 默认格式 ~25 帧)。
     let fx = fixture("progress");
     fill(&fx.root.join("in/Novel/book.txt"), 64 * 1024 * 1024, 7);
     fill(&fx.root.join("in/media/clip.bin"), 64 * 1024 * 1024, 8);
@@ -803,6 +806,8 @@ fn compress_emits_progress_stream_frames() {
         inp.to_str().unwrap(),
         "-o",
         out.to_str().unwrap(),
+        "--format",
+        "7z",
     ]);
     assert!(r.ok, "压缩失败:\n{}", r.stderr);
     let frames = r.stderr.matches('\r').count();
