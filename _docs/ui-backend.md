@@ -264,8 +264,8 @@ meta / warning 行:      恒定不变
 | 压缩 | 密码(password) | 空 = 不加密 | 空串按 None; 不持久化 |
 | 压缩 | 随机包名(checkbox) | 关 | 与 CLI `--random-name` 默认关闭一致 |
 | 压缩 | 压缩成功后校验(checkbox) | 开 | 压缩完成后只读包头/中央目录做结构检查; 关闭则跳过(性能敏感场景), 语义见 compress.md 6.8 |
-| 压缩 | 模式预设(buttons, 已实现) | 最大兼容性 | zip+强度9 / 平衡=7z+强度5; 手改底层参数变"自定义"(见 compress-modes.md) |
-| 压缩 | 高级(checkbox, 已实现) | 关 | 展开格式(zip/7z)与强度(0-9)微调; 模式预设隐藏 |
+| 压缩 | 模式预设(buttons, 已实现) | 最大兼容性 | zip+后端默认强度(不传 level) / 平衡=7z+强度5; 手改底层参数变"自定义"(见 compress-modes.md) |
+| 压缩 | 高级(checkbox, 已实现) | 关 | 展开格式(zip/7z)与强度(留空=后端默认, 0-9)微调; 模式预设隐藏 |
 | 压缩 | 排除模式输入(text, 高级区) | 空 = 不排除 | 多行/逗号分隔; scan 与 compress 都透传 `excludes`(恒定 `include_hidden=false`); 被标行默认不勾选, 可手动勾选 |
 | 解压 | 密码(password) | 空 = 不加密 | 整批一个密码, 与 compress 对称 |
 | 解压 | 覆盖已有文件(checkbox) | 关 | 宁停不错, 与 CLI `--force` 默认一致 |

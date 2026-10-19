@@ -29,8 +29,9 @@ const BADGE = {
 };
 
 // 压缩模式预设 = 底层参数组合(格式 + 强度);core/CLI 无"模式"概念(_docs/compress-modes.md)
+// level: null = 不传级别, 用后端默认(zip -6 / 7z -mx=5; -9 压缩时间过长, 默认不拉满)
 const PRESETS = {
-  compat: { format: "zip", level: 9 },
+  compat: { format: "zip", level: null },
   balanced: { format: "7z", level: 5 },
 };
 // 预设按钮两种形态(选中蓝 / 未选白; 平衡钮恒有左边框)
@@ -48,7 +49,7 @@ function highlightPreset(name) {
 function applyPreset(name) {
   const p = PRESETS[name];
   $("opt-format").value = p.format;
-  $("opt-level").value = p.level;
+  $("opt-level").value = p.level ?? ""; // null = 后端默认, 输入框留空显示占位符
   highlightPreset(name);
   updatePwHint();
 }
@@ -431,13 +432,15 @@ $("confirm").addEventListener("click", async () => {
   }
   const isCompress = state.mode === "compress";
   const names = sel.map((i) => state.rows[i].name);
+  // 强度留空 = 不传级别(后端默认);Number("") 是 0 = 仅存储, 空值必须显式归 null
+  const lvl = $("opt-level").value.trim();
   const options = isCompress
     ? {
         splitSize: $("opt-split").value.trim() || null,
         password: $("opt-password").value || null,
         randomName: $("opt-random").checked,
         format: $("opt-format").value,
-        level: Number($("opt-level").value),
+        level: lvl === "" ? null : Number(lvl),
         excludes: parseExcludes(),
         verify: $("opt-verify").checked,
       }

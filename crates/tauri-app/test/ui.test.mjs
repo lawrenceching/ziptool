@@ -225,7 +225,7 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
     password: "pw",
     randomName: true,
     format: "zip",
-    level: 9,
+    level: null, // 默认预设不传级别(后端默认 zip -6); Number("") 是 0=store, 空值必须显式归 null
     excludes: [],
     verify: true,
   });
@@ -414,9 +414,9 @@ test("行为: 首次打开(未点过模式)— 压缩模式控件初始可见, �
 
 test("行为: 压缩模式预设 — 默认最大兼容性, 预设联动参数, 手动改参数变自定义", async () => {
   const h = makeHarness(false, () => null);
-  // 默认 = 最大兼容性预设(zip + 强度 9)
+  // 默认 = 最大兼容性预设(zip + 后端默认强度; 9 太慢, 强度留空 = 不传级别)
   assert.equal(h.doc.getElementById("opt-format").value, "zip");
-  assert.equal(h.doc.getElementById("opt-level").value, "9");
+  assert.equal(h.doc.getElementById("opt-level").value, "");
   assert.ok(h.doc.getElementById("opt-preset-custom").classList.contains("hidden"));
   assert.ok(h.doc.getElementById("preset-compat").className.includes("bg-blue-600"));
 

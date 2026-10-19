@@ -109,7 +109,7 @@ pub struct Options {
 
 - `compress` 新增:
   - `--format <zip|7z>`, 默认 `zip`
-  - `--level <0-9>`, 默认不传(= 后端默认强度, 保持现状行为可预期; 与 UI 初始预设 zip+9 的差异为有意设计: CLI 脚本行为不突变)
+  - `--level <0-9>`, 默认不传(= 后端默认强度; 与 UI 初始预设行为一致, 均不突变拉满)
 - `extract` 无新参数(格式由输入扩展名决定)
 - 报告打印格式不变, 产物扩展名自然体现格式
 
@@ -118,9 +118,9 @@ pub struct Options {
 - 压缩选项行新增:
   - **模式预设**: 分段单选 `[最大兼容性 | 平衡]`, 初始选中"最大兼容性"
   - **「高级」展开区**: 格式单选(zip/7z) + 强度步进器(0-9)
-- 预设映射: 最大兼容性 → (zip, 9); 平衡 → (7z, 5); 手动改动高级参数 → 预设区显示「自定义」(清除预选高亮)
+- 预设映射: 最大兼容性 → (zip, 后端默认强度, UI 不传 level); 平衡 → (7z, 5); 手动改动高级参数 → 预设区显示「自定义」(清除预选高亮)。2026-10 起 zip 预设不再拉满 9(压缩时间过长, 后端默认 zip = -6)
 - 密码联动提示(密码输入旁一行): zip 格式+密码 → 「ZipCrypto: 兼容性最好, 强度弱」; 7z 格式+密码 → 「AES-256」
-- CompressOptions DTO 增加 `format: "zip"|"7z"` 与 `level: number`(UI 总是传具体数值, 预设与步进器天然给出; `level` 类型在 core 侧仍为 `Option<u8>`, None 仅由 CLI 不传时产生)
+- CompressOptions DTO 增加 `format: "zip"|"7z"` 与 `level: number|null`(留空/null = 后端默认强度; 手动填了才传具体数值; `level` 类型在 core 侧仍为 `Option<u8>`)
 - 解压侧: scan_groups 返回的 7z 组自然进表格(展示/勾选/meta 行规则不变), 无额外 UI 改动; 浏览器 mock 路径同步
 
 ## 7. doctor
