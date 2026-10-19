@@ -16,6 +16,10 @@ const state = {
 
 // 原生拖拽: 两个投放区 + 最近命中行 + 校验竞态 token
 const DROP_ZONE_IDS = ["src", "dst"];
+const DROP_PLACEHOLDER_KEYS = {
+  src: "path.srcPlaceholder",
+  dst: "path.dstPlaceholder",
+};
 let dropHover = null;
 let dropToken = 0;
 
@@ -251,8 +255,12 @@ async function pickFolder(target) {
         multiple: false,
         title:
           target === "src"
-            ? `选择要${state.mode === "compress" ? "压缩" : "解压"}的文件夹`
-            : "选择目标文件夹",
+            ? t(
+                state.mode === "compress"
+                  ? "dialog.selectSourceCompress"
+                  : "dialog.selectSourceExtract"
+              )
+            : t("dialog.selectDst"),
       });
     } else {
       setStatus("status.dialogUnavailable");
@@ -275,8 +283,8 @@ function applyFolder(target, path) {
 }
 
 // —— 原生拖拽选择文件夹(Tauri drag-drop 事件; 坐标为物理像素) ——
-function setDropHover(zone) {
-  if (zone === dropHover) return;
+function setDropHover(zone, force = false) {
+  if (!force && zone === dropHover) return;
   dropHover = zone;
   for (const id of DROP_ZONE_IDS) {
     const input = $(id);
@@ -287,8 +295,8 @@ function setDropHover(zone) {
     input.classList.toggle("bg-slate-50", !on);
     input.classList.toggle("bg-blue-50", on);
     input.placeholder = on
-      ? "松开鼠标以选择此文件夹"
-      : input.dataset.placeholder;
+      ? t("path.dropRelease")
+      : t(DROP_PLACEHOLDER_KEYS[id]);
   }
 }
 
@@ -357,11 +365,6 @@ function initDragDrop() {
     });
 }
 
-// 记录原始占位文字(拖拽高亮时临时替换), 并在 Tauri 环境注册拖拽
-for (const id of DROP_ZONE_IDS) {
-  const input = $(id);
-  input.dataset.placeholder = input.placeholder;
-}
 initDragDrop();
 
 // —— 行状态推导: pos < done → 完成, pos == done → 进行中, 其余待处理 ——
@@ -400,7 +403,7 @@ function renderTable(items) {
     cb.type = "checkbox";
     cb.checked = r.checked && st === "pending";
     cb.disabled = r.status !== "pending" || !!state.run;
-    cb.setAttribute("aria-label", "选择 " + r.name);
+    cb.setAttribute("aria-label", t("row.select", { name: r.name }));
     cb.className = "accent-blue-600 align-middle";
     cb.addEventListener("change", () => {
       state.rows[i].checked = cb.checked;
@@ -411,7 +414,11 @@ function renderTable(items) {
     const td1 = document.createElement("td");
     td1.className = "py-2 pr-2 truncate max-w-0";
     // 悬停看全名 + 附注(排除原因 / 原名 / 告警原因 / 元数据行数)
-    const tip = [r.excluded, r.original ? `原名 ${r.original}` : null, r.detail]
+    const tip = [
+      r.excluded,
+      r.original ? t("row.original", { name: r.original }) : null,
+      r.detail,
+    ]
       .filter(Boolean)
       .join(", ");
     td1.title = tip ? `${r.name}(${tip})` : r.name;
@@ -427,11 +434,21 @@ function renderTable(items) {
     badge.className =
       "inline-block px-2 py-0.5 rounded-full text-xs " + BADGE[st];
     badge.textContent =
-      st === "pending" ? (state.mode === "compress" ? "待压缩" : "待解压") :
-      st === "done" ? "完成" :
-      st === "running" ? "进行中" :
-      st === "failed" ? "失败" :
-      st === "warning" ? "告警" : "元数据";
+      st === "pending"
+        ? t(
+            state.mode === "compress"
+              ? "row.status.pendingCompress"
+              : "row.status.pendingExtract"
+          )
+        : st === "done"
+          ? t("row.status.done")
+          : st === "running"
+            ? t("row.status.running")
+            : st === "failed"
+              ? t("row.status.failed")
+              : st === "warning"
+                ? t("row.status.warning")
+                : t("row.status.meta");
     if (st === "failed") badge.title = r.failMsg || "";
     if (st === "warning") badge.title = r.detail || "";
     td3.appendChild(badge);
@@ -604,10 +621,9 @@ function updatePwHint() {
     hint.classList.add("hidden");
     return;
   }
-  hint.textContent =
-    $("opt-format").value === "7z"
-      ? "7z 格式: AES-256 加密"
-      : "zip 格式: ZipCrypto 加密(兼容性最好, 强度弱)";
+  hint.textContent = t(
+    $("opt-format").value === "7z" ? "options.pwHint7z" : "options.pwHintZip"
+  );
   hint.classList.remove("hidden");
 }
 $("opt-password").addEventListener("input", updatePwHint);

@@ -704,3 +704,76 @@ test("i18n: 切换语言重渲染最后状态与按钮", async () => {
   assert.equal(h.doc.getElementById("confirm").textContent, "Confirm");
   assert.equal(h.window.localStorage.getItem("ziptool.locale"), "en");
 });
+
+test("i18n: 切换语言后表格/密码提示/文件选择框/拖拽提示同步", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    return null;
+  });
+
+  h.window.i18next.addResourceBundle(
+    "en",
+    "translation",
+    {
+      dialog: {
+        selectSourceCompress: "Select folder to compress",
+        selectSourceExtract: "Select folder to extract",
+        selectDst: "Select destination folder",
+      },
+      options: {
+        pwHintZip: "zip format: ZipCrypto",
+        pwHint7z: "7z format: AES-256",
+      },
+      path: { dropRelease: "Release to choose this folder" },
+      row: {
+        status: { pendingCompress: "Pending", pendingExtract: "Pending extract" },
+        original: "Original: {{name}}",
+        select: "Select {{name}}",
+      },
+    },
+    true,
+    true
+  );
+
+  h.doc.getElementById("lang").value = "en";
+  h.doc
+    .getElementById("lang")
+    .dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  await h.flush();
+  await h.flush();
+
+  // 文件选择框标题
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  const dlg = h.calls.find((c) => c.cmd === "plugin:dialog|open");
+  assert.equal(dlg.args.options.title, "Select folder to compress");
+
+  // 密码提示
+  h.doc.getElementById("opt-password").value = "pw";
+  h.doc
+    .getElementById("opt-password")
+    .dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.equal(h.doc.getElementById("pw-hint").textContent, "zip format: ZipCrypto");
+
+  // 表格徽章/aria
+  assert.deepEqual(h.badges(), ["Pending", "Pending", "Pending"]);
+  assert.equal(
+    h.rows()[0].querySelector("input").getAttribute("aria-label"),
+    "Select Novel"
+  );
+
+  // 拖拽高亮占位
+  const srcRow = h.doc.querySelector('[data-drop="src"]');
+  h.doc.elementFromPoint = () => srcRow;
+  await h.emit(TauriEvent.DRAG_ENTER, {
+    paths: ["D:\\data"],
+    position: { x: 1, y: 1 },
+  });
+  assert.equal(
+    h.doc.getElementById("src").placeholder,
+    "Release to choose this folder"
+  );
+  await h.emit(TauriEvent.DRAG_LEAVE, {});
+});
