@@ -12,6 +12,18 @@ use crate::{CancelFlag, CoreError, Options, Result};
 /// 进程轮询间隔, 也是取消生效的延迟上界
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Windows GUI 进程没有控制台, 直接 spawn 控制台子程序会让系统新建命令行窗口。
+/// CREATE_NO_WINDOW 让子进程使用无窗口控制台; stdio 已显式重定向, 不受影响。
+pub(crate) fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// 压缩包格式:决定外部工具、命令参数、产物扩展名与加密方式。
 /// zip = Deflate(兼容性最大);7z = LZMA2(压缩率更高, 需 7z 系工具解压)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -76,6 +88,8 @@ impl Backend {
 
     /// `capture_stdout=false` 用于结构校验:列表输出可能巨大且只用退出码,直接丢弃。
     fn run_impl(&self, cmd: &mut Command, cancel: &CancelFlag, capture_stdout: bool) -> Result<()> {
+        // Windows GUI 宿主 spawn 控制台程序时不能弹新窗口
+        no_window(cmd);
         // spawn 默认继承父进程 stdio(与 output() 的默认管道不同), 必须显式设:
         // stdin 断开, 防 7z/unzip 的交互提示(如密码)挂住; 输出接管用于报错
         cmd.stdin(Stdio::null())
@@ -339,10 +353,9 @@ impl ExtractBackend for RealExtract {
     fn list(&self, kind: Backend, entry: &Path) -> Result<ArchiveListing> {
         let program = self.program(kind);
         ensure_tool_available(program)?;
-        let out = kind
-            .list_command(entry)
-            .stdin(std::process::Stdio::null())
-            .output()?;
+        let mut cmd = kind.list_command(entry);
+        no_window(&mut cmd);
+        let out = cmd.stdin(std::process::Stdio::null()).output()?;
         if !out.status.success() {
             let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
             if text.trim().is_empty() {

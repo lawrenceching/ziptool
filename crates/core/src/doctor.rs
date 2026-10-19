@@ -69,7 +69,9 @@ pub fn locate_tool(program: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 /// 试运行工具(无参数调用, 退出码不关心), 取 stdout(其次 stderr)的第一个非空行。
 /// 进程起不来(不存在、缺 DLL 导致加载失败等)返回 Err。
 pub fn probe_tool(path: &Path) -> std::result::Result<Option<String>, String> {
-    let out = Command::new(path)
+    let mut cmd = Command::new(path);
+    crate::backend::no_window(&mut cmd);
+    let out = cmd
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot execute: {e}"))?;
