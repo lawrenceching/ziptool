@@ -195,3 +195,73 @@ test("index.html 静态文案与语言下拉结构完整", () => {
     ["system", "zh-CN", "zh-HK", "zh-TW", "en", "ru"]
   );
 });
+
+test("英文界面关键文案为英文, 不支持语言回退英文", () => {
+  const enCopy = localeCatalog("en");
+  const zhCopy = localeCatalog("zh-CN");
+  assert.notEqual(enCopy.header.compress, zhCopy.header.compress);
+
+  const en = makeDom({ preference: "en" });
+  assert.equal(
+    en.document.getElementById("mode-compress").textContent,
+    enCopy.header.compress
+  );
+  assert.equal(
+    en.document.getElementById("mode-extract").textContent,
+    enCopy.header.extract
+  );
+  assert.equal(
+    en.document.getElementById("confirm").textContent,
+    enCopy.header.confirm
+  );
+
+  const fallback = makeDom({ preference: "system", languages: ["ja-JP"] });
+  assert.equal(fallback.zipToolI18n.locale, "en");
+  assert.equal(
+    fallback.document.getElementById("mode-compress").textContent,
+    enCopy.header.compress
+  );
+});
+
+test("英文与俄语复数形态齐全", () => {
+  const catalogs = Object.fromEntries(
+    LOCALES.map((code) => [code, flatten(localeCatalog(code))])
+  );
+  const pluralBases = new Set();
+  for (const catalog of Object.values(catalogs)) {
+    for (const key of Object.keys(catalog)) {
+      if (PLURAL.test(key)) pluralBases.add(baseKey(key));
+    }
+  }
+  assert.ok(pluralBases.size > 0, "应存在复数 key");
+
+  for (const base of pluralBases) {
+    for (const code of LOCALES) {
+      assert.ok(`${base}_other` in catalogs[code], `${code} 缺少 ${base}_other`);
+    }
+    assert.ok(`${base}_one` in catalogs.en, `en 缺少 ${base}_one`);
+    for (const suffix of ["_one", "_few", "_many", "_other"]) {
+      assert.ok(`${base}${suffix}` in catalogs.ru, `ru 缺少 ${base}${suffix}`);
+    }
+  }
+});
+
+test("俄语 1/2/5 使用不同复数形态", () => {
+  const w = makeDom({ preference: "ru" });
+  const one = w.zipToolI18n.t("status.scanDone", {
+    count: 1,
+    path: "p",
+    bytes: "1 B",
+  });
+  const few = w.zipToolI18n.t("status.scanDone", {
+    count: 2,
+    path: "p",
+    bytes: "1 B",
+  });
+  const many = w.zipToolI18n.t("status.scanDone", {
+    count: 5,
+    path: "p",
+    bytes: "1 B",
+  });
+  assert.equal(new Set([one, few, many]).size, 3, `${one} | ${few} | ${many}`);
+});
