@@ -31,6 +31,7 @@ pub mod extract;
 pub mod naming;
 pub mod progress;
 pub mod scan;
+mod sevenz_progress;
 
 pub use backend::{Format, parse_size};
 pub use cancel::CancelFlag;
