@@ -103,6 +103,13 @@ pub enum CoreError {
         status: String,
         output: String,
     },
+    /// 压缩后结构校验失败:产物无法被解压端正常打开(不完整/损坏)
+    VerifyFailed {
+        /// 入口卷路径
+        archive: PathBuf,
+        status: String,
+        output: String,
+    },
     /// 任务被取消:在跑的后端命令进程已被终止并等待回收,半成品由编排层清理
     Cancelled,
     /// 文件系统 IO 错误
@@ -177,6 +184,21 @@ impl fmt::Display for CoreError {
                 status,
                 output,
             } => write!(f, "{program} failed ({status}):\n{output}"),
+            CoreError::VerifyFailed {
+                archive,
+                status,
+                output,
+            } => {
+                write!(
+                    f,
+                    "archive verification failed ({status}): {} (the archive may be incomplete or corrupted)",
+                    archive.display()
+                )?;
+                if !output.trim().is_empty() {
+                    write!(f, "\n{output}")?;
+                }
+                Ok(())
+            }
             CoreError::Cancelled => write!(f, "operation cancelled"),
             CoreError::Io(e) => write!(f, "io error: {e}"),
         }
@@ -195,7 +217,7 @@ impl From<std::io::Error> for CoreError {
 pub type Result<T> = std::result::Result<T, CoreError>;
 
 /// 压缩选项
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// 分包大小(字节);`None` 表示不分包
     pub split_size: Option<u64>,
@@ -209,6 +231,22 @@ pub struct Options {
     pub level: Option<u8>,
     /// 排除规则:内建隐藏默认集 + 用户模式;Default = 排除隐藏、无用户模式
     pub exclude: ExcludeRules,
+    /// 压缩成功后做结构校验(默认开启;UI 勾选框可关闭)
+    pub verify: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            split_size: None,
+            password: None,
+            random_name: false,
+            format: Format::default(),
+            level: None,
+            exclude: ExcludeRules::default(),
+            verify: true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -225,5 +263,19 @@ mod tests {
         assert!(opts.level.is_none(), "默认不传级别, 用后端默认");
         assert!(opts.exclude.patterns.is_empty(), "默认无用户模式");
         assert!(!opts.exclude.include_hidden, "默认排除隐藏文件");
+        assert!(opts.verify, "默认压缩后做结构校验");
+    }
+
+    #[test]
+    fn verify_failed_display_names_archive_and_hints_corruption() {
+        let err = CoreError::VerifyFailed {
+            archive: PathBuf::from("out/A.zip"),
+            status: "exit code: 2".into(),
+            output: String::new(),
+        };
+        let text = err.to_string();
+        assert!(text.contains("out/A.zip"), "{text}");
+        assert!(text.contains("exit code: 2"), "{text}");
+        assert!(text.contains("incomplete or corrupted"), "{text}");
     }
 }

@@ -9,7 +9,7 @@
 ### 目标
 
 - UI 选源即扫描并渲染表格, **勾选决定处理范围**, 确认后执行并实时反馈行级状态(进行中 / 完成 / 失败), 运行中可取消
-- 压缩选项(分包 / 密码 / 随机包名)与解压选项(密码 / 覆盖)在 UI 上完整可用
+- 压缩选项(分包 / 密码 / 随机包名 / 压缩后校验)与解压选项(密码 / 覆盖)在 UI 上完整可用
 - 前后端边界清晰: UI 只做状态机与展示; 业务语义(预检 / 停批 / 清理)全部在 core; 壳层只做参数转换与桥接
 - 大盘友好: 递归大小扫描**只做一次**, 确认执行不重扫(core 分阶段 API, 见 5.3)
 - 浏览器预览模式(无 `__TAURI__`)保留假数据路径, 界面样式迭代不依赖实机
@@ -71,7 +71,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 ### 3.2 compress / 3.3 extract_archive
 
 - `entries: string[]`: 勾选名单, 取值必须是 scan 返回的**原样 `name`**(compress = 条目名, extract = 入口卷名), 严格精确匹配
-- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean, excludes?: string[] }`(excludes 与本次 scan 传参比对保鲜, 见 5.4); `options`(解压): `{ password: string | null, force: boolean }`
+- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean, excludes?: string[], verify: boolean }`(excludes 与本次 scan 传参比对保鲜, 见 5.4; verify 缺省 true); `options`(解压): `{ password: string | null, force: boolean }`
 - 壳层转换: `splitSize` 经 `parse_size`("2g" / "500m" / 字节数), 失败 → Err 提示; `password` 空串按 `None`(不加密)
 - 执行路径见 5.3/5.4(壳层用 ScanContext 中缓存的扫描结果, 按名单筛选后调 core 分阶段 API; **不重扫**)
 - 返回值: 现有 `CompressResult` / `ExtractResult` 增加 `warnings: string[]` 透传(现状 DTO 丢弃了 Report.warnings)
@@ -119,7 +119,7 @@ struct ScanResult { mode: String, items: Vec<ScanItem>, warnings: Vec<String>, t
 
 结果(扩展现有): `CompressResult { cancelled, entries: [{archive, original}], warnings }`; `ExtractResult { cancelled, groups: [{entry, original, files}], warnings }`.
 
-压缩选项 DTO(已实现)另含 `format: Option<String>`("zip"|"7z", 缺省 zip)与 `level: Option<u8>`(0-9, 缺省不传级别) —— 壳层 `to_core_options` 统一校验并映射到 core `Options`; UI 侧仅以预设/高级微调呈现, 见 _docs/compress-modes.md.
+压缩选项 DTO(已实现)另含 `format: Option<String>`("zip"|"7z", 缺省 zip)、`level: Option<u8>`(0-9, 缺省不传级别)与 `verify: boolean`(缺省 true) —— 壳层 `to_core_options` 统一校验并映射到 core `Options`; UI 侧仅以预设/高级微调呈现, 见 _docs/compress-modes.md.
 
 ## 5. 交互流程与时序
 
@@ -263,6 +263,7 @@ meta / warning 行:      恒定不变
 | 压缩 | 分包大小(text, placeholder "不分包") | 空 = 不分包 | 确认时 `parse_size`, 失败提示并聚焦 |
 | 压缩 | 密码(password) | 空 = 不加密 | 空串按 None; 不持久化 |
 | 压缩 | 随机包名(checkbox) | 关 | 与 CLI `--random-name` 默认关闭一致 |
+| 压缩 | 压缩成功后校验(checkbox) | 开 | 压缩完成后只读包头/中央目录做结构检查; 关闭则跳过(性能敏感场景), 语义见 compress.md 6.8 |
 | 压缩 | 模式预设(buttons, 已实现) | 最大兼容性 | zip+强度9 / 平衡=7z+强度5; 手改底层参数变"自定义"(见 compress-modes.md) |
 | 压缩 | 高级(checkbox, 已实现) | 关 | 展开格式(zip/7z)与强度(0-9)微调; 模式预设隐藏 |
 | 压缩 | 排除模式输入(text, 高级区) | 空 = 不排除 | 多行/逗号分隔; scan 与 compress 都透传 `excludes`(恒定 `include_hidden=false`); 被标行默认不勾选, 可手动勾选 |

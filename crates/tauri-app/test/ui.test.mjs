@@ -227,6 +227,7 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
     format: "zip",
     level: 9,
     excludes: [],
+    verify: true,
   });
   assert.equal(comp.args.src, "C:\\demo\\data");
   assert.equal(comp.args.dst, "C:\\out");
@@ -460,7 +461,41 @@ test("契约: 平衡预设的参数透传到 compress 调用", async () => {
     format: "7z",
     level: 5,
     excludes: [],
+    verify: true,
   });
+});
+
+test("行为: 压缩成功后校验默认开启, 关闭后透传 verify=false, 解压模式隐藏", async () => {
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "compress") return { cancelled: false, entries: [], warnings: [] };
+    return null;
+  });
+
+  const box = h.doc.getElementById("opt-verify");
+  const wrap = h.doc.getElementById("opt-verify-wrap");
+  assert.ok(box.checked, "默认开启");
+  assert.ok(!wrap.classList.contains("hidden"), "压缩模式可见");
+
+  h.doc.getElementById("mode-extract").click();
+  assert.ok(wrap.classList.contains("hidden"), "解压模式隐藏");
+  h.doc.getElementById("mode-compress").click();
+  assert.ok(!wrap.classList.contains("hidden"), "切回压缩模式恢复可见");
+
+  box.click(); // 关闭校验
+  await pickSource(h);
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+
+  const comp = h.calls.find((c) => c.cmd === "compress");
+  assert.ok(comp, "应调用 compress");
+  assert.equal(comp.args.options.verify, false);
 });
 
 test("行为: 密码提示随格式切换(zip=ZipCrypto / 7z=AES-256)", async () => {

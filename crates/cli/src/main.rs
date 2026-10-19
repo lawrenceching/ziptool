@@ -109,6 +109,7 @@ fn main() -> ExitCode {
                     include_hidden: include_hidden_files,
                     patterns: exclude,
                 },
+                verify: true,
             };
             // CLI 不做交互取消(Ctrl+C 杀整个控制台进程组, 后端子命令一并退出)
             match compress_dir(

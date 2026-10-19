@@ -71,10 +71,19 @@ impl Backend {
     /// `cancel` 置位即 kill 子进程并返回 [`CoreError::Cancelled`](延迟上界 = 轮询间隔);
     /// 取消即作废:与"刚自然跑完"竞态时也统一按取消返回,由编排层清理半成品。
     pub(crate) fn run(&self, cmd: &mut Command, cancel: &CancelFlag) -> Result<()> {
+        self.run_impl(cmd, cancel, true)
+    }
+
+    /// `capture_stdout=false` 用于结构校验:列表输出可能巨大且只用退出码,直接丢弃。
+    fn run_impl(&self, cmd: &mut Command, cancel: &CancelFlag, capture_stdout: bool) -> Result<()> {
         // spawn 默认继承父进程 stdio(与 output() 的默认管道不同), 必须显式设:
         // stdin 断开, 防 7z/unzip 的交互提示(如密码)挂住; 输出接管用于报错
         cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(if capture_stdout {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
         // 读者线程排空管道: 输出撑满 64K 缓冲会让子进程写阻塞而死锁;
@@ -113,6 +122,56 @@ impl Backend {
                 None => std::thread::sleep(POLL_INTERVAL),
             }
         }
+    }
+
+    /// 默认结构校验: 整包 zip(Linux zip 后端, 无分卷)用 `unzip -l`;
+    /// zip -s 分卷与 7z 形态用 `7z l`(与解压端路由一致)。
+    fn verify_program(&self, opts: &Options) -> &'static str {
+        match self {
+            Backend::Zip if opts.split_size.is_none() => "unzip",
+            _ => "7z",
+        }
+    }
+
+    fn verify_command(&self, entry: &Path, opts: &Options) -> Command {
+        let program = self.verify_program(opts);
+        let mut cmd = Command::new(program);
+        match program {
+            "unzip" => {
+                cmd.arg("-l").arg(entry);
+            }
+            _ => {
+                // -ba 去掉归档头, -bso0/-bsp0 关闭文件清单与进度输出:
+                // 校验只看退出码, 避免百万条目包的 stdout 占内存。
+                cmd.args(["l", "-ba", "-bso0", "-bsp0", "--"]).arg(entry);
+            }
+        }
+        cmd
+    }
+
+    /// 执行校验并把后端的 `BackendFailed` 映射为独立的 `VerifyFailed`。
+    fn verify_with_command(
+        &self,
+        archive: &Path,
+        cmd: &mut Command,
+        cancel: &CancelFlag,
+    ) -> Result<()> {
+        match self.run_impl(cmd, cancel, false) {
+            Ok(()) => Ok(()),
+            Err(CoreError::BackendFailed { status, output, .. }) => Err(CoreError::VerifyFailed {
+                archive: archive.to_path_buf(),
+                status,
+                output,
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
+    pub(crate) fn verify(&self, entry: &Path, opts: &Options, cancel: &CancelFlag) -> Result<()> {
+        let program = self.verify_program(opts);
+        ensure_tool_available(program)?;
+        let mut cmd = self.verify_command(entry, opts);
+        self.verify_with_command(entry, &mut cmd, cancel)
     }
 
     /// 各后端的分包大小约束:仅 zip -s 有 64k 下限
@@ -356,6 +415,7 @@ pub(crate) trait CommandBackend {
         attr_hidden: &[String],
     ) -> Result<Command>;
     fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()>;
+    fn verify(&self, entry: &Path, opts: &Options, cancel: &crate::CancelFlag) -> Result<()>;
     fn check_split_size(&self, size: Option<u64>) -> Result<()>;
 }
 
@@ -375,8 +435,104 @@ impl CommandBackend for Backend {
         Backend::run(self, cmd, cancel)
     }
 
+    fn verify(&self, entry: &Path, opts: &Options, cancel: &crate::CancelFlag) -> Result<()> {
+        Backend::verify(self, entry, opts, cancel)
+    }
+
     fn check_split_size(&self, size: Option<u64>) -> Result<()> {
         Backend::check_split_size(self, size)
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    //! 压缩后结构校验:命令构造与失败映射(不依赖真实 7z/unzip)。
+    use super::*;
+    use crate::CancelFlag;
+
+    fn split_opts() -> Options {
+        Options {
+            split_size: Some(64 * 1024),
+            ..Options::default()
+        }
+    }
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn whole_zip_verification_uses_unzip_list() {
+        let cmd = Backend::Zip.verify_command(Path::new("B.zip"), &Options::default());
+        assert_eq!(cmd.get_program(), "unzip");
+        assert_eq!(args_of(&cmd), ["-l", "B.zip"]);
+    }
+
+    #[test]
+    fn split_zip_and_sevenz_verification_use_7z_list() {
+        for (backend, opts, entry) in [
+            (Backend::Zip, split_opts(), "B.zip"),
+            (Backend::SevenZip, Options::default(), "B.7z"),
+            (Backend::SevenZip, split_opts(), "B.7z.001"),
+        ] {
+            let cmd = backend.verify_command(Path::new(entry), &opts);
+            assert_eq!(cmd.get_program(), "7z", "entry={entry}");
+            assert_eq!(
+                args_of(&cmd),
+                ["l", "-ba", "-bso0", "-bsp0", "--", entry],
+                "entry={entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_success_returns_ok() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "exit 0"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg("exit 0");
+            c
+        };
+        Backend::SevenZip
+            .verify_with_command(Path::new("B.zip"), &mut cmd, &CancelFlag::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn verify_failure_maps_to_verify_failed_and_drops_stdout() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo noise & echo boom 1>&2 & exit 2"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg("echo noise; echo boom >&2; exit 2");
+            c
+        };
+        let err = Backend::SevenZip
+            .verify_with_command(Path::new("B.zip"), &mut cmd, &CancelFlag::new())
+            .unwrap_err();
+        match err {
+            CoreError::VerifyFailed {
+                archive,
+                status,
+                output,
+            } => {
+                assert_eq!(archive, PathBuf::from("B.zip"));
+                assert!(status.contains('2'), "状态应含退出码: {status}");
+                assert!(output.contains("boom"), "stderr 应被捕获: {output:?}");
+                assert!(
+                    !output.contains("noise"),
+                    "校验 stdout 应被丢弃: {output:?}"
+                );
+            }
+            other => panic!("应为 VerifyFailed, 实际: {other:?}"),
+        }
     }
 }
 
@@ -779,6 +935,7 @@ mod tests {
             format,
             level,
             exclude: crate::ExcludeRules::default(),
+            verify: true,
         }
     }
 

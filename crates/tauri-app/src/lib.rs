@@ -121,6 +121,9 @@ struct CompressOptions {
     level: Option<u8>,
     /// 排除模式(高级区输入);None = 无用户模式
     excludes: Option<Vec<String>>,
+    /// 压缩成功后结构校验;缺省 true(旧客户端不带该字段也保持默认开启)
+    #[serde(default = "default_true")]
+    verify: bool,
 }
 
 #[derive(Deserialize)]
@@ -191,6 +194,11 @@ fn non_empty(p: Option<String>) -> Option<String> {
     p.filter(|s| !s.trim().is_empty())
 }
 
+/// serde 缺省值:压缩后校验默认开启
+fn default_true() -> bool {
+    true
+}
+
 /// UI DTO → core Options;format/level 的取值校验在这里(宁停不错)
 fn to_core_options(o: CompressOptions) -> Result<Options, String> {
     let format = match o.format.as_deref() {
@@ -227,6 +235,7 @@ fn to_core_options(o: CompressOptions) -> Result<Options, String> {
             include_hidden: false,
             patterns,
         },
+        verify: o.verify,
     })
 }
 
@@ -901,6 +910,7 @@ mod tests {
             format: None,
             level: None,
             excludes: None,
+            verify: true,
         };
         let mut o = base();
         o.format = Some("7z".into());
@@ -908,11 +918,18 @@ mod tests {
         let core = to_core_options(o).unwrap();
         assert_eq!(core.format, zip_tool_core::Format::SevenZ);
         assert_eq!(core.level, Some(5));
+        assert!(core.verify, "默认开启校验");
 
         // 缺省 = zip + 后端默认级别
         let core = to_core_options(base()).unwrap();
         assert_eq!(core.format, zip_tool_core::Format::Zip);
         assert!(core.level.is_none());
+        assert!(core.verify);
+
+        // 显式关闭 → 透传 false
+        let mut o = base();
+        o.verify = false;
+        assert!(!to_core_options(o).unwrap().verify);
 
         // 非法值拒绝
         let mut o = base();
@@ -932,6 +949,7 @@ mod tests {
             format: None,
             level: None,
             excludes: Some(vec!["Thumbs.db".into(), "sub/*.log".into()]),
+            verify: true,
         };
         let core = to_core_options(base()).unwrap();
         assert_eq!(core.exclude.patterns.len(), 2);

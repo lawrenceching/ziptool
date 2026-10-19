@@ -91,7 +91,7 @@ const LOCK_IDS = [
   "mode-compress", "mode-extract", "src", "dst",
   "opt-split", "opt-password", "opt-random", "opt-force",
   "preset-compat", "preset-balanced", "opt-advanced", "opt-format", "opt-level",
-  "opt-exclude",
+  "opt-exclude", "opt-verify",
 ];
 // 确认钮两种形态: 常规蓝 / 运行中红色「取消」
 const BTN_CONFIRM =
@@ -118,6 +118,7 @@ function setMode(mode) {
   // 选项显隐: 压缩=分包+随机名, 解压=覆盖; 密码两模式共用
   $("opt-split-wrap").classList.toggle("hidden", mode !== "compress");
   $("opt-random-wrap").classList.toggle("hidden", mode !== "compress");
+  $("opt-verify-wrap").classList.toggle("hidden", mode !== "compress");
   $("opt-force-wrap").classList.toggle("hidden", mode !== "extract");
   $("opt-force-wrap").classList.toggle("flex", mode === "extract");
   $("opt-preset-wrap").classList.toggle("hidden", mode !== "compress");
@@ -438,6 +439,7 @@ $("confirm").addEventListener("click", async () => {
         format: $("opt-format").value,
         level: Number($("opt-level").value),
         excludes: parseExcludes(),
+        verify: $("opt-verify").checked,
       }
     : {
         password: $("opt-password").value || null,

@@ -175,19 +175,30 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
         let out_archive = out_abs.join(format!("{}.{}", e.dst, ext));
         let result = backend
             .compress_command(&input_abs, &e.name, &out_archive, opts, &e.attr_hidden)
-            .and_then(|mut cmd| backend.run(&mut cmd, cancel));
-        if let Err(err) = result {
-            // 停批并清理半成品: 半成品分卷被误当完整包比少一个包更危险
-            cleanup_partial(&out_abs, &e.dst, ext);
-            if matches!(err, CoreError::Cancelled) {
-                // 进程内取消: 当前条目作废(不计进度/不进 mapping), 已完成的保留
-                report.cancelled = true;
-                break;
+            .and_then(|mut cmd| backend.run(&mut cmd, cancel))
+            .and_then(|()| {
+                // 压缩成功后、记入产物前做结构校验:坏包不进入 Report/mapping
+                let archive = resolve_primary_archive(&out_abs, &e.dst, ext);
+                if opts.verify {
+                    backend.verify(&archive, opts, cancel).map(|()| archive)
+                } else {
+                    Ok(archive)
+                }
+            });
+        let archive = match result {
+            Ok(archive) => archive,
+            Err(err) => {
+                // 停批并清理半成品: 半成品分卷被误当完整包比少一个包更危险
+                cleanup_partial(&out_abs, &e.dst, ext);
+                if matches!(err, CoreError::Cancelled) {
+                    // 进程内取消: 当前条目作废(不计进度/不进 mapping), 已完成的保留
+                    report.cancelled = true;
+                    break;
+                }
+                return Err(err);
             }
-            return Err(err);
-        }
+        };
 
-        let archive = resolve_primary_archive(&out_abs, &e.dst, ext);
         if opts.random_name {
             let fname = archive
                 .file_name()
@@ -590,7 +601,7 @@ mod fake_tests {
     use super::*;
     use crate::ExcludeReason;
     use crate::backend::CommandBackend;
-    use crate::progress::Phase;
+    use crate::progress::{Phase, Progress};
     use crate::testutil::unique_temp;
     use std::cell::RefCell;
     use std::process::Command;
@@ -598,14 +609,40 @@ mod fake_tests {
     /// 假后端:成功时写出 {dst}.zip;fail_on 中的条目写出半成品分卷后报错
     struct FakeBackend {
         fail_on: Vec<String>,
+        verify_mode: VerifyMode,
         attempted: RefCell<Vec<String>>,
+        verify_calls: RefCell<usize>,
+    }
+
+    /// 结构校验的模拟结果
+    enum VerifyMode {
+        Pass,
+        Fail,
+        /// 第 n 次校验返回 Cancelled(模拟校验期间取消)
+        CancelAt(usize),
     }
 
     impl FakeBackend {
         fn new(fail_on: &[&str]) -> Self {
             Self {
                 fail_on: fail_on.iter().map(|s| s.to_string()).collect(),
+                verify_mode: VerifyMode::Pass,
                 attempted: RefCell::new(Vec::new()),
+                verify_calls: RefCell::new(0),
+            }
+        }
+
+        fn verify_failing() -> Self {
+            Self {
+                verify_mode: VerifyMode::Fail,
+                ..Self::new(&[])
+            }
+        }
+
+        fn verify_cancelling_at(call: usize) -> Self {
+            Self {
+                verify_mode: VerifyMode::CancelAt(call),
+                ..Self::new(&[])
             }
         }
     }
@@ -646,6 +683,24 @@ mod fake_tests {
 
         fn run(&self, _cmd: &mut Command, _cancel: &crate::CancelFlag) -> Result<()> {
             Ok(())
+        }
+
+        fn verify(&self, entry: &Path, _opts: &Options, _cancel: &crate::CancelFlag) -> Result<()> {
+            let n = {
+                let mut calls = self.verify_calls.borrow_mut();
+                *calls += 1;
+                *calls
+            };
+            match self.verify_mode {
+                VerifyMode::Pass => Ok(()),
+                VerifyMode::Fail => Err(CoreError::VerifyFailed {
+                    archive: entry.to_path_buf(),
+                    status: "exit code: 2".into(),
+                    output: "Unexpected end of archive".into(),
+                }),
+                VerifyMode::CancelAt(k) if n == k => Err(CoreError::Cancelled),
+                VerifyMode::CancelAt(_) => Ok(()),
+            }
         }
 
         fn check_split_size(&self, _size: Option<u64>) -> Result<()> {
@@ -757,6 +812,111 @@ mod fake_tests {
     }
 
     #[test]
+    fn verify_disabled_skips_structure_check() {
+        let root = two_entries_fixture("verify-off");
+        let be = FakeBackend::verify_failing();
+        let mut o = rnd();
+        o.verify = false;
+        let report = compress_with_backend(
+            &be,
+            &root.join("in"),
+            &root.join("out"),
+            &o,
+            &CancelFlag::new(),
+            &|_| ControlFlow::Continue(()),
+        )
+        .unwrap();
+
+        assert_eq!(report.entries.len(), 2, "关闭校验后两个条目都应完成");
+        assert_eq!(*be.verify_calls.borrow(), 0, "关闭后不应调用校验");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn verify_failure_stops_batch_cleans_artifact_and_skips_report_mapping() {
+        let root = two_entries_fixture("verify-fail");
+        let be = FakeBackend::verify_failing();
+        let events: RefCell<Vec<Progress>> = RefCell::new(Vec::new());
+        let err = compress_with_backend(
+            &be,
+            &root.join("in"),
+            &root.join("out"),
+            &rnd(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap_err();
+
+        match err {
+            CoreError::VerifyFailed { archive, .. } => {
+                assert!(archive.to_string_lossy().ends_with(".zip"), "{archive:?}");
+            }
+            other => panic!("应为 VerifyFailed, 实际: {other:?}"),
+        }
+        assert_eq!(*be.attempted.borrow(), ["A"], "校验失败后 B 不应开始");
+        assert_eq!(*be.verify_calls.borrow(), 1);
+
+        let names: Vec<String> = fs::read_dir(root.join("out"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.ends_with(".zip")),
+            "失败条目的产物应被清理: {names:?}"
+        );
+        let csv = fs::read_to_string(root.join("out/mapping.csv")).unwrap();
+        assert_eq!(csv, "archive,original\n", "失败条目不应进 mapping: {csv}");
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .all(|p| p.phase != Phase::Compressing),
+            "校验失败不应上报完成进度: {:?}",
+            events.borrow()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cancel_during_verify_discards_current_entry_and_stops_batch() {
+        let root = two_entries_fixture("verify-cancel");
+        let be = FakeBackend::verify_cancelling_at(2);
+        let report = compress_with_backend(
+            &be,
+            &root.join("in"),
+            &root.join("out"),
+            &rnd(),
+            &CancelFlag::new(),
+            &|_| ControlFlow::Continue(()),
+        )
+        .unwrap();
+
+        assert!(report.cancelled);
+        assert_eq!(report.entries.len(), 1, "A 保留, 校验期取消的 B 不应计入");
+        assert_eq!(*be.attempted.borrow(), ["A", "B"], "取消后不应有更多条目");
+        assert_eq!(*be.verify_calls.borrow(), 2);
+
+        let names: Vec<String> = fs::read_dir(root.join("out"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.iter().filter(|n| n.ends_with(".zip")).count(),
+            1,
+            "B 的产物应被清理, 只保留 A: {names:?}"
+        );
+        let csv = fs::read_to_string(root.join("out/mapping.csv")).unwrap();
+        assert_eq!(csv.lines().count(), 2, "被取消的 B 不应进 mapping: {csv}");
+        assert!(csv.ends_with(",A\n"), "{csv}");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn cancel_break_stops_before_next_entry() {
         let root = two_entries_fixture("cancel");
         let fb = FakeBackend::new(&[]);
@@ -818,6 +978,15 @@ mod fake_tests {
         }
 
         fn run(&self, _cmd: &mut Command, _cancel: &crate::CancelFlag) -> Result<()> {
+            Ok(())
+        }
+
+        fn verify(
+            &self,
+            _entry: &Path,
+            _opts: &Options,
+            _cancel: &crate::CancelFlag,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -1041,6 +1210,15 @@ mod staged_tests {
         }
 
         fn run(&self, _cmd: &mut Command, _cancel: &crate::CancelFlag) -> Result<()> {
+            Ok(())
+        }
+
+        fn verify(
+            &self,
+            _entry: &Path,
+            _opts: &Options,
+            _cancel: &crate::CancelFlag,
+        ) -> Result<()> {
             Ok(())
         }
 
