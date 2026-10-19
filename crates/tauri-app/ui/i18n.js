@@ -94,13 +94,37 @@
     return hasI18next && i18next.language ? i18next.language : currentLocale;
   }
 
+  function fallbackText(key) {
+    const root = window.__ZIPTOOL_LOCALES__?.["zh-CN"]?.translation;
+    if (!root) return null;
+    const find = (path) => {
+      let cur = root;
+      for (const part of path.split(".")) {
+        if (!cur || typeof cur !== "object" || !(part in cur)) return null;
+        cur = cur[part];
+      }
+      return typeof cur === "string" ? cur : null;
+    };
+    return find(key) ?? find(`${key}_other`) ?? find(`${key}_one`);
+  }
+
+  function interpolate(template, params) {
+    if (!params) return template;
+    return template.replace(/\{\{(\w+)\}\}/g, (_, name) =>
+      params[name] == null ? `{{${name}}}` : String(params[name])
+    );
+  }
+
   function t(key, params) {
-    if (!initialized) return key;
-    try {
-      return i18next.t(key, params);
-    } catch {
-      return key;
+    if (initialized) {
+      try {
+        return i18next.t(key, params);
+      } catch {
+        // 继续走 zh-CN 兜底
+      }
     }
+    const text = fallbackText(key);
+    return text ? interpolate(text, params) : key;
   }
 
   function applyDom(root) {
@@ -140,16 +164,22 @@
     const target = localeFor(preference);
     const previous = getLocale();
 
-    if (hasI18next && initialized && target !== previous) {
+    if (!hasI18next || !initialized) {
+      const select = document.getElementById("lang");
+      if (select) select.value = readPreference();
+      return getLocale();
+    }
+
+    if (target !== previous) {
       try {
         await i18next.changeLanguage(target);
         currentLocale = i18next.language;
       } catch (err) {
         console.error("i18n changeLanguage failed", err);
+        const select = document.getElementById("lang");
+        if (select) select.value = readPreference();
         return previous;
       }
-    } else if (!hasI18next) {
-      currentLocale = "zh-CN";
     }
 
     writePreference(preference);

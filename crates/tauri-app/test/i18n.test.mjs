@@ -330,7 +330,7 @@ test("五种语言启动时关键文案与词条一致", () => {
   }
 });
 
-test("i18next 缺失时仍解除首屏隐藏, 保留静态中文", () => {
+test("i18next 缺失时解除首屏隐藏并回退中文文案", () => {
   const dom = new JSDOM(read("../ui/index.html"), {
     url: "http://localhost/",
     runScripts: "outside-only",
@@ -339,8 +339,40 @@ test("i18next 缺失时仍解除首屏隐藏, 保留静态中文", () => {
   w.localStorage.setItem("ziptool.locale", "zh-CN");
   w.eval(read("../ui/locales/zh-CN.js"));
   w.eval(read("../ui/i18n.js"));
+  w.eval(read("../ui/app.js"));
 
   assert.equal(w.document.documentElement.getAttribute("data-i18n-ready"), "1");
-  assert.equal(w.zipToolI18n.t("header.compress"), "header.compress");
+  assert.equal(w.zipToolI18n.t("header.compress"), "压缩");
+  assert.equal(
+    w.zipToolI18n.t("status.scanDone", { count: 3, path: "p", bytes: "1 B" }),
+    "已扫描 p: 3 个条目, 共 1 B"
+  );
   assert.equal(w.document.getElementById("mode-compress").textContent.trim(), "压缩");
+  assert.equal(w.document.getElementById("msg").textContent, "就绪");
+  assert.equal(w.document.getElementById("confirm").textContent, "确认");
+});
+
+test("i18next.init 抛错时解除首屏隐藏并回退中文文案", () => {
+  const dom = new JSDOM(read("../ui/index.html"), {
+    url: "http://localhost/",
+    runScripts: "outside-only",
+  });
+  const w = dom.window;
+  w.localStorage.setItem("ziptool.locale", "zh-CN");
+  w.console.error = () => {};
+  w.eval(read("../ui/locales/zh-CN.js"));
+  w.i18next = {
+    init() {
+      throw new Error("boom");
+    },
+    t() {
+      throw new Error("i18next.t should not be used before init");
+    },
+  };
+  w.eval(read("../ui/i18n.js"));
+  w.eval(read("../ui/app.js"));
+
+  assert.equal(w.document.documentElement.getAttribute("data-i18n-ready"), "1");
+  assert.equal(w.document.getElementById("msg").textContent, "就绪");
+  assert.equal(w.document.getElementById("confirm").textContent, "确认");
 });
