@@ -138,6 +138,13 @@ test("五份词条 base key 集合一致, 且每个复数 key 都有 _other", ()
   }
 });
 
+test("启动时读取已保存偏好", () => {
+  const w = makeDom({ preference: "en" });
+  assert.equal(w.zipToolI18n.readPreference(), "en");
+  assert.equal(w.zipToolI18n.locale, "en");
+  assert.equal(w.document.documentElement.lang, "en");
+});
+
 test("index.html 静态文案与语言下拉结构完整", () => {
   const w = makeDom();
   assert.equal(w.document.documentElement.getAttribute("data-i18n-ready"), "1");

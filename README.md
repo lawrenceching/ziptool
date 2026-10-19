@@ -8,6 +8,7 @@
 3. 支持随机压缩包名(避免压缩包名本身包含敏感信息, 导致信息泄露)
 4. 两种压缩格式: zip(兼容性最好)与 7z(LZMA2, 压缩率更高), 以及 0-9 压缩级别
 5. 排除规则: 默认排除各 OS 隐藏文件(Windows=隐藏属性, Linux/mac=`.` 开头), `--exclude` 自定义模式可叠加
+6. 界面支持简体中文、繁体中文(香港)、繁体中文(台湾)、英语、俄语; 启动时跟随系统语言偏好, 也可手动切换并记忆
 
 **为什么不整个磁盘打包成一个压缩包**
 一个数T的压缩包不利于运输. 且压缩, 复制, 上传, 下载过程都不容易中断与恢复.
@@ -108,6 +109,16 @@ UI 逻辑有 Node 单测(命令名/参数形状/进度协议等前后端契约 +
 ```
 cd crates/tauri-app && npm install && npm test
 ```
+
+UI 多语言使用 vendored i18next (见 `ui/vendor/`)。升级 i18next 时:
+
+```
+cd crates/tauri-app
+npm install --save-dev --save-exact i18next@26.5.3
+npm run vendor:i18n
+```
+
+界面文案 key 与语言匹配规则见 `_docs/i18n.md`。
 
 正式打包:
 
