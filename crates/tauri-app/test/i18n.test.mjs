@@ -296,3 +296,34 @@ test("英文/俄语词条不含中文字符", () => {
     }
   }
 });
+
+test("五种语言启动时关键文案与词条一致", () => {
+  for (const code of LOCALES) {
+    const copy = localeCatalog(code);
+    const w = makeDom({ preference: code });
+
+    assert.equal(w.document.documentElement.lang, code);
+    assert.equal(
+      w.document.getElementById("mode-compress").textContent,
+      copy.header.compress
+    );
+    assert.equal(
+      w.document.getElementById("mode-extract").textContent,
+      copy.header.extract
+    );
+    assert.equal(
+      w.document.getElementById("confirm").textContent,
+      copy.header.confirm
+    );
+    assert.equal(
+      w.document.getElementById("src").placeholder,
+      copy.path.srcPlaceholder
+    );
+    assert.equal(w.document.getElementById("empty").textContent, copy.table.empty);
+    assert.equal(w.document.getElementById("msg").textContent, copy.status.ready);
+    assert.equal(
+      w.document.querySelector('[data-i18n="table.name"]').textContent,
+      copy.table.name
+    );
+  }
+});
