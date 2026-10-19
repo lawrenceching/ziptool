@@ -788,3 +788,27 @@ fn compress_exclusion_rules_matrix() {
         &restore3.join("Novel/book.txt"),
     );
 }
+
+#[test]
+fn compress_emits_progress_stream_frames() {
+    // 两个 64MB 不可压条目: 7z 压缩各约 1s+, 进度帧约 10Hz → 几十帧;
+    // 无进度流时整批只有个位数 \r(每条目 scan+compress 各一帧)。阈值 12 留足余量。
+    let fx = fixture("progress");
+    fill(&fx.root.join("in/Novel/book.txt"), 64 * 1024 * 1024, 7);
+    fill(&fx.root.join("in/media/clip.bin"), 64 * 1024 * 1024, 8);
+    let (inp, out) = (fx.root.join("in"), fx.root.join("out"));
+    let r = run_tool(&[
+        "compress",
+        "-i",
+        inp.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(r.ok, "压缩失败:\n{}", r.stderr);
+    let frames = r.stderr.matches('\r').count();
+    assert!(
+        frames >= 12,
+        "进度帧过少({frames}), 进度流可能未生效:\n{}",
+        r.stderr
+    );
+}

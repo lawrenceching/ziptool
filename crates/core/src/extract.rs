@@ -656,6 +656,9 @@ mod orch_tests {
         sizes: Vec<u64>,
         /// extract 时逐个回调的条目名(模拟 7z 进度流的名字信号)
         ticks: Vec<String>,
+        /// 可选: 逐组覆盖 (清单, 大小, 信号), 按第 n 次 list / extract 调用取用;
+        /// 空 = 所有组共用上面的 canned 数据(单组用例不受影响)
+        per_group: Vec<(Vec<String>, Vec<u64>, Vec<String>)>,
         writes: Vec<String>,
         fail: bool,
         /// extract 时写出文件后返回 Err(Cancelled), 模拟"进程被 kill"
@@ -669,6 +672,7 @@ mod orch_tests {
                 listing: s(listing),
                 sizes: Vec::new(),
                 ticks: Vec::new(),
+                per_group: Vec::new(),
                 writes: s(writes),
                 fail,
                 cancel: false,
@@ -681,6 +685,7 @@ mod orch_tests {
                 listing: s(listing),
                 sizes: Vec::new(),
                 ticks: Vec::new(),
+                per_group: Vec::new(),
                 writes: s(writes),
                 fail: false,
                 cancel: true,
@@ -697,6 +702,15 @@ mod orch_tests {
             self.ticks = s(ticks);
             self
         }
+
+        /// 多组用例: 各组独立的 (清单, 大小, 信号), 按组序对应
+        fn with_groups(mut self, groups: &[(&[&str], &[u64], &[&str])]) -> Self {
+            self.per_group = groups
+                .iter()
+                .map(|(n, sz, t)| (s(n), sz.to_vec(), s(t)))
+                .collect();
+            self
+        }
     }
 
     impl ExtractBackend for FakeExtract {
@@ -705,15 +719,29 @@ mod orch_tests {
         }
 
         fn list(&self, _kind: Backend, _entry: &Path) -> Result<ArchiveListing> {
+            let idx = self.calls.borrow().iter().filter(|c| **c == "list").count();
             self.calls.borrow_mut().push("list");
-            let files = self.listing.iter().filter(|n| !n.ends_with('/')).count();
-            let sizes = if self.sizes.is_empty() {
-                vec![0; self.listing.len()]
-            } else {
-                self.sizes.clone()
+            let (names, sizes) = match self.per_group.get(idx) {
+                Some((n, sz, _)) => {
+                    let sizes = if sz.is_empty() {
+                        vec![0; n.len()]
+                    } else {
+                        sz.clone()
+                    };
+                    (n.clone(), sizes)
+                }
+                None => {
+                    let sizes = if self.sizes.is_empty() {
+                        vec![0; self.listing.len()]
+                    } else {
+                        self.sizes.clone()
+                    };
+                    (self.listing.clone(), sizes)
+                }
             };
+            let files = names.iter().filter(|n| !n.ends_with('/')).count();
             Ok(ArchiveListing {
-                names: self.listing.clone(),
+                names,
                 files,
                 sizes,
             })
@@ -728,8 +756,18 @@ mod orch_tests {
             _cancel: &crate::CancelFlag,
             on_entry: &mut dyn FnMut(&str),
         ) -> Result<()> {
+            let idx = self
+                .calls
+                .borrow()
+                .iter()
+                .filter(|c| **c == "extract")
+                .count();
             self.calls.borrow_mut().push("extract");
-            for t in &self.ticks {
+            let ticks = match self.per_group.get(idx) {
+                Some((_, _, t)) => t,
+                None => &self.ticks,
+            };
+            for t in ticks {
                 on_entry(t);
             }
             for w in &self.writes {
@@ -879,6 +917,101 @@ mod orch_tests {
             ev.iter().map(|p| p.done_bytes).collect::<Vec<_>>(),
             [0, 50, 50],
             "同一名字第二次信号不再计重: {ev:?}"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unknown_entry_signals_do_not_advance_bytes() {
+        let (root, g) = one_group("ex-unknown");
+        // 清单是 a.txt/b.txt; 信号全是清单外的名字(含一个带 / 的目录形态)。
+        // 行为锁定: 字典 remove 落空的名字不触发任何帧, 也不污染字节账本 ——
+        // 中间夹一个已知名字(a.txt)证明机制本身在工作, 而不是信号全被丢弃。
+        let be = FakeExtract::new(&["a.txt", "b.txt"], &[], false)
+            .with_sizes(&[100, 50])
+            .with_ticks(&["ghost.bin", "a.txt", "missing/", "phantom.txt"]);
+        let dest = root.join("restore");
+        let events = RefCell::new(Vec::new());
+        let report = extract_groups(
+            &be,
+            &[g],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.groups.len(), 1);
+        let ev = events.borrow();
+        // 只有组开始帧(0)、已知名字 a.txt 的 tick 帧(100)与组完成帧(150);
+        // 未知名字(含目录形态)既不触发帧, 也不影响完成帧落在全组和
+        assert_eq!(
+            ev.iter()
+                .map(|p| (p.done, p.done_bytes, p.total_bytes))
+                .collect::<Vec<_>>(),
+            [(0, 0, 150), (0, 100, 150), (1, 150, 150)],
+            "{ev:?}"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn bytes_carry_across_groups() {
+        let root = unique_temp("ex-carry");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("A.zip"), b"").unwrap();
+        fs::write(root.join("B.zip"), b"").unwrap();
+        let mk = |name: &str| ExtractGroup {
+            resolved: ResolvedArchive {
+                path: root.join(name),
+                backend: Backend::native(),
+            },
+            original: None,
+            size: 0,
+        };
+        // 组 1 无信号(完成帧 100); 组 2 信号只解到一半(30/40),
+        // 验证组 2 的帧从组 1 的完成字节(100)起步而不是从 0 重来
+        let be = FakeExtract::new(&[], &[], false).with_groups(&[
+            (&["a.txt"], &[100], &[]),
+            (&["c.txt", "d.txt"], &[30, 10], &["c.txt"]),
+        ]);
+        let dest = root.join("restore");
+        let events = RefCell::new(Vec::new());
+        let report = extract_groups(
+            &be,
+            &[mk("A.zip"), mk("B.zip")],
+            &dest,
+            None,
+            false,
+            Vec::new(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.groups.len(), 2);
+        let ev = events.borrow();
+        // 组 1: 开始(0) → 完成(100); 组 2: 开始即带组 1 的基数(100),
+        // tick 帧 = 100 + 30, 完成帧 = 140(两组合计)
+        assert_eq!(
+            ev.iter()
+                .map(|p| (p.done, p.done_bytes, p.total_bytes))
+                .collect::<Vec<_>>(),
+            [
+                (0, 0, 140),
+                (1, 100, 140),
+                (1, 100, 140),
+                (1, 130, 140),
+                (2, 140, 140)
+            ],
+            "{ev:?}"
         );
         fs::remove_dir_all(&root).unwrap();
     }
