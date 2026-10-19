@@ -5,7 +5,7 @@
   "scripts": {
     "css": "tailwindcss -i tailwind/input.css -o ui/app.css --minify",
     "css:watch": "tailwindcss -i tailwind/input.css -o ui/app.css --watch",
-    "test": "node --test test/ui.test.mjs",
+    "test": "node --test test/ui.test.mjs test/i18n.test.mjs",
     "vendor:i18n": "node scripts/vendor-i18n.mjs"
   },
   "devDependencies": {
