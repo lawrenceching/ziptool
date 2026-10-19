@@ -265,3 +265,25 @@ test("俄语 1/2/5 使用不同复数形态", () => {
   });
   assert.equal(new Set([one, few, many]).size, 3, `${one} | ${few} | ${many}`);
 });
+
+test("五种语言占位符与 zh-CN 一致", () => {
+  const catalogs = Object.fromEntries(
+    LOCALES.map((code) => [code, flatten(localeCatalog(code))])
+  );
+  const zh = catalogs["zh-CN"];
+  const placeholders = (value) =>
+    new Set([...value.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]));
+
+  for (const code of LOCALES) {
+    for (const [key, value] of Object.entries(catalogs[code])) {
+      const base = baseKey(key);
+      const reference = zh[base] ?? zh[`${base}_other`];
+      assert.ok(reference, `${code}: ${key} 没有 zh-CN 参考`);
+      assert.deepEqual(
+        [...placeholders(value)].sort(),
+        [...placeholders(reference)].sort(),
+        `${code}: ${key} 占位符与 zh-CN 不一致`
+      );
+    }
+  }
+});
