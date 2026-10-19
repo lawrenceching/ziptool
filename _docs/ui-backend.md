@@ -49,13 +49,14 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 
 ## 3. 命令面
 
-收敛为 4 个命令(`invoke_handler` 注册面):
+收敛为 5 个命令(`invoke_handler` 注册面):
 
 | 命令 | 签名(前端视角) | 作用 |
 |---|---|---|
 | `scan` | `(mode, path, on_progress) → ScanResult` | 只扫描不执行, 选源后渲染表格 |
 | `compress` | `(src, dst, entries, options, on_progress) → CompressResult` | 批量压缩勾选项 |
 | `extract_archive` | `(src, dst, entries, options, on_progress) → ExtractResult` | 批量解压勾选项 |
+| `validate_dir` | `(path) → Result<(), String>` | 拖拽/选择路径校验: 必须是已存在的文件夹 |
 | `cancel_current` | `()` | 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续) |
 
 ### 3.1 scan
@@ -84,6 +85,12 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 - scan / compress / extract_archive 三者互斥: 进入时发现已有任务在跑 → `Err("已有任务在运行")`(现状无守卫, 可重入); 无论成败结束即释放
 - `cancel_current` 不受互斥限制, 任何时候可调(无任务时为 no-op)
 - UI 侧配合: 任务运行中锁定全部输入(7.2), 正常触达不到互斥错误; 它是后端不信任前端的兜底
+
+### 3.6 validate_dir
+
+- 拖拽路径落定前调用, 只读校验路径存在且为文件夹; 文件 / 失效路径 / 无权限都返回可读 `Err(String)`
+- 用 `spawn_blocking` 执行 `std::fs::metadata`, 避免网络盘 stat 阻塞 UI; 不做 canonicalize
+- 只服务于 UI 的拖拽入口; `scan` / `compress` / `extract_archive` 的 core 预检(InputNotFound / OutInsideInput 等)保持原样, 壳层仍不信任前端
 
 **与现状差异(第 3 节)**: 现状无 scan 命令(扫描内嵌在 compress_dir 里, UI 无法"先看后做"); 命令直接重扫输入; 无忙闲守卫; warnings 未透传; `current` 用完不清.
 
@@ -239,6 +246,14 @@ meta / warning 行:      恒定不变
 
 切换模式或重选源 → 清空源路径 + 表格 + 壳层将在下次 scan 覆盖 ScanContext; dst 保留(两模式的 dst 语义同类: 输出 / 还原目录).
 
+### 7.5 拖拽选择路径(已实现)
+
+- 使用 Tauri 原生 drag-drop(`dragDropEnabled: true`, 默认即开启): UI 通过 `window.__TAURI__.webview.getCurrentWebview().onDragDropEvent` 监听 enter / over / drop / leave; 不使用 HTML5 `dataTransfer`(WebView2 拿不到绝对路径, 且原生处理器会替换 HTML5 拖拽)
+- 源/目标路径行整体是投放区(`data-drop="src" / "dst"`), 拖入时行与输入框高亮, 离开/落定后恢复; 落点按「物理坐标 ÷ devicePixelRatio → elementFromPoint → closest(`[data-drop]`)」判定, `drop` 落点失效时回退最近一次 hover 行
+- 只接受恰好一个路径; 落定前调 `validate_dir`, 必须是已存在的文件夹; 源路径校验通过后自动 `scan`(与点击选择一致), 目标路径仅写入
+- 扫描中 / 任务运行中输入框被禁用, 拖拽直接忽略并提示, 不打断任务; 路径落定前切换模式或重新选择会以 token 作废进行中的异步校验
+- 浏览器预览(无 `__TAURI__`)不注册拖拽, 保留点击 mock 流程
+
 ## 8. 选项控件
 
 路径区下方加一行, 随模式切换内容(7.2 锁定规则同样适用):
@@ -269,7 +284,7 @@ meta / warning 行:      恒定不变
 
 - CSP 现值(`default-src 'self'; connect-src ipc: http://ipc.localhost`)已覆盖 invoke / Channel, 无需调整
 - 密码经 argv 传递的威胁模型不变(compress.md 6.5); UI 侧 password 输入框不落任何持久化存储
-- 路径虽来自系统对话框, 后端仍**不信任前端**: core 自身的 InputNotFound / OutInsideInput / zip-slip / 冲突预检全部照常执行, 互斥与名单严格校验(3.5 / 5.4)是壳层兜底
+- 路径虽来自系统对话框或原生拖拽, 后端仍**不信任前端**: core 自身的 InputNotFound / OutInsideInput / zip-slip / 冲突预检全部照常执行, 互斥与名单严格校验(3.5 / 5.4)是壳层兜底
 - UI 渲染保持 createElement / textContent(无 innerHTML): 错误消息里的路径、后端 stderr 等不可信内容无 XSS 面
 
 ## 11. 测试策略
@@ -277,7 +292,7 @@ meta / warning 行:      恒定不变
 - **core 单测(无外部命令)**: plan 在筛选集上的各预检变体; compress_entries 存在性复核(删条目 → EntryMissing、整批不开始); scan_groups 的 ExtractScan(size 合计 / meta 行 / issues / 排序不变); extract_prepared 组筛选后 B2 语义; EntryMissing Display
 - **编排测试(注入假后端)**: compress_dir 组合 = plan + compress_entries 的等价性(现有用例不改即应全绿, 是拆分正确性的回归网); extract 同理
 - **壳层单测**: DTO 映射(ScanItem 三种 status / warnings 透传); ScanContext 失配与未知名单拒绝; 忙闲互斥; parse_size 错误路径; to_core_options 模式校验; 规则不一致 = 过期; excluded 文案映射
-- **UI 单测(node --test + jsdom, `npm test`)**: 前后端契约 + 界面行为。关键设计——**表面真实、传输造假**: `window.__TAURI__` 挂真实 `@tauri-apps/api` / `@tauri-apps/plugin-dialog` 包对象(全局 bundle 就是这些模块), 只 mock 最底层 `__TAURI_INTERNALS__`; 因此 UI 引用不存在的全局 API 路径在测试期必然 TypeError(抓过实际案例: `__TAURI__.ipc.Channel`, Tauri 2 的 Channel 在 core 命名空间), 命令名/参数形状/`__CHANNEL__:<id>` 序列化/进度回放协议(`{index, message}` 对象)全按真实链路校验。UI 逻辑独立为 `ui/app.js`(index.html 外链引用)
+- **UI 单测(node --test + jsdom, `npm test`)**: 前后端契约 + 界面行为。关键设计——**表面真实、传输造假**: `window.__TAURI__` 挂真实 `@tauri-apps/api` / `@tauri-apps/plugin-dialog` 包对象(全局 bundle 就是这些模块), 只 mock 最底层 `__TAURI_INTERNALS__`; 因此 UI 引用不存在的全局 API 路径在测试期必然 TypeError(抓过实际案例: `__TAURI__.ipc.Channel`, Tauri 2 的 Channel 在 core 命名空间), 命令名/参数形状/`__CHANNEL__:<id>` 序列化/进度回放协议(`{index, message}` 对象)全按真实链路校验。原生拖拽同样使用真实 `webview` API, 单测回放 enter / over / drop / leave 事件并 mock `elementFromPoint` 验证落点。UI 逻辑独立为 `ui/app.js`(index.html 外链引用)
 - **UI 走查(chrome-devtools, mock 模式)**: 状态机全迁移、行状态推导(虚拟事件序列驱动)、取消变形按钮、选项行切换
 - **实机验证(用户)**: `cargo run -p zip-tool-tauri` 走通 scan → 表格 → 确认 → 进度 → 取消 / 完成全链路(命令真到 core 与后端工具)
 - **回归**: workspace 全绿; CLI 与 E2E 用例零改动(compress_dir / extract 签名不变)

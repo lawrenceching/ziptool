@@ -1,7 +1,8 @@
 // UI 单测(node --test): 契约 + 行为, 不需要起 Tauri 进程。
 //
 // 关键设计——表面真实、传输造假:
-//   window.__TAURI__ 挂的是**真实 @tauri-apps/api 与 @tauri-apps/plugin-dialog 包对象**
+//   window.__TAURI__ 挂的是**真实 @tauri-apps/api (core/app/webview/event) 与
+//   @tauri-apps/plugin-dialog 包对象**
 //   (Tauri 的 withGlobalTauri 全局 bundle 就是这些模块挂到 __TAURI__ 上), 只有最底层
 //   的 window.__TAURI_INTERNALS__(IPC 传输)被 mock。因此:
 //   - UI 引用了不存在的全局 API 路径(如 __TAURI__.ipc.Channel)→ 这里必然 TypeError,
@@ -14,6 +15,8 @@ import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import * as coreApi from "@tauri-apps/api/core";
 import * as appApi from "@tauri-apps/api/app";
+import * as webviewApi from "@tauri-apps/api/webview";
+import { TauriEvent } from "@tauri-apps/api/event";
 import * as dialogApi from "@tauri-apps/plugin-dialog";
 
 const APP_JS = new URL("../ui/app.js", import.meta.url);
@@ -64,6 +67,7 @@ function makeHarness(withTauri, invokeImpl) {
   const { window } = dom;
   const calls = []; // { cmd, args }
   const callbacks = new Map(); // channel id → Rust 侧回调
+  const eventListeners = new Map(); // event name → [listener callback id]
   let channelSeq = 1;
 
   if (withTauri) {
@@ -78,13 +82,26 @@ function makeHarness(withTauri, invokeImpl) {
       },
       invoke(cmd, args) {
         calls.push({ cmd, args });
+        // 事件监听走真实 @tauri-apps/api/event 链路; 这里只记录回调 id 供 emit 回放
+        if (cmd === "plugin:event|listen") {
+          const ids = eventListeners.get(args.event) ?? [];
+          ids.push(args.handler);
+          eventListeners.set(args.event, ids);
+          return Promise.resolve(channelSeq++);
+        }
+        if (cmd === "plugin:event|unlisten") return Promise.resolve(null);
         return Promise.resolve(invokeImpl({ cmd, args, callbacks, calls }));
       },
       convertFileSrc: (p) => p,
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
       plugins: {},
     };
-    window.__TAURI__ = { core: coreApi, app: appApi, dialog: dialogApi };
+    window.__TAURI__ = {
+      core: coreApi,
+      app: appApi,
+      webview: webviewApi,
+      dialog: dialogApi,
+    };
     globalThis.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__;
   }
   // 真实包模块运行在 Node 全局, 其中的 window 自由变量解析到 globalThis;
@@ -92,8 +109,15 @@ function makeHarness(withTauri, invokeImpl) {
   globalThis.window = window;
   window.eval(readFileSync(APP_JS, "utf8"));
   const flush = () => new Promise((r) => setTimeout(r, 0));
+  // 回放一条 Tauri 事件(拖拽事件监听由 app.js 通过真实 webview API 注册)
+  const emit = async (event, payload) => {
+    for (const id of eventListeners.get(event) ?? []) {
+      callbacks.get(id)?.({ event, id, payload });
+    }
+    await flush();
+  };
   return {
-    window, doc: window.document, calls, callbacks, flush,
+    window, doc: window.document, calls, callbacks, eventListeners, flush, emit,
     badges: () =>
       [...window.document.querySelectorAll("#rows td:last-child span")].map((b) => b.textContent),
     rows: () => [...window.document.querySelectorAll("#rows tr")],
@@ -106,6 +130,21 @@ async function pickSource(h, path = "C:\\demo\\data") {
   await h.flush();
   await h.flush();
   assert.equal(h.doc.getElementById("src").value, path);
+}
+
+/**
+ * 模拟一次原生拖拽(enter → over → drop)。
+ * target=null 表示落在两个投放区之外; jsdom 无布局, elementFromPoint 用 mock 指向目标行。
+ */
+async function dragDrop(h, target, paths, position = { x: 1, y: 1 }) {
+  await h.flush(); // 等 app.js 通过真实 webview API 注册完 4 个 drag 监听
+  const row = target ? h.doc.querySelector(`[data-drop="${target}"]`) : null;
+  h.doc.elementFromPoint = () => row;
+  await h.emit(TauriEvent.DRAG_ENTER, { paths, position });
+  await h.emit(TauriEvent.DRAG_OVER, { position });
+  await h.emit(TauriEvent.DRAG_DROP, { paths, position });
+  await h.flush();
+  await h.flush();
 }
 
 // 断言跨 realm 值: app.js 跑在 JSDOM 上下文, 其对象/数组的原型与 Node 侧字面量
@@ -498,4 +537,71 @@ test("行为: 排除行显示但不勾选, 模式输入透传 scan/compress, 勾
   assert.ok(comp, "应调用 compress");
   jsonEq(comp.args.entries, ["Novel", ".DS_Store", "cache"]);
   jsonEq(comp.args.options.excludes, ["Thumbs.db", "*.tmp"]);
+});
+
+test("契约: 原生拖拽文件夹 — validate_dir 校验 + 源自动扫描 / 目标只写路径", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:app|version") return "1.2.3";
+    if (cmd === "validate_dir") return null;
+    if (cmd === "scan") return SCAN_COMPRESS;
+    return null;
+  });
+
+  await dragDrop(h, "src", ["D:\\data"]);
+  const vd = h.calls.find((c) => c.cmd === "validate_dir");
+  assert.ok(vd, "拖入后应调用 validate_dir");
+  jsonEq(vd.args, { path: "D:\\data" });
+  assert.equal(h.doc.getElementById("src").value, "D:\\data");
+  const scan = h.calls.find((c) => c.cmd === "scan");
+  assert.ok(scan, "源拖入后应自动扫描");
+  assert.equal(scan.args.path, "D:\\data");
+  assert.deepEqual(h.badges(), ["待压缩", "待压缩", "待压缩"]);
+
+  await dragDrop(h, "dst", ["E:\\out"]);
+  assert.equal(h.doc.getElementById("dst").value, "E:\\out");
+  assert.equal(h.calls.filter((c) => c.cmd === "scan").length, 1, "目标拖入不应重扫");
+  const validations = h.calls.filter((c) => c.cmd === "validate_dir");
+  assert.equal(validations.length, 2, "源/目标各自校验一次");
+  jsonEq(validations[1].args, { path: "E:\\out" });
+});
+
+test("行为: 拖拽高亮/离开、非文件夹/多项/落点外/锁定拒绝", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "validate_dir") return Promise.reject("只能拖入文件夹");
+    return null;
+  });
+  await h.flush();
+
+  // 拖入高亮 + 占位提示, 离开恢复
+  const srcRow = h.doc.querySelector('[data-drop="src"]');
+  h.doc.elementFromPoint = () => srcRow;
+  await h.emit(TauriEvent.DRAG_ENTER, { paths: ["D:\\a.txt"], position: { x: 1, y: 1 } });
+  assert.ok(srcRow.classList.contains("bg-blue-50"), "拖入时整行高亮");
+  assert.ok(h.doc.getElementById("src").classList.contains("bg-blue-50"), "输入框高亮");
+  assert.equal(h.doc.getElementById("src").placeholder, "松开鼠标以选择此文件夹");
+  await h.emit(TauriEvent.DRAG_LEAVE, {});
+  await h.flush();
+  assert.ok(!srcRow.classList.contains("bg-blue-50"), "离开后清除高亮");
+  assert.ok(!h.doc.getElementById("src").classList.contains("bg-blue-50"));
+  assert.notEqual(h.doc.getElementById("src").placeholder, "松开鼠标以选择此文件夹");
+
+  // 校验失败(文件): 不落值
+  await dragDrop(h, "src", ["D:\\a.txt"]);
+  assert.equal(h.doc.getElementById("src").value, "");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("无法使用拖入的文件夹"));
+
+  // 多项: 不校验、不落值
+  await dragDrop(h, "src", ["D:\\a", "D:\\b"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("一次只能拖入一个文件夹"));
+  assert.equal(h.calls.filter((c) => c.cmd === "validate_dir").length, 1);
+
+  // 落点外: 给出提示
+  await dragDrop(h, null, ["D:\\a"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("请将文件夹拖到"));
+
+  // 任务锁定: 不落值并提示
+  h.doc.getElementById("dst").disabled = true;
+  await dragDrop(h, "dst", ["E:\\out"]);
+  assert.equal(h.doc.getElementById("dst").value, "");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("任务进行中"));
 });

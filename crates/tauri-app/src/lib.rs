@@ -1,8 +1,9 @@
 //! Tauri 外壳:把 `zip-tool-core` 的能力通过 `#[tauri::command]` 暴露给前端。
-//! 交互规格见 _docs/ui-backend.md, 命令面 4 个:
+//! 交互规格见 _docs/ui-backend.md, 命令面 5 个:
 //! - `scan`: 只扫描不执行, 结果缓存在外壳([`ScanContext`] 保鲜)
 //! - `compress` / `extract_archive`: 按勾选名单筛选缓存结果, 走 core 分阶段 API
 //!   (plan + compress_entries / extract_prepared), **不重复扫描**
+//! - `validate_dir`: 拖拽/选择路径校验(必须是已存在的文件夹, 不改变 core 预检职责)
 //! - `cancel_current`: 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续)
 //!
 //! 命令在 `spawn_blocking` 中调 core, 进度经 `tauri::ipc::Channel` 推给前端;
@@ -576,6 +577,19 @@ async fn extract_archive(
     })
 }
 
+/// 拖拽/选择路径校验: 必须是已存在的文件夹。
+/// 用 spawn_blocking 避免网络盘 stat 阻塞 UI; 只做只读检查, 不改变 core 的预检职责。
+#[tauri::command]
+async fn validate_dir(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err("只能拖入文件夹".to_string()),
+        Err(e) => Err(format!("无法读取路径: {e}")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续); 无任务时为 no-op
 #[tauri::command]
 fn cancel_current(state: State<'_, AppState>) {
@@ -614,6 +628,7 @@ pub fn run() {
             scan,
             compress,
             extract_archive,
+            validate_dir,
             cancel_current
         ])
         .build(tauri::generate_context!())

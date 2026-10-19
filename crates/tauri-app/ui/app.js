@@ -12,6 +12,11 @@ const state = {
   run: null, // { sel: [行下标], done, total, failed } 运行中才非空
 };
 
+// 原生拖拽: 两个投放区 + 最近命中行 + 校验竞态 token
+const DROP_ZONE_IDS = ["src", "dst"];
+let dropHover = null;
+let dropToken = 0;
+
 const MODE_TEXT = { compress: "压缩", extract: "解压" };
 // 行状态: pending 待处理 / meta 元数据 / warning 告警 / done 完成 / running 进行中 / failed 失败
 const BADGE = {
@@ -95,12 +100,16 @@ const BTN_CANCEL =
   "px-6 py-1.5 rounded-lg bg-red-600 text-white font-medium enabled:hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors";
 function setLocked(locked) {
   for (const id of LOCK_IDS) $(id).disabled = locked;
+  if (locked) setDropHover(null); // 任务期不允许拖拽更换路径
 }
 
 // —— 模式切换: 切换高亮 + 选项显隐; 已有扫描结果则作废待重扫 ——
 function setMode(mode) {
   const switched = state.mode !== mode;
   state.mode = mode;
+  // 作废进行中的拖拽校验, 并清掉拖拽高亮
+  dropToken++;
+  setDropHover(null);
   const on = "px-5 py-1.5 font-medium bg-blue-600 text-white transition-colors";
   const off =
     "px-5 py-1.5 font-medium bg-white text-slate-600 hover:bg-slate-50 transition-colors";
@@ -201,9 +210,106 @@ async function pickFolder(target) {
     return;
   }
   if (!path) return; // 用户取消, 保留原值
+  dropToken++; // 作废可能在跑的拖拽校验
+  applyFolder(target, path);
+}
+
+// 落定一个路径: 源路径立即扫描; 目标只保存
+function applyFolder(target, path) {
   $(target).value = path;
   if (target === "src") doScan(path);
+  else status(`目标文件夹: ${path}`);
 }
+
+// —— 原生拖拽选择文件夹(Tauri drag-drop 事件; 坐标为物理像素) ——
+function setDropHover(zone) {
+  if (zone === dropHover) return;
+  dropHover = zone;
+  for (const id of DROP_ZONE_IDS) {
+    const input = $(id);
+    const row = input.closest("[data-drop]");
+    const on = id === zone;
+    row?.classList.toggle("bg-blue-50", on);
+    // CSS 中 bg-slate-50 规则晚于 bg-blue-50, 高亮时必须移除原背景
+    input.classList.toggle("bg-slate-50", !on);
+    input.classList.toggle("bg-blue-50", on);
+    input.placeholder = on
+      ? "松开鼠标以选择此文件夹"
+      : input.dataset.placeholder;
+  }
+}
+
+// 物理坐标 → CSS 坐标 → 命中的投放区("src" / "dst")
+function zoneAt(position) {
+  if (!position || $("src").disabled || $("dst").disabled) return null;
+  const scale = window.devicePixelRatio || 1;
+  const el =
+    typeof document.elementFromPoint === "function"
+      ? document.elementFromPoint(position.x / scale, position.y / scale)
+      : null;
+  return el?.closest?.("[data-drop]")?.dataset.drop ?? null;
+}
+
+// 拖入校验: 单路径 + 必须已存在文件夹; token 丢弃过期异步结果
+async function handleDrop(target, paths) {
+  if ($("src").disabled || $("dst").disabled) {
+    status("任务进行中, 无法更换文件夹");
+    return;
+  }
+  if (!target) {
+    status("请将文件夹拖到「源文件夹」或「目标文件夹」");
+    return;
+  }
+  if (!Array.isArray(paths) || paths.length !== 1) {
+    status("一次只能拖入一个文件夹");
+    return;
+  }
+  const token = ++dropToken;
+  try {
+    await invoke("validate_dir", { path: paths[0] });
+  } catch (e) {
+    if (token === dropToken) status("无法使用拖入的文件夹: " + e);
+    return;
+  }
+  if (token !== dropToken) return; // 已切换模式 / 重选路径 / 新的拖拽
+  if ($("src").disabled || $("dst").disabled) return; // 校验期间已开始任务
+  applyFolder(target, paths[0]);
+}
+
+// 注册 Tauri 原生拖拽: 高亮随 enter/over 移动, drop 后按落点(回退最近 hover)落值
+function initDragDrop() {
+  if (!hasTauri()) return;
+  const webview = window.__TAURI__.webview;
+  if (!webview?.getCurrentWebview) return;
+  webview
+    .getCurrentWebview()
+    .onDragDropEvent(({ payload }) => {
+      if (payload.type === "leave") {
+        setDropHover(null);
+        return;
+      }
+      if (payload.type === "enter" || payload.type === "over") {
+        setDropHover(zoneAt(payload.position));
+        return;
+      }
+      if (payload.type === "drop") {
+        const target = zoneAt(payload.position) ?? dropHover;
+        setDropHover(null);
+        handleDrop(target, payload.paths);
+      }
+    })
+    .catch((e) => {
+      console.error("文件夹拖拽初始化失败", e);
+      status("文件夹拖拽不可用: " + e);
+    });
+}
+
+// 记录原始占位文字(拖拽高亮时临时替换), 并在 Tauri 环境注册拖拽
+for (const id of DROP_ZONE_IDS) {
+  const input = $(id);
+  input.dataset.placeholder = input.placeholder;
+}
+initDragDrop();
 
 // —— 行状态推导: pos < done → 完成, pos == done → 进行中, 其余待处理 ——
 // pos 是该行在"勾选名单"里的位次(表格行序 = scan 返回序);
