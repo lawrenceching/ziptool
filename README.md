@@ -53,6 +53,8 @@ cargo run -p zip-tool-cli -- --help    # 命令行
 cargo run -p zip-tool-tauri            # 桌面应用
 ```
 
+也可以用 devcontainer (仅 core + CLI, 不含 Tauri 系统依赖): 见 `_docs/devcontainer.md`。
+
 ## 构建 CLI
 
 ```
