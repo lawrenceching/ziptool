@@ -6,6 +6,8 @@
 // 无 window.__TAURI__ 时走浏览器预览 mock(假数据 + 定时器推进度)。
 
 const $ = (id) => document.getElementById(id);
+const i18n = window.zipToolI18n;
+const t = (key, params) => i18n.t(key, params);
 const state = {
   mode: "compress",
   rows: [], // 行序 = scan 返回序(行状态推导协议依赖此顺序)
@@ -17,7 +19,6 @@ const DROP_ZONE_IDS = ["src", "dst"];
 let dropHover = null;
 let dropToken = 0;
 
-const MODE_TEXT = { compress: "压缩", extract: "解压" };
 // 行状态: pending 待处理 / meta 元数据 / warning 告警 / done 完成 / running 进行中 / failed 失败
 const BADGE = {
   pending: "bg-blue-50 text-blue-600",
@@ -54,19 +55,66 @@ function applyPreset(name) {
   updatePwHint();
 }
 
-function status(msg) {
-  const el = $("msg");
-  el.textContent = msg;
-  el.title = msg; // 长消息截断时悬停看全文
+let lastStatus = { key: "status.ready", params: {} };
+
+function setStatus(key, params = {}) {
+  lastStatus = { key, params };
+  renderStatus();
 }
+
+function renderStatus() {
+  const p = { ...lastStatus.params };
+  const warnings = Array.isArray(p.warnings) ? p.warnings : null;
+  delete p.warnings;
+  if (typeof p.bytes === "number") p.bytes = fmtBytes(p.bytes);
+  if (typeof p.doneBytes === "number") p.doneBytes = fmtBytes(p.doneBytes);
+  if (typeof p.totalBytes === "number") p.totalBytes = fmtBytes(p.totalBytes);
+  let text = t(lastStatus.key, p);
+  if (warnings && warnings.length > 0) {
+    text += t("status.warnings", { count: warnings.length, first: warnings[0] });
+    if (warnings.length > 1) text += "…";
+  }
+  const el = $("msg");
+  el.textContent = text;
+  el.title = text; // 长消息截断时悬停看全文
+}
+
+function syncActionButton() {
+  $("confirm").textContent = state.run ? t("header.cancel") : t("header.confirm");
+}
+
+function syncLanguageSelect() {
+  $("lang").value = i18n.readPreference();
+}
+
+$("lang").addEventListener("change", async (e) => {
+  await i18n.setLocale(e.target.value);
+});
+
+window.addEventListener("localechange", () => {
+  renderStatus();
+  renderTable(state.rows);
+  updatePwHint();
+  syncActionButton();
+  setDropHover(dropHover, true);
+});
 
 // —— 大小显示 ——
 function fmtBytes(n) {
   if (!Number.isFinite(n) || n < 0) return "-";
-  if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(2) + " GB";
-  if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + " MB";
-  if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
-  return n + " B";
+  const [unit, divisor, digits] =
+    n >= 1024 ** 3
+      ? ["size.gb", 1024 ** 3, 2]
+      : n >= 1024 ** 2
+        ? ["size.mb", 1024 ** 2, 1]
+        : n >= 1024
+          ? ["size.kb", 1024, 1]
+          : ["size.b", 1, 0];
+  const value = new Intl.NumberFormat(i18n.locale, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(n / divisor);
+  return `${value} ${t(unit)}`;
 }
 
 // —— 后端调用封装(浏览器预览无 Tauri 时走 mock) ——
@@ -129,23 +177,26 @@ function setMode(mode) {
   if (switched && state.rows.length > 0) {
     $("src").value = "";
     clearTable();
-    status("模式已切换, 请重新选择源文件夹");
+    setStatus("status.modeSwitched");
   }
 }
 
 // —— 进度事件(扫描/压缩/解压共用一条 Channel 协议) ——
 function onProgress(ev) {
   if (ev.phase === "scanning") {
-    status(`扫描中 ${ev.done}/${ev.total} ${ev.entry}`);
+    setStatus("status.scanning", { done: ev.done, total: ev.total, entry: ev.entry });
     return;
   }
   if (!state.run) return;
   state.run.done = ev.done;
   state.run.total = ev.total;
-  status(
-    `${MODE_TEXT[state.mode]}中 ${ev.done}/${ev.total} ${ev.entry} ` +
-      `(${fmtBytes(ev.doneBytes)} / ${fmtBytes(ev.totalBytes)})`
-  );
+  setStatus(state.mode === "compress" ? "status.compressing" : "status.extracting", {
+    done: ev.done,
+    total: ev.total,
+    entry: ev.entry,
+    doneBytes: ev.doneBytes,
+    totalBytes: ev.totalBytes,
+  });
   renderTable(state.rows);
 }
 
@@ -161,26 +212,26 @@ function parseExcludes() {
 async function doScan(path) {
   clearTable();
   setLocked(true);
-  status("扫描中…");
+  setStatus("status.scanningStart");
   try {
     if (!hasTauri()) {
-      renderTable(mockScan(path));
-      status(`已扫描 ${path}: ${state.rows.length} 个条目(浏览器预览假数据)`);
+      const items = mockScan(path);
+      renderTable(items);
+      setStatus("status.previewScan", { path, count: items.length });
       return;
     }
     const args = { mode: state.mode, path, onProgress: makeChannel() };
     if (state.mode === "compress") args.excludes = parseExcludes();
     const res = await invoke("scan", args);
     renderTable(res.items);
-    let msg = `已扫描 ${path}: ${res.items.length} 个条目, 共 ${fmtBytes(res.totalBytes)}`;
-    if (res.warnings.length > 0) {
-      // compress 子树级告警走状态栏汇总(表格告警行是 extract 专用通道)
-      msg += `; ${res.warnings.length} 条告警: ${res.warnings[0]}` +
-        (res.warnings.length > 1 ? ` 等` : "");
-    }
-    status(msg);
+    setStatus("status.scanDone", {
+      path,
+      count: res.items.length,
+      bytes: res.totalBytes,
+      warnings: res.warnings,
+    });
   } catch (e) {
-    status("扫描失败: " + e);
+    setStatus("status.scanFailed", { error: String(e) });
   } finally {
     setLocked(false);
     syncConfirm();
@@ -200,15 +251,15 @@ async function pickFolder(target) {
         multiple: false,
         title:
           target === "src"
-            ? `选择要${MODE_TEXT[state.mode]}的文件夹`
+            ? `选择要${state.mode === "compress" ? "压缩" : "解压"}的文件夹`
             : "选择目标文件夹",
       });
     } else {
-      status("文件夹选择插件不可用, 请检查 tauri-plugin-dialog");
+      setStatus("status.dialogUnavailable");
       return;
     }
   } catch (e) {
-    status("无法打开文件夹选择框: " + e);
+    setStatus("status.dialogFailed", { error: String(e) });
     return;
   }
   if (!path) return; // 用户取消, 保留原值
@@ -220,7 +271,7 @@ async function pickFolder(target) {
 function applyFolder(target, path) {
   $(target).value = path;
   if (target === "src") doScan(path);
-  else status(`目标文件夹: ${path}`);
+  else setStatus("status.dstPicked", { path });
 }
 
 // —— 原生拖拽选择文件夹(Tauri drag-drop 事件; 坐标为物理像素) ——
@@ -255,22 +306,22 @@ function zoneAt(position) {
 // 拖入校验: 单路径 + 必须已存在文件夹; token 丢弃过期异步结果
 async function handleDrop(target, paths) {
   if ($("src").disabled || $("dst").disabled) {
-    status("任务进行中, 无法更换文件夹");
+    setStatus("status.dropBusy");
     return;
   }
   if (!target) {
-    status("请将文件夹拖到「源文件夹」或「目标文件夹」");
+    setStatus("status.dropWrongZone");
     return;
   }
   if (!Array.isArray(paths) || paths.length !== 1) {
-    status("一次只能拖入一个文件夹");
+    setStatus("status.dropOne");
     return;
   }
   const token = ++dropToken;
   try {
     await invoke("validate_dir", { path: paths[0] });
   } catch (e) {
-    if (token === dropToken) status("无法使用拖入的文件夹: " + e);
+    if (token === dropToken) setStatus("status.dropInvalid", { error: String(e) });
     return;
   }
   if (token !== dropToken) return; // 已切换模式 / 重选路径 / 新的拖拽
@@ -302,7 +353,7 @@ function initDragDrop() {
     })
     .catch((e) => {
       console.error("文件夹拖拽初始化失败", e);
-      status("文件夹拖拽不可用: " + e);
+      setStatus("status.dragUnavailable", { error: String(e) });
     });
 }
 
@@ -422,11 +473,11 @@ $("confirm").addEventListener("click", async () => {
     .map((r, i) => (r.status === "pending" && r.checked ? i : -1))
     .filter((i) => i >= 0);
   if (sel.length === 0) {
-    status("请先勾选要处理的条目");
+    setStatus("status.needSelection");
     return;
   }
   if (!$("dst").value.trim()) {
-    status("请先选择目标文件夹");
+    setStatus("status.needDst");
     $("dst").focus();
     return;
   }
@@ -450,8 +501,8 @@ $("confirm").addEventListener("click", async () => {
       };
   state.run = { sel, done: 0, total: sel.length, failed: false, finished: false };
   setLocked(true);
-  $("confirm").textContent = "取消";
   $("confirm").className = BTN_CANCEL;
+  syncActionButton();
   syncConfirm();
   renderTable(state.rows);
 
@@ -483,17 +534,26 @@ $("confirm").addEventListener("click", async () => {
     state.run.sel.forEach((rowIdx, pos) => {
       if (pos < doneCount) state.rows[rowIdx].status = "done";
     });
-    // 结果汇报: 压缩=包数; 解压=组数; 后续告警追加在消息尾
-    let msg = res.cancelled
-      ? `已取消(完成 ${state.run.done}/${state.run.total})`
-      : isCompress
-        ? `压缩完成: ${res.entries.length} 个压缩包 → ${$("dst").value}`
-        : `解压完成: ${res.groups.length} 组 → ${$("dst").value}`;
-    if (res.warnings.length > 0) {
-      msg += `; ${res.warnings.length} 条告警: ${res.warnings[0]}` +
-        (res.warnings.length > 1 ? ` 等` : "");
+    // 结果汇报: 压缩=包数; 解压=组数; 告警统一由 renderStatus 追加在消息尾
+    if (res.cancelled) {
+      setStatus("status.cancelled", {
+        done: state.run.done,
+        total: state.run.total,
+        warnings: res.warnings,
+      });
+    } else if (isCompress) {
+      setStatus("status.compressDone", {
+        count: res.entries.length,
+        dst: $("dst").value,
+        warnings: res.warnings,
+      });
+    } else {
+      setStatus("status.extractDone", {
+        count: res.groups.length,
+        dst: $("dst").value,
+        warnings: res.warnings,
+      });
     }
-    status(msg);
   } catch (e) {
     // 失败: 当前行标"失败"(悬停徽章看原因), 已完成的行保留完成态(宁停不错)
     const done = state.run.done;
@@ -504,12 +564,14 @@ $("confirm").addEventListener("click", async () => {
         state.rows[rowIdx].failMsg = String(e);
       }
     });
-    status(`${MODE_TEXT[state.mode]}失败: ` + e);
+    setStatus(isCompress ? "status.compressFailed" : "status.extractFailed", {
+      error: String(e),
+    });
   } finally {
     state.run = null;
     setLocked(false);
-    $("confirm").textContent = "确认";
     $("confirm").className = BTN_CONFIRM;
+    syncActionButton();
     syncConfirm();
     renderTable(state.rows);
   }
@@ -555,6 +617,9 @@ $("opt-format").addEventListener("change", updatePwHint);
 // 首次打开要切去解压再切回来才看得到
 setMode(state.mode);
 applyPreset("compat");
+renderStatus();
+syncActionButton();
+syncLanguageSelect();
 
 // ———— 浏览器预览 mock(无 Tauri 环境): 假扫描 + 定时器推进度 ————
 let mockCancel = null;

@@ -20,6 +20,11 @@ import { TauriEvent } from "@tauri-apps/api/event";
 import * as dialogApi from "@tauri-apps/plugin-dialog";
 
 const APP_JS = new URL("../ui/app.js", import.meta.url);
+const I18N_JS = new URL("../ui/i18n.js", import.meta.url);
+const I18N_VENDOR = new URL("../ui/vendor/i18next.min.js", import.meta.url);
+const I18N_LOCALES = ["zh-CN", "zh-HK", "zh-TW", "en", "ru"].map(
+  (code) => new URL(`../ui/locales/${code}.js`, import.meta.url)
+);
 const INDEX_HTML = new URL("../ui/index.html", import.meta.url);
 
 // —— 壳层 DTO 形状的扫描结果(与 crates/tauri-app/src/lib.rs 的 DTO 保持一致) ——
@@ -59,12 +64,19 @@ function sendProgress(callbacks, channel, i, message) {
  * - withTauri=false: 浏览器预览形态(无 __TAURI__, 走内置 mock)
  * - withTauri=true: 真实包表面 + mock IPC 传输; invokeImpl 按命令名分发
  */
-function makeHarness(withTauri, invokeImpl) {
+function makeHarness(withTauri, invokeImpl, options = {}) {
   const dom = new JSDOM(readFileSync(INDEX_HTML, "utf8"), {
     url: "http://localhost/",
     runScripts: "outside-only", // window.eval 跑在带完整全局(document 等)的上下文里
   });
   const { window } = dom;
+  window.localStorage.setItem("ziptool.locale", options.locale ?? "zh-CN");
+  if (options.languages) {
+    Object.defineProperty(window.navigator, "languages", {
+      value: options.languages,
+      configurable: true,
+    });
+  }
   const calls = []; // { cmd, args }
   const callbacks = new Map(); // channel id → Rust 侧回调
   const eventListeners = new Map(); // event name → [listener callback id]
@@ -107,6 +119,9 @@ function makeHarness(withTauri, invokeImpl) {
   // 真实包模块运行在 Node 全局, 其中的 window 自由变量解析到 globalThis;
   // 指向 JSDOM window 使 mock 传输对真实代码可见(同文件测试串行, 互不干扰)
   globalThis.window = window;
+  window.eval(readFileSync(I18N_VENDOR, "utf8"));
+  for (const url of I18N_LOCALES) window.eval(readFileSync(url, "utf8"));
+  window.eval(readFileSync(I18N_JS, "utf8"));
   window.eval(readFileSync(APP_JS, "utf8"));
   const flush = () => new Promise((r) => setTimeout(r, 0));
   // 回放一条 Tauri 事件(拖拽事件监听由 app.js 通过真实 webview API 注册)
@@ -650,4 +665,42 @@ test("行为: 拖拽高亮/离开、非文件夹/多项/落点外/锁定拒绝",
   await dragDrop(h, "dst", ["E:\\out"]);
   assert.equal(h.doc.getElementById("dst").value, "");
   assert.ok(h.doc.getElementById("msg").textContent.includes("任务进行中"));
+});
+
+test("i18n: 切换语言重渲染最后状态与按钮", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    return null;
+  });
+  await pickSource(h);
+
+  h.window.i18next.addResourceBundle(
+    "en",
+    "translation",
+    {
+      status: {
+        scanDone_one: "Scanned {{path}}: {{count}} item, {{bytes}}",
+        scanDone_other: "Scanned {{path}}: {{count}} items, {{bytes}}",
+      },
+      header: { confirm: "Confirm" },
+    },
+    true,
+    true
+  );
+
+  h.doc.getElementById("lang").value = "en";
+  h.doc
+    .getElementById("lang")
+    .dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  await h.flush();
+  await h.flush();
+
+  assert.equal(h.doc.documentElement.lang, "en");
+  assert.ok(
+    h.doc.getElementById("msg").textContent.startsWith("Scanned C:\\demo\\data: 3 items"),
+    h.doc.getElementById("msg").textContent
+  );
+  assert.equal(h.doc.getElementById("confirm").textContent, "Confirm");
+  assert.equal(h.window.localStorage.getItem("ziptool.locale"), "en");
 });
