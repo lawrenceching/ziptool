@@ -725,7 +725,7 @@ mod fake_tests {
         }
     }
 
-    /// run 时发一帧 50% 的假后端:验证百分比 → 字节加权映射(委托其余行为给 FakeBackend)
+    /// run 时发 50%、100% 两帧的假后端:验证百分比 → 字节加权映射(委托其余行为给 FakeBackend)
     struct PercentBackend(FakeBackend);
 
     impl PercentBackend {
@@ -766,6 +766,7 @@ mod fake_tests {
             on_percent: &mut dyn FnMut(u8),
         ) -> Result<()> {
             on_percent(50);
+            on_percent(100);
             Ok(())
         }
     }
@@ -816,13 +817,81 @@ mod fake_tests {
             .iter()
             .filter(|p| p.phase == Phase::Compressing)
             .collect();
-        // A 50% → 3*50/100=1;A 完成 → 3;B 50% → 3+4*50/100=5;B 完成 → 7
+        // A 50% → 3*50/100=1;A 100% → 3(== 完成值);A 完成 → 3;
+        // B 50% → 3+4*50/100=5;B 100% → 7(== 完成值);B 完成 → 7
+        // 同条目多帧每次都重算自 base, 不得用增量累加
         assert_eq!(
             compressing
                 .iter()
                 .map(|p| (p.done, p.done_bytes, p.total_bytes))
                 .collect::<Vec<_>>(),
-            [(0, 1, 7), (1, 3, 7), (1, 5, 7), (2, 7, 7)],
+            [
+                (0, 1, 7),
+                (0, 3, 7),
+                (1, 3, 7),
+                (1, 5, 7),
+                (1, 7, 7),
+                (2, 7, 7)
+            ],
+            "{ev:?}"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn zero_size_entry_emits_no_tick_frame() {
+        // size=0 条目: tick 被 entry_size > 0 guard 跳过, 只留完成帧, 完成字节正常累计
+        let root = two_entries_fixture("zero-size");
+        let entries = [
+            Entry {
+                name: "A".into(),
+                kind: crate::scan::EntryKind::Dir,
+                size: 0,
+                dst: "A".into(),
+                format: String::new(),
+                exclude: None,
+                attr_hidden: Vec::new(),
+            },
+            Entry {
+                name: "B".into(),
+                kind: crate::scan::EntryKind::Dir,
+                size: 4,
+                dst: "B".into(),
+                format: String::new(),
+                exclude: None,
+                attr_hidden: Vec::new(),
+            },
+        ];
+        let events = RefCell::new(Vec::new());
+        // 直调 compress_entries_with_backend(不经 plan), mapping.csv 需要输出目录已存在
+        fs::create_dir_all(root.join("out")).unwrap();
+        let report = compress_entries_with_backend(
+            &PercentBackend::new(&[]),
+            &root.join("in"),
+            &root.join("out"),
+            &entries,
+            &rnd(),
+            &CancelFlag::new(),
+            &|p| {
+                events.borrow_mut().push(p.clone());
+                ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.entries.len(), 2);
+        let ev = events.borrow();
+        let compressing: Vec<_> = ev
+            .iter()
+            .filter(|p| p.phase == Phase::Compressing)
+            .collect();
+        // A(0 字节): 50%/100% 两帧 tick 均被跳过 → 只有完成帧;
+        // B: 50% → 0+4*50/100=2, 100% → 4(== 完成值), 完成 → 4
+        assert_eq!(
+            compressing
+                .iter()
+                .map(|p| (p.done, p.done_bytes, p.total_bytes))
+                .collect::<Vec<_>>(),
+            [(1, 0, 4), (1, 2, 4), (1, 4, 4), (2, 4, 4)],
             "{ev:?}"
         );
         fs::remove_dir_all(&root).unwrap();

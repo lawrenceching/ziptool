@@ -73,7 +73,13 @@ fn completion_frames_stay_one_per_entry_amid_in_entry_percent_ticks() {
         &CancelFlag::new(),
         &|p: &Progress| {
             if p.phase == zip_tool_core::Phase::Compressing {
-                events.borrow_mut().push((p.done, p.total, p.entry.clone()));
+                events.borrow_mut().push((
+                    p.done,
+                    p.done_bytes,
+                    p.total,
+                    p.total_bytes,
+                    p.entry.clone(),
+                ));
             }
             ControlFlow::Continue(())
         },
@@ -88,9 +94,9 @@ fn completion_frames_stay_one_per_entry_amid_in_entry_percent_ticks() {
             || (done == 2 && entry == "B")
             || (done == 3 && entry == "C.jpg")
     };
-    let completions: Vec<(usize, usize, String)> = events
+    let completions: Vec<(usize, u64, usize, u64, String)> = events
         .iter()
-        .filter(|(d, _, e)| is_completion(*d, e))
+        .filter(|(d, _, _, _, e)| is_completion(*d, e))
         .cloned()
         .collect();
     assert_eq!(
@@ -98,12 +104,19 @@ fn completion_frames_stay_one_per_entry_amid_in_entry_percent_ticks() {
         [1, 2, 3],
         "done 应从 1 递增到 3: {events:?}"
     );
-    assert!(completions.iter().all(|e| e.1 == 3), "total 恒为 3");
-    let mut seen: Vec<&str> = completions.iter().map(|e| e.2.as_str()).collect();
+    assert!(completions.iter().all(|e| e.2 == 3), "total 恒为 3");
+    let mut seen: Vec<&str> = completions.iter().map(|e| e.4.as_str()).collect();
     seen.sort();
     assert_eq!(seen, ["A", "B", "C.jpg"]);
+    // done_bytes 全帧非递减;最后一个完成帧累计到 total_bytes
+    assert!(
+        events.windows(2).all(|w| w[0].1 <= w[1].1),
+        "done_bytes 应非递减: {events:?}"
+    );
+    let last = completions.last().unwrap();
+    assert_eq!(last.1, last.3, "完成帧 done_bytes 应累计到 total_bytes");
     // 其余事件只能是条目内 tick 帧: done 为该条目的 0 基序号或完成值
-    for (done, total, entry) in &events {
+    for (done, _, total, _, entry) in &events {
         let idx = match entry.as_str() {
             "A" => 0,
             "B" => 1,

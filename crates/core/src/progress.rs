@@ -15,11 +15,13 @@ pub enum Phase {
 #[derive(Debug, Clone)]
 pub struct Progress {
     pub phase: Phase,
-    /// 条目计数:扫描 = 已扫描条目,压缩 = 已完成条目(从 1 开始)
+    /// 条目计数:扫描 = 已扫描条目;压缩完成帧 = 已完成条目数(1 基),
+    /// 条目内 tick 帧 = 进行中条目的 0 基序号
     pub done: usize,
     /// 条目总数
     pub total: usize,
-    /// 已累计的原始字节数(压缩阶段为已完成条目的 size 之和)
+    /// 已累计的原始字节数:压缩完成帧 = 已完成条目的 size 之和,
+    /// 条目内 tick 帧 = 基础累计 + 条目内字节加权(size × 百分比)
     pub done_bytes: u64,
     /// 条目总字节数(扫描阶段未知,为 0;展示层应退化为 done/total)
     pub total_bytes: u64,
