@@ -164,11 +164,7 @@
     const target = localeFor(preference);
     const previous = getLocale();
 
-    if (!hasI18next || !initialized) {
-      const select = document.getElementById("lang");
-      if (select) select.value = readPreference();
-      return getLocale();
-    }
+    if (!hasI18next || !initialized) return getLocale();
 
     if (target !== previous) {
       try {
@@ -176,8 +172,6 @@
         currentLocale = i18next.language;
       } catch (err) {
         console.error("i18n changeLanguage failed", err);
-        const select = document.getElementById("lang");
-        if (select) select.value = readPreference();
         return previous;
       }
     }

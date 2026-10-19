@@ -87,12 +87,71 @@ function syncActionButton() {
   $("confirm").textContent = state.run ? t("header.cancel") : t("header.confirm");
 }
 
-function syncLanguageSelect() {
-  $("lang").value = i18n.readPreference();
+const LANG_ITEMS = () => [...$("lang-menu").querySelectorAll("[data-lang]")];
+
+function syncLanguageMenu() {
+  const preference = i18n.readPreference();
+  for (const item of LANG_ITEMS()) {
+    const selected = item.dataset.lang === preference;
+    item.setAttribute("aria-checked", String(selected));
+    item.classList.toggle("bg-blue-50", selected);
+    item.classList.toggle("text-blue-600", selected);
+  }
 }
 
-$("lang").addEventListener("change", async (e) => {
-  await i18n.setLocale(e.target.value);
+function setLangMenuOpen(open, focus = false) {
+  $("lang-menu").classList.toggle("hidden", !open);
+  $("lang-toggle").setAttribute("aria-expanded", String(open));
+  if (open && focus) {
+    const checked = $("lang-menu").querySelector('[aria-checked="true"]');
+    (checked || LANG_ITEMS()[0])?.focus();
+  }
+}
+
+$("lang-toggle").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = $("lang-menu").classList.contains("hidden");
+  syncLanguageMenu();
+  setLangMenuOpen(open, open);
+});
+
+$("lang-menu").addEventListener("click", async (e) => {
+  const item = e.target.closest?.("[data-lang]");
+  if (!item) return;
+  e.stopPropagation();
+  await i18n.setLocale(item.dataset.lang);
+  syncLanguageMenu();
+  setLangMenuOpen(false);
+  $("lang-toggle").focus();
+});
+
+document.addEventListener("mousedown", (e) => {
+  if ($("lang-menu").classList.contains("hidden")) return;
+  if (
+    !$("lang-toggle").contains(e.target) &&
+    !$("lang-menu").contains(e.target)
+  ) {
+    setLangMenuOpen(false);
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if ($("lang-menu").classList.contains("hidden")) return;
+  if (e.key === "Escape") {
+    setLangMenuOpen(false);
+    $("lang-toggle").focus();
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+  const items = LANG_ITEMS();
+  const index = items.indexOf(document.activeElement);
+  let next;
+  if (e.key === "Home") next = 0;
+  else if (e.key === "End") next = items.length - 1;
+  else if (e.key === "ArrowDown") next = index < 0 ? 0 : (index + 1) % items.length;
+  else next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
+  items[next]?.focus();
+  e.preventDefault();
 });
 
 window.addEventListener("localechange", () => {
@@ -100,6 +159,7 @@ window.addEventListener("localechange", () => {
   renderTable(state.rows);
   updatePwHint();
   syncActionButton();
+  syncLanguageMenu();
   setDropHover(dropHover, true);
 });
 
@@ -635,7 +695,7 @@ setMode(state.mode);
 applyPreset("compat");
 renderStatus();
 syncActionButton();
-syncLanguageSelect();
+syncLanguageMenu();
 
 // ———— 浏览器预览 mock(无 Tauri 环境): 假扫描 + 定时器推进度 ————
 let mockCancel = null;

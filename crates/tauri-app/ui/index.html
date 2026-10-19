@@ -198,19 +198,59 @@
     <footer class="flex items-center justify-between px-4 py-1.5 bg-white border-t border-slate-200 text-xs text-slate-500">
       <span id="msg" data-i18n="status.ready" class="truncate min-w-0" title="">就绪</span>
       <div class="flex items-center gap-2 shrink-0 pl-4">
-        <select
-          id="lang"
-          aria-label="语言"
-          data-i18n-aria-label="header.language"
-          class="w-32 px-1.5 py-0.5 rounded border border-slate-300 bg-white text-slate-600 text-xs focus:outline-none focus:border-blue-400"
-        >
-          <option value="system" data-i18n="lang.system">跟随系统</option>
-          <option value="zh-CN">简体中文</option>
-          <option value="zh-HK">繁體中文（香港）</option>
-          <option value="zh-TW">繁體中文（台灣）</option>
-          <option value="en">English</option>
-          <option value="ru">Русский</option>
-        </select>
+        <div class="relative">
+          <button
+            id="lang-toggle"
+            type="button"
+            aria-label="语言"
+            data-i18n-aria-label="header.language"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            title="语言"
+            data-i18n-title="header.language"
+            class="p-1 rounded text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              class="w-4 h-4"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M3 12h18" />
+              <path d="M12 3c2.5 3 2.5 15 0 18" />
+              <path d="M12 3c-2.5 3-2.5 15 0 18" />
+            </svg>
+          </button>
+          <div
+            id="lang-menu"
+            role="menu"
+            aria-label="语言"
+            data-i18n-aria-label="header.language"
+            class="hidden absolute bottom-full right-0 mb-1 w-44 rounded-md border border-slate-200 bg-white shadow-lg py-1"
+          >
+            <button type="button" role="menuitemradio" data-lang="system" aria-checked="false" class="lang-item w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50">
+              <span data-i18n="lang.system">跟随系统</span>
+            </button>
+            <button type="button" role="menuitemradio" data-lang="zh-CN" aria-checked="false" class="lang-item w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50">
+              简体中文
+            </button>
+            <button type="button" role="menuitemradio" data-lang="zh-HK" aria-checked="false" class="lang-item w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50">
+              繁體中文（香港）
+            </button>
+            <button type="button" role="menuitemradio" data-lang="zh-TW" aria-checked="false" class="lang-item w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50">
+              繁體中文（台灣）
+            </button>
+            <button type="button" role="menuitemradio" data-lang="en" aria-checked="false" class="lang-item w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50">
+              English
+            </button>
+            <button type="button" role="menuitemradio" data-lang="ru" aria-checked="false" class="lang-item w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50">
+              Русский
+            </button>
+          </div>
+        </div>
         <span id="ver" class="shrink-0"></span>
       </div>
     </footer>

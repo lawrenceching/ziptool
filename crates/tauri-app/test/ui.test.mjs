@@ -147,12 +147,10 @@ async function pickSource(h, path = "C:\\demo\\data") {
   assert.equal(h.doc.getElementById("src").value, path);
 }
 
-/** 通过语言下拉切换语言并等 changeLanguage/重渲染完成 */
+/** 通过语言菜单切换语言并等 changeLanguage/重渲染完成 */
 async function switchLang(h, code) {
-  h.doc.getElementById("lang").value = code;
-  h.doc
-    .getElementById("lang")
-    .dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  h.doc.getElementById("lang-toggle").click();
+  h.doc.querySelector(`#lang-menu [data-lang="${code}"]`).click();
   await h.flush();
   await h.flush();
 }
@@ -699,14 +697,15 @@ test("i18n: 切换语言重渲染最后状态与按钮", async () => {
     true
   );
 
-  h.doc.getElementById("lang").value = "en";
-  h.doc
-    .getElementById("lang")
-    .dispatchEvent(new h.window.Event("change", { bubbles: true }));
-  await h.flush();
-  await h.flush();
+  await switchLang(h, "en");
 
   assert.equal(h.doc.documentElement.lang, "en");
+  assert.ok(h.doc.getElementById("lang-menu").classList.contains("hidden"));
+  assert.equal(h.doc.getElementById("lang-toggle").getAttribute("aria-expanded"), "false");
+  assert.equal(
+    h.doc.querySelector('#lang-menu [data-lang="en"]').getAttribute("aria-checked"),
+    "true"
+  );
   assert.equal(
     h.doc.getElementById("msg").textContent,
     "Scanned C:\\demo\\data: 3 items, 3.25 GB"
@@ -895,4 +894,25 @@ test("i18n: 表格大小按语言格式化字节与单位", async () => {
     ru.doc.getElementById("msg").textContent.includes("3,25 ГБ"),
     ru.doc.getElementById("msg").textContent
   );
+});
+
+test("i18n: 语言菜单点击外部/Esc 关闭", async () => {
+  const h = makeHarness(false, () => null);
+  const toggle = h.doc.getElementById("lang-toggle");
+  const menu = h.doc.getElementById("lang-menu");
+
+  toggle.click();
+  assert.ok(!menu.classList.contains("hidden"));
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+
+  h.doc.body.dispatchEvent(new h.window.Event("mousedown", { bubbles: true }));
+  assert.ok(menu.classList.contains("hidden"));
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+
+  toggle.click();
+  h.doc.dispatchEvent(
+    new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+  );
+  assert.ok(menu.classList.contains("hidden"));
+  assert.equal(h.doc.activeElement, toggle);
 });

@@ -193,24 +193,28 @@ test("index.html 静态文案与语言下拉结构完整", () => {
   assert.ok(w.document.querySelector('[data-i18n-aria-label="header.language"]'));
   assert.ok(w.document.querySelector('[data-i18n-aria-label="table.selectAll"]'));
   assert.deepEqual(
-    [...w.document.querySelectorAll("#lang option")].map((o) => o.value),
+    [...w.document.querySelectorAll("#lang-menu [data-lang]")].map(
+      (el) => el.dataset.lang
+    ),
     ["system", "zh-CN", "zh-HK", "zh-TW", "en", "ru"]
   );
 
-  const lang = w.document.getElementById("lang");
+  const toggle = w.document.getElementById("lang-toggle");
+  const menu = w.document.getElementById("lang-menu");
   const ver = w.document.getElementById("ver");
   assert.ok(
-    w.document.querySelector("footer").contains(lang),
-    "语言选择框应在状态栏"
+    w.document.querySelector("footer").contains(toggle),
+    "语言按钮应在状态栏"
   );
   assert.ok(
-    !w.document.querySelector("header").contains(lang),
-    "语言选择框不应在顶栏"
+    !w.document.querySelector("header").contains(toggle),
+    "语言按钮不应在顶栏"
   );
   assert.ok(
-    lang.compareDocumentPosition(ver) & w.Node.DOCUMENT_POSITION_FOLLOWING,
-    "语言选择框应在版本号左侧"
+    toggle.compareDocumentPosition(ver) & w.Node.DOCUMENT_POSITION_FOLLOWING,
+    "语言按钮应在版本号左侧"
   );
+  assert.ok(menu.classList.contains("hidden"), "语言菜单默认收起");
 });
 
 test("英文界面关键文案为英文, 不支持语言回退英文", () => {
