@@ -4489,7 +4489,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "semver",
 ]
@@ -4573,7 +4573,7 @@ dependencies = [
 
 [[package]]
 name = "zip-tool-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "zip-tool-core",
@@ -4581,15 +4581,15 @@ dependencies = [
 
 [[package]]
 name = "zip-tool-core"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "zip-tool-e2e"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "zip-tool-tauri"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
