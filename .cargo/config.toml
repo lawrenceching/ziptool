@@ -1,0 +1,4 @@
+[alias]
+# `cargo bump-version <x.y.z>`: 同步 Cargo.toml / Cargo.lock / tauri.conf.json,
+# 提交版本变更并创建 v<x.y.z> tag。实现见 xtask。
+bump-version = "run --package xtask -- bump-version"

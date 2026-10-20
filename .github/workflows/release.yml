@@ -5,42 +5,52 @@ permissions:
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 要发布的 tag (如 v0.1.0)
-        required: true
-        type: string
 
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   verify:
-    name: verify (tag/版本一致性 + CI 门禁)
+    name: verify (版本/tag 一致性 + CI 门禁)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
     timeout-minutes: 115
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
-      - name: 校验 tag 与版本一致
+          fetch-depth: 0
+      - name: 读取 Cargo.toml 版本并校验 tag
+        id: version
         run: |
-          VER="${TAG#v}"
           CARGO_VER="$(grep -m1 '^version =' Cargo.toml | cut -d '"' -f2)"
           TAURI_VER="$(jq -r .version crates/tauri-app/tauri.conf.json)"
-          echo "tag=$TAG ver=$VER cargo=$CARGO_VER tauri=$TAURI_VER"
-          if [ "$VER" != "$CARGO_VER" ] || [ "$VER" != "$TAURI_VER" ]; then
-            echo "::error::版本不一致: tag=$VER Cargo.toml=$CARGO_VER tauri.conf=$TAURI_VER"
+          TAG="v$CARGO_VER"
+          SHA="$(git rev-parse HEAD)"
+          echo "cargo=$CARGO_VER tauri=$TAURI_VER tag=$TAG sha=$SHA"
+          if [ "$CARGO_VER" != "$TAURI_VER" ]; then
+            echo "::error::版本不一致: Cargo.toml=$CARGO_VER tauri.conf=$TAURI_VER"
             exit 1
           fi
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag $TAG 不存在; 请先运行 cargo bump-version $CARGO_VER 并推送 tag"
+            exit 1
+          fi
+          TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+          if [ "$TAG_SHA" != "$SHA" ]; then
+            echo "::error::tag $TAG 指向 $TAG_SHA, 但当前 HEAD 是 $SHA; 请重新打 tag"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
       - name: 等待该 commit 的 CI 全绿
         run: |
           SHA="$(git rev-parse HEAD)"
@@ -85,11 +95,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-latest]
     env:
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ needs.verify.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.verify.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -154,7 +164,7 @@ jobs:
 
   release:
     name: release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -162,7 +172,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ needs.verify.outputs.tag }}
     steps:
       - uses: actions/download-artifact@v4
         with:

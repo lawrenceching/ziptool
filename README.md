@@ -92,6 +92,8 @@ cargo run -p zip-tool-tauri            # 桌面应用
 
 也可以用 devcontainer (仅 core + CLI, 不含 Tauri 系统依赖): 见 `_docs/devcontainer.md`。
 
+发版用 `cargo bump-version <x.y.z> --push`: 同步 `Cargo.toml` / `Cargo.lock` / `tauri.conf.json`, 提交、打 tag 并推送; 之后在 Actions 里运行 Release, 不需要输入版本号。详见 `_docs/release.md`。
+
 ## 构建 CLI
 
 ```
