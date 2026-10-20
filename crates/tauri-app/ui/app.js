@@ -18,6 +18,13 @@ const state = {
   planError: null,
   planOpen: false,
   planFilter: "all",
+  view: "main", // "main" | "settings"
+  section: "general", // 设置页当前侧栏项
+  settings: null, // { general: { shutdownAfterCompress }, filters: { enabledPolicies } }
+  settingsReady: false,
+  saving: false,
+  filtersDirty: false, // 当前策略与最近一次压缩扫描不一致
+  scanFilters: null, // 最近一次压缩扫描使用的策略 id 快照
 };
 
 const DEFAULT_PACKAGING = {
@@ -26,6 +33,13 @@ const DEFAULT_PACKAGING = {
   bundleMax: "",
   maxEntries: "50000",
 };
+
+// 文件排除策略(与 core filter::POLICY_* 对齐; 顺序即展示/输出顺序)
+const FILTER_POLICY_IDS = ["os-hidden", "lang-temp"];
+const SETTINGS_STORAGE_KEY = "ziptool.settings";
+let savePromise = null;
+let settingsReturnFocus = null;
+let settingsReady = Promise.resolve();
 
 // 原生拖拽: 两个投放区 + 最近命中行 + 校验竞态 token
 const DROP_ZONE_IDS = ["src", "dst"];
@@ -159,6 +173,7 @@ document.addEventListener("mousedown", (e) => {
 document.addEventListener("keydown", (e) => {
   if ($("lang-menu").classList.contains("hidden")) return;
   if (e.key === "Escape") {
+    e.preventDefault(); // 同一 Escape 不再关设置页(见下方 settings 监听)
     setLangMenuOpen(false);
     $("lang-toggle").focus();
     return;
@@ -217,6 +232,8 @@ function makeChannel() {
 function clearTable() {
   state.rows = [];
   state.run = null;
+  state.scanFilters = null;
+  state.filtersDirty = false;
   $("rows").textContent = "";
   $("empty").classList.remove("hidden");
   clearPlan();
@@ -225,7 +242,7 @@ function clearTable() {
 
 // —— 任务互斥的 UI 侧: 任务期间锁控件(确认钮另行切换成取消) ——
 const LOCK_IDS = [
-  "mode-compress", "mode-extract", "src", "dst",
+  "mode-compress", "mode-extract", "src", "dst", "settings-open",
   "opt-split", "opt-merge-below", "opt-bundle-max", "opt-max-entries",
   "opt-password", "opt-random", "opt-force",
   "preset-compat", "preset-balanced", "opt-advanced", "opt-format", "opt-level",
@@ -238,6 +255,8 @@ const BTN_CANCEL =
   "px-6 py-1.5 rounded-lg bg-red-600 text-white font-medium enabled:hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors";
 function setLocked(locked) {
   for (const id of LOCK_IDS) $(id).disabled = locked;
+  // 设置加载完成前也不能打开设置页(避免用默认值展示/保存)
+  $("settings-open").disabled = locked || !state.settingsReady;
   if (locked) setDropHover(null); // 任务期不允许拖拽更换路径
 }
 
@@ -298,6 +317,211 @@ function parseExcludes() {
     .split(/[\n,]/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+// ———— 设置页: 加载 / 保存 / 策略状态 ————
+// 默认值必须与 core filter::default_enabled_policies 一致(D-1 两种都开)
+function defaultSettings() {
+  return {
+    general: { shutdownAfterCompress: false },
+    filters: { enabledPolicies: FILTER_POLICY_IDS.slice() },
+  };
+}
+
+// 防御性归一化: 只保留已知策略 id; 空数组 = 两种都关; 字段缺失 = 默认
+function normalizeSettings(raw) {
+  const s = raw && typeof raw === "object" ? raw : {};
+  const general = s.general && typeof s.general === "object" ? s.general : {};
+  const filters = s.filters && typeof s.filters === "object" ? s.filters : {};
+  const enabled = Array.isArray(filters.enabledPolicies)
+    ? FILTER_POLICY_IDS.filter((id) => filters.enabledPolicies.includes(id))
+    : FILTER_POLICY_IDS.slice();
+  return {
+    general: { shutdownAfterCompress: !!general.shutdownAfterCompress },
+    filters: { enabledPolicies: enabled },
+  };
+}
+
+function currentEnabledPolicies() {
+  return state.settings
+    ? FILTER_POLICY_IDS.filter((id) =>
+        state.settings.filters.enabledPolicies.includes(id)
+      )
+    : FILTER_POLICY_IDS.slice();
+}
+
+function samePolicies(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return a.every((id, i) => id === b[i]);
+}
+
+function applySettingsToDom() {
+  if (!state.settings) return;
+  const enabled = new Set(state.settings.filters.enabledPolicies);
+  for (const id of FILTER_POLICY_IDS) {
+    const el = $(`policy-${id}`);
+    if (el) el.checked = enabled.has(id);
+  }
+  // 本期置灰; 若文件里已有 true(未来版本), 只展示并原样保留
+  const shutdown = $("set-shutdown");
+  if (shutdown) shutdown.checked = !!state.settings.general.shutdownAfterCompress;
+}
+
+function setSettingsBusy(busy) {
+  for (const id of FILTER_POLICY_IDS) {
+    const el = $(`policy-${id}`);
+    if (el) el.disabled = busy;
+  }
+  for (const panel of document.querySelectorAll("[data-panel]")) {
+    panel.setAttribute("aria-busy", String(busy));
+  }
+}
+
+function updateFiltersDirty() {
+  if (state.mode !== "compress" || !state.scanFilters) {
+    state.filtersDirty = false;
+    return;
+  }
+  state.filtersDirty = !samePolicies(currentEnabledPolicies(), state.scanFilters);
+}
+
+// 即时保存: 先乐观更新, 失败回滚; 保存中禁用策略开关, 关闭设置页会等它完成
+function saveSettings(next) {
+  if (state.saving && savePromise) return savePromise;
+  const prev = state.settings;
+  state.settings = normalizeSettings(next);
+  applySettingsToDom();
+  state.saving = true;
+  setSettingsBusy(true);
+
+  const work = (async () => {
+    try {
+      let saved;
+      if (hasTauri()) {
+        saved = await invoke("save_settings", { settings: state.settings });
+      } else {
+        localStorage.setItem(
+          SETTINGS_STORAGE_KEY,
+          JSON.stringify(state.settings)
+        );
+        saved = state.settings;
+      }
+      state.settings = normalizeSettings(saved);
+      updateFiltersDirty();
+    } catch (e) {
+      state.settings = prev;
+      updateFiltersDirty();
+      setStatus("status.settingsSaveFailed", { error: String(e) });
+    } finally {
+      state.saving = false;
+      savePromise = null;
+      setSettingsBusy(false);
+      applySettingsToDom();
+    }
+  })();
+  savePromise = work;
+  return work;
+}
+
+function showView(view) {
+  state.view = view;
+  $("view-main").classList.toggle("hidden", view !== "main");
+  $("view-settings").classList.toggle("hidden", view !== "settings");
+}
+
+function showSection(section) {
+  state.section = section;
+  for (const button of $("settings-nav").querySelectorAll("[data-section]")) {
+    const active = button.dataset.section === section;
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+    button.classList.toggle("bg-slate-100", active);
+    button.classList.toggle("font-medium", active);
+    button.classList.toggle("text-slate-800", active);
+    button.classList.toggle("text-slate-600", !active);
+    button.classList.toggle("hover:bg-slate-100", !active);
+  }
+  for (const panel of document.querySelectorAll("[data-panel]")) {
+    panel.classList.toggle("hidden", panel.dataset.panel !== section);
+  }
+}
+
+function openSettings() {
+  if (!state.settingsReady || state.run || state.planOpen) return;
+  settingsReturnFocus = document.activeElement;
+  setDropHover(null);
+  showView("settings");
+  showSection("general");
+  const active = $("settings-nav").querySelector('[aria-current="page"]');
+  active?.focus();
+}
+
+async function closeSettings() {
+  if (state.view !== "settings") return;
+  const pending = savePromise;
+  if (pending) await pending;
+  showView("main");
+  const needRescan =
+    state.filtersDirty &&
+    state.mode === "compress" &&
+    state.rows.length > 0 &&
+    $("src").value.trim() !== "";
+  state.filtersDirty = false;
+  if (settingsReturnFocus && document.contains(settingsReturnFocus)) {
+    settingsReturnFocus.focus?.();
+  } else {
+    $("settings-open").focus();
+  }
+  if (needRescan) {
+    setStatus("status.settingsRescan");
+    doScan($("src").value);
+  }
+}
+
+function initSettings() {
+  $("settings-open").disabled = true;
+  settingsReady = (async () => {
+    try {
+      if (!hasTauri()) {
+        let raw = null;
+        try {
+          raw = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "null");
+        } catch {
+          raw = null;
+        }
+        state.settings = normalizeSettings(raw);
+      } else {
+        const res = await invoke("load_settings");
+        state.settings = normalizeSettings(res?.settings);
+        if (Array.isArray(res?.warnings) && res.warnings.length > 0) {
+          setStatus("status.settingsLoadWarning", { error: res.warnings[0] });
+        }
+      }
+    } catch (e) {
+      state.settings = normalizeSettings(null);
+      setStatus("status.settingsLoadFailed", { error: String(e) });
+    }
+    state.settingsReady = true;
+    applySettingsToDom();
+    $("settings-open").disabled = !!state.run;
+  })();
+}
+
+$("settings-open").addEventListener("click", openSettings);
+$("settings-back").addEventListener("click", () => closeSettings());
+$("settings-nav").addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-section]");
+  if (button) showSection(button.dataset.section);
+});
+for (const id of FILTER_POLICY_IDS) {
+  $(`policy-${id}`).addEventListener("change", (event) => {
+    const next = normalizeSettings(state.settings);
+    const enabled = new Set(next.filters.enabledPolicies);
+    if (event.target.checked) enabled.add(id);
+    else enabled.delete(id);
+    next.filters.enabledPolicies = FILTER_POLICY_IDS.filter((x) => enabled.has(x));
+    saveSettings(next);
+  });
 }
 
 // —— 打包策略输入 / 勾选名单 ——
@@ -786,6 +1010,13 @@ $("plan-backdrop").addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.planOpen) setPlanOpen(false);
 });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || event.defaultPrevented) return;
+  if (state.view === "settings") {
+    event.preventDefault();
+    closeSettings();
+  }
+});
 $("plan-filters").addEventListener("click", (event) => {
   const button = event.target.closest?.("[data-plan-filter]");
   if (!button) return;
@@ -799,21 +1030,28 @@ $("plan-list").addEventListener("click", (event) => {
 
 // —— 扫描: invoke("scan"), 结果渲染表格并缓存在外壳 ——
 async function doScan(path) {
+  await settingsReady;
   clearTable();
   setLocked(true);
   setStatus("status.scanningStart");
   try {
+    const scanPolicies = currentEnabledPolicies();
     if (!hasTauri()) {
       const items = mockScan(path);
       renderTable(items);
       setStatus("status.previewScan", { path, count: items.length });
+      if (state.mode === "compress") state.scanFilters = scanPolicies;
       await refreshPlan();
       return;
     }
     const args = { mode: state.mode, path, onProgress: makeChannel() };
-    if (state.mode === "compress") args.excludes = parseExcludes();
+    if (state.mode === "compress") {
+      args.filters = { enabledPolicies: scanPolicies };
+      args.excludes = parseExcludes();
+    }
     const res = await invoke("scan", args);
     renderTable(res.items);
+    if (state.mode === "compress") state.scanFilters = scanPolicies;
     setStatus("status.scanDone", {
       path,
       count: res.items.length,
@@ -890,6 +1128,7 @@ function setDropHover(zone, force = false) {
 
 // 物理坐标 → CSS 坐标 → 命中的投放区("src" / "dst")
 function zoneAt(position) {
+  if (state.view !== "main") return null;
   if (!position || $("src").disabled || $("dst").disabled) return null;
   const scale = window.devicePixelRatio || 1;
   const el =
@@ -901,6 +1140,7 @@ function zoneAt(position) {
 
 // 拖入校验: 单路径 + 必须已存在文件夹; token 丢弃过期异步结果
 async function handleDrop(target, paths) {
+  if (state.view !== "main") return;
   if ($("src").disabled || $("dst").disabled) {
     setStatus("status.dropBusy");
     return;
@@ -1131,6 +1371,7 @@ $("confirm").addEventListener("click", async () => {
         randomName: $("opt-random").checked,
         format: $("opt-format").value,
         level: lvl === "" ? null : Number(lvl),
+        filters: { enabledPolicies: currentEnabledPolicies() },
         excludes: parseExcludes(),
         verify: $("opt-verify").checked,
         packaging: readPackaging(),
@@ -1287,6 +1528,7 @@ renderStatus();
 renderPlanSummary();
 syncActionButton();
 syncLanguageMenu();
+initSettings();
 
 // ———— 浏览器预览 mock(无 Tauri 环境): 假扫描 + 定时器推进度 ————
 let mockCancel = null;

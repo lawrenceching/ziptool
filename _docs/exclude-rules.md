@@ -8,13 +8,14 @@
 > - 隐藏判定**仅用各 OS 原生口径**, 不以 `.` 开头一刀切(避免误伤用户自命名文件): Windows = 文件系统隐藏属性, Linux/mac = `.` 前缀(Unix 原生约定)
 > - CLI 默认排除隐藏文件, `--include-hidden-files` 关闭
 > - UI 扫描后**显示**隐藏文件但**默认不勾选**; UI 高级区提供排除模式输入
-> - UI 恒定 `include_hidden = false`, 无全局"包含隐藏"开关(要包含顶层隐藏项, 勾选即可)
+> - UI 默认 `include_hidden = false`(设置页 `os-hidden` 策略默认开); 关闭该策略后为 `true`, 即包含隐藏项
 
 ## 1. 目标与非目标
 
 ### 目标
 
 - 压缩时按规则排除文件, 避免垃圾文件进包(Thumbs.db / .DS_Store / desktop.ini / 临时文件等)
+- 策略层(设置页「操作系统隐藏文件 / 编程语言的临时文件」)见 [filtering_rules.md](filtering_rules.md): 策略 id 由 `filter::effective_rules` 展开为本文件的 `ExcludeRules`, 不新增第二条排除管线
 - 规则双轨生效(满足 todo 关键约束):
   - **扫描统计层**: 被排除文件的尺寸从 `total_bytes`/条目 size 中扣除, 进度权重与预检不偏
   - **后端命令层**: 压缩命令带排除开关, 被排除文件确实不进包
@@ -29,6 +30,8 @@
 - zip 后端的目录段边界语义缝隙不修补(接受过度匹配, 见 §3)
 
 ## 2. 参数面(core)
+
+> 策略层与自定义模式的组合由 `filter::effective_rules` 统一展开; 展开后仍是下面这个结构。
 
 ```rust
 /// 排除规则: 内建隐藏默认集 + 用户自定义模式, 叠加(并集)生效
@@ -103,10 +106,10 @@ pub enum ExcludeReason {
 
 ## 6. UI(Tauri)
 
-- `scan` 命令新增可选参数 `excludes?: string[]`(高级区输入, 多行/逗号分隔); ScanContext 连带缓存规则
+- `scan` 命令新增可选参数 `filters?: { enabledPolicies }`(设置页策略)与 `excludes?: string[]`(高级区输入, 多行/逗号分隔); 壳层经 `filter::effective_rules` 展开, ScanContext 连带缓存展开后的规则
 - `ScanItem` 新增 `excluded?: string`(原因文案:「隐藏文件」/「匹配排除模式: <p>」); 前端被标行**显示但默认不勾选**, detail 列标原因
-- `compress` DTO 同步加 `excludes`; 与扫描缓存规则不一致 = 报"扫描已过期"(沿用 5.4 保鲜语义)
-- UI 恒定 `include_hidden = false`; 浏览器 mock 路径同步
+- `compress` DTO 同步加 `filters` / `excludes`; 与扫描缓存规则不一致 = 报"扫描已过期"(沿用 5.4 保鲜语义)
+- UI 的 `include_hidden` 由 `os-hidden` 策略决定(默认 false); 浏览器 mock 路径同步
 
 ## 7. 测试计划
 

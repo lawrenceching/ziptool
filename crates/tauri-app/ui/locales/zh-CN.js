@@ -95,6 +95,36 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
         tooManyEntries: "{{name}} 条目数 {{count}} 超过上限 {{limit}}, 已改为直接压缩",
       },
     },
+    settings: {
+      title: "设置",
+      open: "设置",
+      back: "返回",
+      nav: {
+        label: "设置导航",
+        general: "通用",
+        filters: "文件排除",
+      },
+      general: {
+        heading: "通用",
+        shutdown: {
+          title: "压缩完成后关机",
+          desc: "即将支持: 压缩成功后自动关机的能力将在后续版本提供。",
+        },
+      },
+      filters: {
+        heading: "文件排除",
+        intro:
+          "策略在压缩扫描时生效; 修改后会在关闭设置页时重新扫描当前源文件夹。被排除的条目仍会显示, 但默认不勾选。单次任务仍可在主界面的「高级」中添加自定义模式。",
+        osHidden: {
+          title: "操作系统隐藏文件",
+          desc: "排除操作系统标记为隐藏的文件与目录: Windows 为隐藏属性, Linux/macOS 为以 . 开头的名字(含 .git、.env), 以及 Thumbs.db、desktop.ini 等系统元数据。",
+        },
+        langTemp: {
+          title: "编程语言的临时文件",
+          desc: "排除编程语言与构建工具生成的缓存和临时文件, 例如 JavaScript 的 node_modules、Python 的 __pycache__、Java 的 .gradle 与 *.class。",
+        },
+      },
+    },
     table: {
       caption: "条目列表",
       selectAll: "全选",
@@ -142,6 +172,10 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
       needSelection: "请先勾选要处理的条目",
       needDst: "请先选择目标文件夹",
       needPlan: "打包方案尚未就绪, 请稍候",
+      settingsLoadFailed: "读取设置失败, 已使用默认值: {{error}}",
+      settingsLoadWarning: "读取设置时有问题: {{error}}",
+      settingsSaveFailed: "保存设置失败, 已还原: {{error}}",
+      settingsRescan: "排除策略已更新, 正在重新扫描…",
       modeSwitched: "模式已切换, 请重新选择源文件夹",
       cancelled: "已取消(完成 {{done}}/{{total}})",
       compressDone_other: "压缩完成: {{count}} 个压缩包 → {{dst}}",

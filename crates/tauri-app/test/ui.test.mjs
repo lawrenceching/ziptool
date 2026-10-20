@@ -295,6 +295,7 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
     randomName: true,
     format: "zip",
     level: null, // 默认预设不传级别(后端默认 zip -6); Number("") 是 0=store, 空值必须显式归 null
+    filters: { enabledPolicies: ["os-hidden", "lang-temp"] },
     excludes: [],
     verify: true,
     packaging: {
@@ -547,6 +548,7 @@ test("契约: 平衡预设的参数透传到 compress 调用", async () => {
     randomName: false,
     format: "7z",
     level: 5,
+    filters: { enabledPolicies: ["os-hidden", "lang-temp"] },
     excludes: [],
     verify: true,
     packaging: {
@@ -1178,4 +1180,127 @@ test("行为: 包级进度失败时, 合并包所有成员一起标失败", asyn
 
   assert.deepEqual(h.badges(), ["完成", "失败", "失败"]);
   assert.ok(h.doc.getElementById("msg").textContent.includes("压缩失败"));
+});
+
+// ———— 设置页 ————
+const SETTINGS_DEFAULTS = {
+  general: { shutdownAfterCompress: false },
+  filters: { enabledPolicies: ["os-hidden", "lang-temp"] },
+};
+
+async function openSettingsPage(h) {
+  await h.flush();
+  h.doc.getElementById("settings-open").click();
+  await h.flush();
+}
+
+test("设置页: 打开、边栏两项、默认策略都开、关机占位置灰", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "scan") return SCAN_COMPRESS;
+    return null;
+  });
+  await openSettingsPage(h);
+
+  assert.ok(!h.doc.getElementById("view-settings").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("view-main").classList.contains("hidden"));
+  assert.equal(h.doc.querySelectorAll("#settings-nav [data-section]").length, 2);
+  assert.equal(h.doc.querySelector("#settings-nav [aria-current=page]").dataset.section, "general");
+  assert.ok(!h.doc.querySelector('[data-panel="general"]').classList.contains("hidden"));
+  assert.ok(h.doc.querySelector('[data-panel="filters"]').classList.contains("hidden"));
+
+  const shutdown = h.doc.getElementById("set-shutdown");
+  assert.ok(shutdown.disabled, "关机占位控件应置灰");
+  assert.ok(!shutdown.checked);
+  assert.ok(h.doc.getElementById("policy-os-hidden").checked);
+  assert.ok(h.doc.getElementById("policy-lang-temp").checked);
+});
+
+test("设置页: 切换侧栏、策略切换立即保存并在关闭时按新策略重扫", async () => {
+  const saves = [];
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "save_settings") {
+      saves.push(args.settings);
+      return args.settings;
+    }
+    return null;
+  });
+  await pickSource(h);
+  await openSettingsPage(h);
+  h.doc.querySelector('[data-section="filters"]').click();
+  assert.ok(!h.doc.querySelector('[data-panel="filters"]').classList.contains("hidden"));
+  assert.equal(h.doc.querySelector('[data-section="filters"]').getAttribute("aria-current"), "page");
+
+  h.doc.getElementById("policy-lang-temp").click();
+  await h.flush();
+  await h.flush();
+  jsonEq(saves.at(-1).filters.enabledPolicies, ["os-hidden"]);
+
+  h.doc.getElementById("settings-back").click();
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  const scans = h.calls.filter((c) => c.cmd === "scan");
+  assert.equal(scans.length, 2, "策略变化后应重扫一次");
+  jsonEq(scans.at(-1).args.filters, { enabledPolicies: ["os-hidden"] });
+});
+
+test("设置页: 保存失败回滚开关并提示", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "save_settings") return Promise.reject("disk full");
+    return null;
+  });
+  await openSettingsPage(h);
+  const os = h.doc.getElementById("policy-os-hidden");
+  os.click();
+  await h.flush();
+  await h.flush();
+  assert.ok(os.checked, "保存失败应回滚为开");
+  assert.match(h.doc.getElementById("msg").textContent, /保存设置失败/);
+});
+
+test("设置页: 关机字段为 true 时展示 disabled+checked, 保存其它设置原样保留", async () => {
+  const saves = [];
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "load_settings") {
+      return {
+        settings: {
+          general: { shutdownAfterCompress: true },
+          filters: { enabledPolicies: ["os-hidden", "lang-temp"] },
+        },
+        warnings: [],
+      };
+    }
+    if (cmd === "save_settings") {
+      saves.push(args.settings);
+      return args.settings;
+    }
+    return null;
+  });
+  await openSettingsPage(h);
+  const shutdown = h.doc.getElementById("set-shutdown");
+  assert.ok(shutdown.disabled);
+  assert.ok(shutdown.checked);
+
+  h.doc.getElementById("policy-lang-temp").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(saves.at(-1).general.shutdownAfterCompress, true);
+  assert.ok(!h.calls.some((c) => c.cmd === "power_off"), "本期不应有电源命令");
+});
+
+test("设置页: 切换语言更新静态文案", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await openSettingsPage(h);
+  await switchLang(h, "en");
+  assert.equal(h.doc.querySelector("#view-settings h1").textContent, "Settings");
+  assert.equal(h.doc.getElementById("policy-os-hidden-title").textContent, "OS hidden files");
 });

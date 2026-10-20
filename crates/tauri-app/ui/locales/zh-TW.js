@@ -95,6 +95,35 @@ window.__ZIPTOOL_LOCALES__["zh-TW"] = {
         "tooManyEntries": "{{name}} 項目數 {{count}} 超過上限 {{limit}}, 已改為直接壓縮"
       }
     },
+    "settings": {
+      "title": "設定",
+      "open": "設定",
+      "back": "返回",
+      "nav": {
+        "label": "設定導覽",
+        "general": "一般",
+        "filters": "檔案排除"
+      },
+      "general": {
+        "heading": "一般",
+        "shutdown": {
+          "title": "壓縮完成後關機",
+          "desc": "即將支援: 壓縮成功後自動關機的功能將於後續版本提供。"
+        }
+      },
+      "filters": {
+        "heading": "檔案排除",
+        "intro": "策略在壓縮掃描時生效; 修改後會在關閉設定頁時重新掃描目前來源資料夾。被排除的項目仍會顯示, 但預設不勾選。單次任務仍可在主介面的「進階」中加入自訂模式。",
+        "osHidden": {
+          "title": "作業系統隱藏檔案",
+          "desc": "排除作業系統標記為隱藏的檔案與目錄: Windows 為隱藏屬性, Linux/macOS 為以 . 開頭的名稱(含 .git、.env), 以及 Thumbs.db、desktop.ini 等系統中繼資料。"
+        },
+        "langTemp": {
+          "title": "程式語言的暫存檔案",
+          "desc": "排除程式語言與建置工具產生的快取和暫存檔案, 例如 JavaScript 的 node_modules、Python 的 __pycache__、Java 的 .gradle 與 *.class。"
+        }
+      }
+    },
     "table": {
       "caption": "項目列表",
       "selectAll": "全選",
@@ -142,6 +171,10 @@ window.__ZIPTOOL_LOCALES__["zh-TW"] = {
       "needSelection": "請先勾選要處理的項目",
       "needDst": "請先選取目標資料夾",
       "needPlan": "打包方案尚未就緒, 請稍候",
+      "settingsLoadFailed": "讀取設定失敗, 已使用預設值: {{error}}",
+      "settingsLoadWarning": "讀取設定時有問題: {{error}}",
+      "settingsSaveFailed": "儲存設定失敗, 已還原: {{error}}",
+      "settingsRescan": "排除策略已更新, 正在重新掃描…",
       "modeSwitched": "模式已切換, 請重新選取來源資料夾",
       "cancelled": "已取消(完成 {{done}}/{{total}})",
       "compressDone_other": "壓縮完成: {{count}} 個壓縮檔 → {{dst}}",

@@ -6,7 +6,8 @@
     <link rel="stylesheet" href="app.css" />
   </head>
   <body class="h-screen flex flex-col bg-white text-slate-800 text-sm">
-    <!-- 顶栏: 压缩/解压模式切换 + 确认(运行中变取消) -->
+    <div id="view-main" class="flex flex-col flex-1 min-h-0">
+    <!-- 顶栏: 压缩/解压模式切换 + 设置 + 确认(运行中变取消) -->
     <header class="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200">
       <div class="flex rounded-lg border border-slate-300 overflow-hidden">
         <button
@@ -24,14 +25,38 @@
           解压
         </button>
       </div>
-      <button
-        id="confirm"
-        data-i18n="header.confirm"
-        disabled
-        class="px-6 py-1.5 rounded-lg bg-blue-600 text-white font-medium enabled:hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-      >
-        确认
-      </button>
+      <div class="flex items-center gap-2">
+        <button
+          id="settings-open"
+          type="button"
+          disabled
+          aria-label="设置"
+          data-i18n-aria-label="settings.open"
+          title="设置"
+          data-i18n-title="settings.open"
+          class="p-1.5 rounded-md text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="w-4 h-4"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+          </svg>
+        </button>
+        <button
+          id="confirm"
+          data-i18n="header.confirm"
+          disabled
+          class="px-6 py-1.5 rounded-lg bg-blue-600 text-white font-medium enabled:hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          确认
+        </button>
+      </div>
     </header>
 
     <!-- 路径区: 点击输入框弹出系统文件夹选择; 整行也是原生拖拽投放区 -->
@@ -285,6 +310,140 @@
         </div>
       </div>
     </div>
+    </div>
+    <!-- /view-main -->
+
+    <!-- 设置页: 边栏 + 内容区; 与主界面同文档切换, 不销毁主界面状态 -->
+    <div id="view-settings" class="hidden flex flex-col flex-1 min-h-0">
+      <header class="flex items-center gap-2 px-4 py-3 bg-white border-b border-slate-200">
+        <button
+          id="settings-back"
+          type="button"
+          aria-label="返回"
+          data-i18n-aria-label="settings.back"
+          title="返回"
+          data-i18n-title="settings.back"
+          class="p-1 rounded-md text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-400"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6" />
+          </svg>
+        </button>
+        <h1 data-i18n="settings.title" class="font-medium text-slate-800">设置</h1>
+      </header>
+
+      <div class="flex flex-1 min-h-0">
+        <nav
+          id="settings-nav"
+          data-i18n-aria-label="settings.nav.label"
+          aria-label="设置导航"
+          class="w-40 shrink-0 border-r border-slate-200 bg-slate-50 p-2 space-y-1"
+        >
+          <button
+            type="button"
+            data-section="general"
+            aria-current="page"
+            data-i18n="settings.nav.general"
+            class="w-full rounded-md px-3 py-2 text-left text-sm bg-slate-100 font-medium text-slate-800"
+          >
+            通用
+          </button>
+          <button
+            type="button"
+            data-section="filters"
+            data-i18n="settings.nav.filters"
+            class="w-full rounded-md px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-100"
+          >
+            文件排除
+          </button>
+        </nav>
+
+        <div class="flex-1 min-w-0 overflow-auto">
+          <section
+            data-panel="general"
+            role="region"
+            aria-labelledby="settings-general-heading"
+            class="p-6"
+          >
+            <h2 id="settings-general-heading" data-i18n="settings.general.heading" class="text-base font-medium text-slate-800">通用</h2>
+            <label class="mt-4 flex items-start gap-2.5 cursor-default">
+              <input
+                id="set-shutdown"
+                type="checkbox"
+                disabled
+                class="mt-0.5 accent-blue-600 disabled:cursor-not-allowed"
+                aria-describedby="set-shutdown-desc"
+              />
+              <span>
+                <span data-i18n="settings.general.shutdown.title" class="block text-sm text-slate-400">压缩完成后关机</span>
+                <span id="set-shutdown-desc" data-i18n="settings.general.shutdown.desc" class="mt-1 block text-xs text-slate-400">
+                  即将支持: 压缩成功后自动关机的能力将在后续版本提供。
+                </span>
+              </span>
+            </label>
+          </section>
+
+          <section
+            data-panel="filters"
+            role="region"
+            aria-labelledby="settings-filters-heading"
+            class="hidden p-6"
+          >
+            <h2 id="settings-filters-heading" data-i18n="settings.filters.heading" class="text-base font-medium text-slate-800">文件排除</h2>
+            <p data-i18n="settings.filters.intro" class="mt-1 text-xs leading-relaxed text-slate-500">
+              策略在压缩扫描时生效; 修改后会在关闭设置页时重新扫描当前源文件夹。被排除的条目仍会显示, 但默认不勾选。单次任务仍可在主界面的「高级」中添加自定义模式。
+            </p>
+
+            <ul class="mt-4 divide-y divide-slate-100 rounded-lg border border-slate-200">
+              <li class="flex items-start justify-between gap-4 px-4 py-4">
+                <div class="min-w-0">
+                  <div id="policy-os-hidden-title" data-i18n="settings.filters.osHidden.title" class="text-sm font-medium text-slate-700">操作系统隐藏文件</div>
+                  <p id="policy-os-hidden-desc" data-i18n="settings.filters.osHidden.desc" class="mt-1 text-xs leading-relaxed text-slate-500">
+                    排除操作系统标记为隐藏的文件与目录: Windows 为隐藏属性, Linux/macOS 为以 . 开头的名字(含 .git、.env), 以及 Thumbs.db、desktop.ini 等系统元数据。
+                  </p>
+                </div>
+                <label class="relative inline-flex shrink-0 cursor-pointer items-center">
+                  <input
+                    id="policy-os-hidden"
+                    data-policy="os-hidden"
+                    type="checkbox"
+                    role="switch"
+                    aria-labelledby="policy-os-hidden-title"
+                    aria-describedby="policy-os-hidden-desc"
+                    class="peer sr-only"
+                  />
+                  <span class="h-5 w-9 rounded-full bg-slate-300 transition-colors peer-checked:bg-blue-600 peer-focus-visible:ring-2 peer-focus-visible:ring-blue-400"></span>
+                  <span class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform peer-checked:translate-x-4"></span>
+                </label>
+              </li>
+
+              <li class="flex items-start justify-between gap-4 px-4 py-4">
+                <div class="min-w-0">
+                  <div id="policy-lang-temp-title" data-i18n="settings.filters.langTemp.title" class="text-sm font-medium text-slate-700">编程语言的临时文件</div>
+                  <p id="policy-lang-temp-desc" data-i18n="settings.filters.langTemp.desc" class="mt-1 text-xs leading-relaxed text-slate-500">
+                    排除编程语言与构建工具生成的缓存和临时文件, 例如 JavaScript 的 node_modules、Python 的 __pycache__、Java 的 .gradle 与 *.class。
+                  </p>
+                </div>
+                <label class="relative inline-flex shrink-0 cursor-pointer items-center">
+                  <input
+                    id="policy-lang-temp"
+                    data-policy="lang-temp"
+                    type="checkbox"
+                    role="switch"
+                    aria-labelledby="policy-lang-temp-title"
+                    aria-describedby="policy-lang-temp-desc"
+                    class="peer sr-only"
+                  />
+                  <span class="h-5 w-9 rounded-full bg-slate-300 transition-colors peer-checked:bg-blue-600 peer-focus-visible:ring-2 peer-focus-visible:ring-blue-400"></span>
+                  <span class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform peer-checked:translate-x-4"></span>
+                </label>
+              </li>
+            </ul>
+          </section>
+        </div>
+      </div>
+    </div>
+    <!-- /view-settings -->
 
     <!-- 状态栏 -->
     <footer class="flex items-center justify-between px-4 py-1.5 bg-white border-t border-slate-200 text-xs text-slate-500">

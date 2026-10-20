@@ -28,6 +28,7 @@ pub mod compress;
 pub mod doctor;
 pub mod exclude;
 pub mod extract;
+pub mod filter;
 pub mod naming;
 pub mod packaging;
 pub mod progress;
@@ -42,6 +43,10 @@ pub use exclude::{ExcludeReason, ExcludeRules, ExcludedEntry, validate_patterns}
 pub use extract::{
     ExtractGroup, ExtractReport, ExtractScan, MetaFile, ScanIssue, extract, extract_prepared,
     scan_groups,
+};
+pub use filter::{
+    FilterSettings, LANG_TEMP_PATTERNS, OS_METADATA_PATTERNS, POLICY_LANG_TEMP, POLICY_OS_HIDDEN,
+    default_enabled_policies, effective_rules, is_known_policy, normalize_enabled_policies,
 };
 pub use packaging::{
     PackagePlanSet, PackageReport, PackagedArchive, PlannedPackage, compress_packages,

@@ -105,8 +105,18 @@ fn match_seg(pat: &[u8], text: &[u8]) -> bool {
 /// - 不含 `/`:与末段(basename)比 → 任意深度
 /// - 含 `/`:整条锚定,逐段比较(`*`/`?` 不跨段);`prefix/**` = prefix 自身或其下
 pub fn matches_pattern(pattern: &str, rel: &str) -> bool {
-    let pat = pattern.replace('\\', "/");
-    let rel = rel.replace('\\', "/");
+    // 零分配 fast path: scan 构造的 rel 与内建模式都不含 `\`, 避免每个文件
+    // 每条模式都 replace 出两个 String(默认开启 lang-temp 后模式数 ~40)。
+    let pat = if pattern.contains('\\') {
+        std::borrow::Cow::Owned(pattern.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(pattern)
+    };
+    let rel = if rel.contains('\\') {
+        std::borrow::Cow::Owned(rel.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(rel)
+    };
     if !pat.contains('/') {
         return rel
             .rsplit('/')

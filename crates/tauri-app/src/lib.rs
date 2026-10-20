@@ -1,10 +1,10 @@
 //! Tauri 外壳:把 `zip-tool-core` 的能力通过 `#[tauri::command]` 暴露给前端。
-//! 交互规格见 _docs/ui-backend.md, 命令面 5 个:
+//! 交互规格见 _docs/ui-backend.md, 命令面:
 //! - `scan`: 只扫描不执行, 结果缓存在外壳([`ScanContext`] 保鲜)
-//! - `compress` / `extract_archive`: 按勾选名单筛选缓存结果, 走 core 分阶段 API
-//!   (plan + compress_entries / extract_prepared), **不重复扫描**
+//! - `plan_packages` / `compress` / `extract_archive`: 打包方案与按名单执行
 //! - `validate_dir`: 拖拽/选择路径校验(必须是已存在的文件夹, 不改变 core 预检职责)
 //! - `cancel_current`: 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续)
+//! - `load_settings` / `save_settings`: `settings.json` 读写(见 _docs/filtering_rules.md)
 //!
 //! 命令在 `spawn_blocking` 中调 core, 进度经 `tauri::ipc::Channel` 推给前端;
 //! scan/compress/extract 单任务互斥, 任务结束释放忙闲标志并清空取消旗标。
@@ -21,11 +21,17 @@ use tauri::Manager;
 use tauri::State;
 use tauri::ipc::Channel;
 
+mod settings;
+
+use tauri::AppHandle;
+
 use zip_tool_core::strategy::{self, PackageKind, StrategyItem, StrategyParams};
 use zip_tool_core::{
     CancelFlag, Entry, EntryKind, ExcludeReason, ExcludeRules, ExtractGroup, ExtractScan, Format,
     Options, Phase, Progress, ScanReport,
 };
+
+use settings::SettingsLoadResult;
 
 const POISONED: &str = "state poisoned";
 const EXPIRED: &str = "扫描结果已过期, 请重新选择源文件夹";
@@ -129,6 +135,8 @@ struct CompressOptions {
     level: Option<u8>,
     /// 排除模式(高级区输入);None = 无用户模式
     excludes: Option<Vec<String>>,
+    /// 排除策略; None = 默认策略(两种都开)
+    filters: Option<settings::FilterSettingsDto>,
     /// 压缩成功后结构校验;缺省 true(旧客户端不带该字段也保持默认开启)
     #[serde(default = "default_true")]
     verify: bool,
@@ -307,25 +315,17 @@ fn to_core_options(o: CompressOptions) -> Result<Options, String> {
         Some(Err(e)) => return Err(e),
         None => None,
     };
-    // 宁停不错: 用户模式非法即拒(与 CLI exit 2 同语义)
-    let patterns = match o.excludes {
-        None => Vec::new(),
-        Some(v) => match zip_tool_core::validate_patterns(&v) {
-            Ok(()) => v,
-            Err(e) => return Err(format!("排除模式无效: {e}")),
-        },
-    };
+    // 策略 + 用户模式 → 既有 ExcludeRules; 非法模式在此拒绝(与 CLI exit 2 同语义)
+    let filters = o.filters.unwrap_or_default();
+    let rules = zip_tool_core::effective_rules(&filters.to_core(), &o.excludes.unwrap_or_default())
+        .map_err(|e| format!("排除模式无效: {e}"))?;
     Ok(Options {
         split_size,
         password: non_empty(o.password),
         random_name: o.random_name,
         format,
         level,
-        exclude: ExcludeRules {
-            // UI 恒定排除隐藏(被标行显示不勾选; 勾选了也尊重用户)
-            include_hidden: false,
-            patterns,
-        },
+        exclude: rules,
         verify: o.verify,
     })
 }
@@ -657,6 +657,7 @@ fn extract_scan_dto(s: &ExtractScan) -> ScanResult {
 async fn scan(
     mode: String,
     path: String,
+    filters: Option<settings::FilterSettingsDto>,
     excludes: Option<Vec<String>>,
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
@@ -666,17 +667,10 @@ async fn scan(
         "extract" => "extract",
         other => return Err(format!("未知模式: {other}")),
     };
-    // 宁停不错: 非法模式在占忙之前拒绝
-    if let Some(pats) = &excludes
-        && let Err(e) = zip_tool_core::validate_patterns(pats)
-    {
-        return Err(format!("排除模式无效: {e}"));
-    }
-    // UI 恒定排除隐藏(被标行显示不勾选)
-    let rules = ExcludeRules {
-        include_hidden: false,
-        patterns: excludes.unwrap_or_default(),
-    };
+    // 宁停不错: 策略 + 用户模式在占忙之前展开并校验
+    let filters = filters.unwrap_or_default();
+    let rules = zip_tool_core::effective_rules(&filters.to_core(), &excludes.unwrap_or_default())
+        .map_err(|e| format!("排除模式无效: {e}"))?;
     let p = PathBuf::from(&path);
     let src_for_ctx = p.clone();
     acquire_busy(&state.busy, "scan")?;
@@ -990,6 +984,37 @@ fn wait_until_idle(busy: &Mutex<Option<&'static str>>, timeout: Duration) -> boo
     }
 }
 
+/// 读取设置: `app_config_dir()/settings.json`; 失败回退默认值并带警告。
+#[tauri::command]
+async fn load_settings(app: AppHandle) -> Result<SettingsLoadResult, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (file, warnings) = crate::settings::load_from(&dir);
+        SettingsLoadResult {
+            settings: file.to_dto(),
+            warnings,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 保存设置: 归一化后落盘, 返回 canonical DTO(未知策略 id 被丢弃)。
+#[tauri::command]
+async fn save_settings(
+    app: AppHandle,
+    settings: crate::settings::SettingsDto,
+) -> Result<crate::settings::SettingsDto, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let canonical = crate::settings::canonicalize(settings);
+        crate::settings::save_to(&dir, &canonical).map_err(|e| e.to_string())?;
+        Ok::<_, String>(canonical.to_dto())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1002,7 +1027,9 @@ pub fn run() {
             compress,
             extract_archive,
             validate_dir,
-            cancel_current
+            cancel_current,
+            load_settings,
+            save_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1280,6 +1307,7 @@ mod tests {
             format: None,
             level: None,
             excludes: None,
+            filters: None,
             verify: true,
             packaging: None,
         };
@@ -1320,22 +1348,77 @@ mod tests {
             format: None,
             level: None,
             excludes: Some(vec!["Thumbs.db".into(), "sub/*.log".into()]),
+            filters: None,
             verify: true,
             packaging: None,
         };
         let core = to_core_options(base()).unwrap();
-        assert_eq!(core.exclude.patterns.len(), 2);
-        assert!(!core.exclude.include_hidden, "UI 恒定排除隐藏");
+        assert!(core.exclude.patterns.contains(&"sub/*.log".to_string()));
+        assert!(core.exclude.patterns.contains(&"node_modules".to_string()));
+        assert!(!core.exclude.include_hidden, "默认 os-hidden 开");
 
         // 非法模式拒绝
         let mut o = base();
         o.excludes = Some(vec!["a/**b".into()]);
         assert!(to_core_options(o).is_err());
 
-        // 缺省 = 无用户模式
+        // 缺省用户模式 = 只含默认策略展开的模式
         let mut o = base();
         o.excludes = None;
-        assert!(to_core_options(o).unwrap().exclude.patterns.is_empty());
+        let core = to_core_options(o).unwrap();
+        assert!(!core.exclude.patterns.contains(&"sub/*.log".to_string()));
+        assert!(core.exclude.patterns.contains(&"node_modules".to_string()));
+    }
+
+    #[test]
+    fn to_core_options_maps_strategy_filters() {
+        let base = |enabled: &[&str]| CompressOptions {
+            split_size: None,
+            password: None,
+            random_name: false,
+            format: None,
+            level: None,
+            excludes: None,
+            filters: Some(settings::FilterSettingsDto {
+                enabled_policies: enabled.iter().map(|s| (*s).to_string()).collect(),
+            }),
+            verify: true,
+            packaging: None,
+        };
+
+        let os_only = to_core_options(base(&["os-hidden"])).unwrap();
+        assert!(!os_only.exclude.include_hidden);
+        assert!(os_only.exclude.patterns.contains(&"Thumbs.db".to_string()));
+        assert!(
+            !os_only
+                .exclude
+                .patterns
+                .contains(&"node_modules".to_string())
+        );
+
+        let lang_only = to_core_options(base(&["lang-temp"])).unwrap();
+        assert!(lang_only.exclude.include_hidden, "os-hidden 关 = 包含隐藏");
+        assert!(
+            lang_only
+                .exclude
+                .patterns
+                .contains(&"node_modules".to_string())
+        );
+        assert!(
+            !lang_only
+                .exclude
+                .patterns
+                .contains(&"Thumbs.db".to_string())
+        );
+
+        let none = to_core_options(base(&[])).unwrap();
+        assert!(none.exclude.include_hidden);
+        assert!(none.exclude.patterns.is_empty());
+
+        // 未知 id 被忽略 → 等同于全关
+        let unknown = to_core_options(base(&["nope"])).unwrap();
+        assert!(unknown.exclude.include_hidden);
+        assert!(unknown.exclude.patterns.is_empty());
     }
 
     #[test]

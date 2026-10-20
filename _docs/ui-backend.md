@@ -50,23 +50,26 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 
 ## 3. 命令面
 
-收敛为 6 个命令(`invoke_handler` 注册面):
+收敛为 8 个命令(`invoke_handler` 注册面):
 
 | 命令 | 签名(前端视角) | 作用 |
 |---|---|---|
-| `scan` | `(mode, path, on_progress) → ScanResult` | 只扫描不执行, 选源后渲染表格 |
+| `scan` | `(mode, path, filters?, excludes?, on_progress) → ScanResult` | 只扫描不执行, 选源后渲染表格 |
 | `plan_packages` | `(src, entries, packaging) → PlanResult` | 纯内存计算可审核打包方案; 不扫描/不压缩/不占忙锁 |
 | `compress` | `(src, dst, entries, options, planId?, on_progress) → CompressResult` | 批量压缩勾选项; 有 packaging 时必须带 planId |
 | `extract_archive` | `(src, dst, entries, options, on_progress) → ExtractResult` | 批量解压勾选项 |
 | `validate_dir` | `(path) → Result<(), String>` | 拖拽/选择路径校验: 必须是已存在的文件夹 |
 | `cancel_current` | `()` | 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续) |
+| `load_settings` | `() → { settings, warnings }` | 读取 `app_config_dir()/settings.json`; 损坏/过新回退默认值并带警告 |
+| `save_settings` | `(settings) → Settings` | 归一化并落盘(未知策略 id 丢弃), 返回 canonical DTO |
 
 `plan_packages` / `planId` / `packaging` DTO 的完整契约见 [plan-preview.md](plan-preview.md)。旧客户端不传 `packaging` 时 `compress` 走原逐条目路径, `planId` 可省略。
 
 ### 3.1 scan
 
 - `mode`: `"compress" | "extract"`, 与 UI 顶栏模式一致; `path`: 源文件夹(系统对话框返回值)
-- `excludes?: string[]`(仅 compress 模式, 可选): 排除模式列表, 透传 `ExcludeRules.patterns`(恒定 `include_hidden=false`); 非法模式返回错误字符串, 不开工
+- `filters?: { enabledPolicies: string[] }`(仅 compress 模式, 可选): 排除策略 id; 缺省 = 默认策略(两种都开); 壳层用 `filter::effective_rules` 展开
+- `excludes?: string[]`(仅 compress 模式, 可选): 自定义排除模式, 与策略并集; 非法模式返回错误字符串, 不开工
 - compress → `core::scan_dir`(递归统计大小, `Phase::Scanning` 进度经 Channel 推送, 状态栏显示 `i/n`)
 - extract → `core::scan_groups`(顶层分组, 量小无需进度); 每组补大小(组内各卷大小之和), mapping.csv 作为元数据行返回
 - 错误透传 core: 路径不存在 / 非目录 → `InputNotFound`; 空目录 → `NoEntries`; 无包 → `NoArchives`
@@ -75,7 +78,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 ### 3.2 compress / 3.3 extract_archive
 
 - `entries: string[]`: 勾选名单, 取值必须是 scan 返回的**原样 `name`**(compress = 条目名, extract = 入口卷名), 严格精确匹配
-- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean, excludes?: string[], verify: boolean, packaging?: PackagingOptions }`(excludes 与本次 scan 传参比对保鲜, 见 5.4; verify 缺省 true); `options`(解压): `{ password: string | null, force: boolean }`
+- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean, filters?: { enabledPolicies: string[] }, excludes?: string[], verify: boolean, packaging?: PackagingOptions }`(filters/excludes 与本次 scan 展开后的规则比对保鲜, 见 5.4; verify 缺省 true); `options`(解压): `{ password: string | null, force: boolean }`
 - `packaging` 存在时 `compress` 走包级策略路径, 必须带 `planId`; 壳层重算方案并比对, 不一致返回"打包方案已变化, 请重新审核". `splitSize` 保留为旧路径兼容字段, 包级路径以 `packaging.splitAbove` 为准
 - 壳层转换: `splitSize` / packaging 阈值经 `parse_size`("2g" / "500m" / 字节数), 失败 → Err 提示; `password` 空串按 `None`(不加密)
 - 执行路径见 5.3/5.4(壳层用 ScanContext 中缓存的扫描结果, 按名单筛选后调 core 分阶段 API; **不重扫**)
@@ -170,7 +173,7 @@ extract 无此问题: scan_groups 只列顶层(便宜), 真正的清单(list)与
 
 - 壳层 `AppState` 增加 `scan: Mutex<Option<ScanContext>>`; `ScanContext { mode, src, data: ScanReport | ExtractScan }`, 由 scan 命令写入
 - compress / extract_archive 进入时校验: `mode` 与命令一致且 `src` 与传入路径一致, 否则 `Err("扫描结果已过期, 请重新选择源文件夹")`
-- compress 模式还比对扫描时的排除规则(excludes), 与本次 compress 传参不一致同样按过期拒绝 —— 修改模式输入后必须重扫
+- compress 模式还比对**展开后的排除规则**: `filters`(策略 id)+ `excludes`(自定义模式)经 `filter::effective_rules` 展开为 `ExcludeRules`, 与扫描时缓存不一致即按过期拒绝 —— 修改策略或模式输入后必须重扫
 - UI 传来的名单在壳层与缓存结果**严格匹配**(未知名同样按过期拒绝)—— 宁停不错
 - UI 的模式切换 / 重选源已在 7.4 作废前端状态; 壳层 ScanContext 在下次 scan 时整体覆盖
 
@@ -271,9 +274,12 @@ meta / warning 行:      恒定不变
 | 压缩 | 压缩成功后校验(checkbox) | 开 | 压缩完成后只读包头/中央目录做结构检查; 关闭则跳过(性能敏感场景), 语义见 compress.md 6.8 |
 | 压缩 | 模式预设(buttons, 已实现) | 最大兼容性 | zip+后端默认强度(不传 level) / 平衡=7z+强度5; 手改底层参数变"自定义"(见 compress-modes.md) |
 | 压缩 | 高级(checkbox, 已实现) | 关 | 展开格式(zip/7z)与强度(留空=后端默认, 0-9)微调; 模式预设隐藏 |
-| 压缩 | 排除模式输入(text, 高级区) | 空 = 不排除 | 多行/逗号分隔; scan 与 compress 都透传 `excludes`(恒定 `include_hidden=false`); 被标行默认不勾选, 可手动勾选 |
+| 压缩 | 排除模式输入(text, 高级区) | 空 = 不排除 | 多行/逗号分隔; scan 与 compress 都透传 `excludes`, 与设置页策略并集; 被标行默认不勾选, 可手动勾选 |
 | 解压 | 密码(password) | 空 = 不加密 | 整批一个密码, 与 compress 对称 |
 | 解压 | 覆盖已有文件(checkbox) | 关 | 宁停不错, 与 CLI `--force` 默认一致 |
+| 设置页 | 边栏(通用 / 文件排除) | 通用 | 齿轮打开, 与主界面同文档视图切换; 运行/扫描中入口禁用 |
+| 设置页 | 文件排除策略(Switch) | 两项都开 | `os-hidden` / `lang-temp`; 即时保存, 失败回滚; 修改后关闭设置页自动重扫压缩源 |
+| 设置页 | 压缩完成后关机(checkbox) | 关 | 本期仅占位: `disabled` + 「即将支持」; 字段保留, 实际行为后续 ticket |
 
 压缩模式下密码非空时, 选项行按格式提示加密语义(zip → ZipCrypto 弱加密 / 7z → AES-256), 帮助用户理解两种格式的安全差异.
 
@@ -297,8 +303,8 @@ meta / warning 行:      恒定不变
 
 - **core 单测(无外部命令)**: plan 在筛选集上的各预检变体; compress_entries 存在性复核(删条目 → EntryMissing、整批不开始); scan_groups 的 ExtractScan(size 合计 / meta 行 / issues / 排序不变); extract_prepared 组筛选后 B2 语义; EntryMissing Display
 - **编排测试(注入假后端)**: compress_dir 组合 = plan + compress_entries 的等价性(现有用例不改即应全绿, 是拆分正确性的回归网); extract 同理
-- **壳层单测**: DTO 映射(ScanItem 三种 status / warnings 透传); ScanContext 失配与未知名单拒绝; 忙闲互斥; parse_size 错误路径; to_core_options 模式校验; 规则不一致 = 过期; excluded 文案映射
-- **UI 单测(node --test + jsdom, `npm test`)**: 前后端契约 + 界面行为。关键设计——**表面真实、传输造假**: `window.__TAURI__` 挂真实 `@tauri-apps/api` / `@tauri-apps/plugin-dialog` 包对象(全局 bundle 就是这些模块), 只 mock 最底层 `__TAURI_INTERNALS__`; 因此 UI 引用不存在的全局 API 路径在测试期必然 TypeError(抓过实际案例: `__TAURI__.ipc.Channel`, Tauri 2 的 Channel 在 core 命名空间), 命令名/参数形状/`__CHANNEL__:<id>` 序列化/进度回放协议(`{index, message}` 对象)全按真实链路校验。原生拖拽同样使用真实 `webview` API, 单测回放 enter / over / drop / leave 事件并 mock `elementFromPoint` 验证落点。UI 逻辑独立为 `ui/app.js`(index.html 外链引用)
+- **壳层单测**: DTO 映射(ScanItem 三种 status / warnings 透传); ScanContext 失配与未知名单拒绝; 忙闲互斥; parse_size 错误路径; to_core_options 模式校验; 规则不一致 = 过期; excluded 文案映射; 设置文件读写/损坏回退/版本过新/未知策略归一化; `filters` 展开矩阵
+- **UI 单测(node --test + jsdom, `npm test`)**: 前后端契约 + 界面行为。关键设计——**表面真实、传输造假**: `window.__TAURI__` 挂真实 `@tauri-apps/api` / `@tauri-apps/plugin-dialog` 包对象(全局 bundle 就是这些模块), 只 mock 最底层 `__TAURI_INTERNALS__`; 因此 UI 引用不存在的全局 API 路径在测试期必然 TypeError(抓过实际案例: `__TAURI__.ipc.Channel`, Tauri 2 的 Channel 在 core 命名空间), 命令名/参数形状/`__CHANNEL__:<id>` 序列化/进度回放协议(`{index, message}` 对象)全按真实链路校验。原生拖拽同样使用真实 `webview` API, 单测回放 enter / over / drop / leave 事件并 mock `elementFromPoint` 验证落点。UI 逻辑独立为 `ui/app.js`(index.html 外链引用)。设置页用例覆盖: 打开/侧栏切换、策略保存参数、保存失败回滚、策略变更后关闭设置自动重扫、关机占位置灰与 `true` 值保留、五语言静态文案
 - **UI 走查(chrome-devtools, mock 模式)**: 状态机全迁移、行状态推导(虚拟事件序列驱动)、取消变形按钮、选项行切换
 - **实机验证(用户)**: `cargo run -p zip-tool-tauri` 走通 scan → 表格 → 确认 → 进度 → 取消 / 完成全链路(命令真到 core 与后端工具)
 - **回归**: workspace 全绿; CLI 与 E2E 用例零改动(compress_dir / extract 签名不变)
