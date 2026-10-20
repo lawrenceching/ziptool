@@ -14,17 +14,40 @@ pub const POLICY_OS_HIDDEN: &str = "os-hidden";
 /// 编程语言临时文件策略 id
 pub const POLICY_LANG_TEMP: &str = "lang-temp";
 
-/// OS 元数据模式(跨平台补齐; 与 `os-hidden` 一同启用)。
+/// OS 元数据模式(与 `os-hidden` 一同启用)。
 ///
-/// Unix 的 `.` 前缀隐藏与 Windows 的隐藏属性由 `ExcludeRules.include_hidden`
-/// 承载; 这里只补「在另一平台复制磁盘时, 对方隐藏口径不生效」的固定名字。
+/// 只列**系统自身生成**的元数据名称, 不按 `.` 前缀批量排除:
+/// 用户可能创建 `.env` / `.git` / `.config`, 这些必须保留。
+/// Windows 的隐藏属性由 `ExcludeRules.include_hidden` 承载; Unix 没有可移植
+/// 的文件隐藏属性, 只靠这里的元数据名单。
 pub const OS_METADATA_PATTERNS: &[&str] = &[
+    // Windows
     "Thumbs.db",
     "ehthumbs.db",
     "desktop.ini",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    // macOS
     ".DS_Store",
     "._*",
     "__MACOSX",
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+    ".TemporaryItems",
+    ".apdisk",
+    ".VolumeIcon.icns",
+    ".com.apple.timemachine.donotpresent",
+    ".DocumentRevisions-V100",
+    ".PKInstallSandboxManager",
+    ".MobileBackups",
+    // Linux
+    "lost+found",
+    ".Trash",
+    ".Trash-*",
+    ".directory",
+    ".fuse_hidden*",
+    ".nfs*",
 ];
 
 /// 编程语言 / 构建工具临时物(`lang-temp`)。
@@ -121,6 +144,7 @@ pub fn normalize_enabled_policies(ids: &[String]) -> Vec<String> {
 ///
 /// 顺序固定为 `OS_METADATA_PATTERNS` → `LANG_TEMP_PATTERNS` → 自定义模式,
 /// 保证 `ScanContext.rules_eq` 可比较; 去重键是斜杠归一后的精确值。
+/// `include_hidden` 只影响 Windows 隐藏属性; Unix 的 `.` 前缀不会被本策略排除。
 pub fn effective_rules(
     settings: &FilterSettings,
     custom: &[String],
@@ -144,6 +168,7 @@ pub fn effective_rules(
 
     validate_patterns(&patterns)?;
     Ok(ExcludeRules {
+        // Windows 隐藏属性开关; Unix 没有可移植属性, 该值不产生 `.*` 模式
         include_hidden: !os_hidden,
         patterns,
     })
@@ -165,6 +190,42 @@ mod tests {
             .map(|p| (*p).to_string())
             .collect();
         matches_patterns(&patterns, name)
+    }
+
+    fn os_matches(name: &str) -> Option<String> {
+        let patterns: Vec<String> = OS_METADATA_PATTERNS
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect();
+        matches_patterns(&patterns, name)
+    }
+
+    #[test]
+    fn os_metadata_keeps_user_dotfiles() {
+        for name in [
+            ".env",
+            ".git",
+            ".git/config",
+            ".gitignore",
+            ".ssh",
+            ".config",
+            ".bashrc",
+            "important.txt",
+        ] {
+            assert!(os_matches(name).is_none(), "不应排除用户文件 {name}");
+        }
+        for name in [
+            "Thumbs.db",
+            "desktop.ini",
+            ".DS_Store",
+            ".Trashes",
+            ".Spotlight-V100",
+            "lost+found",
+            ".Trash-1000",
+            "System Volume Information",
+        ] {
+            assert!(os_matches(name).is_some(), "应排除系统元数据 {name}");
+        }
     }
 
     #[test]

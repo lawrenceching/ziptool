@@ -661,41 +661,37 @@ fn compress_7z_split_password_random_then_tool_extracts_back() {
     }
 }
 
-/// 排除规则 e2e: 预埋隐藏文件与垃圾文件, 验证
-/// 1) 默认排除隐藏(Windows=attrib +H, Unix=. 前缀)  2) --include-hidden-files 关闭
-/// 3) --exclude 模式(顶层 + 树内)与隐藏集叠加
+/// 排除规则 e2e: 预埋系统元数据 / 用户点文件, 验证
+/// 1) 默认排除系统元数据(Windows 隐藏属性 + Thumbs.db/.DS_Store 名单; `.` 前缀不排)
+/// 2) --include-hidden-files 关闭  3) --exclude 模式与默认元数据叠加
 #[test]
 fn compress_exclusion_rules_matrix() {
     let fx = fixture("excl");
     let (inp, out1) = (fx.root.join("in"), fx.root.join("out1"));
     let (out2, out3) = (fx.root.join("out2"), fx.root.join("out3"));
 
-    // 垃圾文件(*.tmp 模式可命中) + 隐藏文件(OS 原生口径); 相对名供还原侧断言
+    // 垃圾文件(*.tmp 模式可命中) + 系统元数据; 相对名供还原侧断言
     fill(&inp.join("Novel/notes.tmp"), 1_000, 3);
     let hidden_top = ".DS_Store".to_string();
-    let hidden_inner = if cfg!(windows) {
-        // Windows 上 . 开头不特殊, 置文件系统隐藏属性
-        fill(inp.join(&hidden_top).as_path(), 1_000, 7);
-        let st = Command::new("attrib")
-            .args(["+H", inp.join(&hidden_top).to_str().unwrap()])
-            .status()
-            .unwrap();
-        assert!(st.success());
-        let p = inp.join("Novel/Thumbs.db");
-        fill(p.as_path(), 1_000, 5);
-        let st = Command::new("attrib")
-            .args(["+H", p.to_str().unwrap()])
-            .status()
-            .unwrap();
-        assert!(st.success());
-        "Novel/Thumbs.db".to_string()
-    } else {
-        fill(inp.join(&hidden_top).as_path(), 1_000, 7);
-        fill(&inp.join("Novel/.DS_Store"), 1_000, 5);
-        "Novel/.DS_Store".to_string()
-    };
+    let hidden_inner = "Novel/Thumbs.db".to_string();
+    fill(inp.join(&hidden_top).as_path(), 1_000, 7);
+    fill(&inp.join(&hidden_inner), 1_000, 5);
+    if cfg!(windows) {
+        // Windows 上同时置隐藏属性, 覆盖属性路径; 元数据名单在非 Windows 上生效
+        for p in [inp.join(&hidden_top), inp.join(&hidden_inner)] {
+            let st = Command::new("attrib")
+                .args(["+H", p.to_str().unwrap()])
+                .status()
+                .unwrap();
+            assert!(st.success());
+        }
+    }
+    // 用户自建点文件不是系统隐藏, 默认必须保留
+    let user_dot = ".env".to_string();
+    fill(&inp.join(&user_dot), 1_000, 9);
+    fill(&inp.join("Novel/.gitignore"), 1_000, 11);
 
-    // 1) 默认: 隐藏被排除, 其余照常 roundtrip
+    // 1) 默认: 系统元数据被排除, 用户点文件照常 roundtrip
     let r = run_tool(&[
         "compress",
         "-i",
@@ -705,12 +701,17 @@ fn compress_exclusion_rules_matrix() {
     ]);
     assert!(r.ok, "压缩失败:\n{}", r.stderr);
     assert!(
-        r.stderr.contains("excluded (hidden)"),
-        "应打印隐藏排除提示: {}",
+        r.stderr.contains("excluded"),
+        "应打印排除提示: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("excluded (hidden): .env"),
+        ".env 不应按隐藏排除: {}",
         r.stderr
     );
     let restore1 = fx.root.join("restore1");
-    for name in ["Novel", "media", "photo.jpg"] {
+    for name in ["Novel", "media", "photo.jpg", ".env"] {
         extract_archive(&out1.join(format!("{name}.zip")), &restore1, None);
     }
     assert_file_eq(
@@ -719,14 +720,19 @@ fn compress_exclusion_rules_matrix() {
     );
     assert!(
         !restore1.join(&hidden_top).exists() && !restore1.join(&hidden_inner).exists(),
-        "隐藏文件不应进包(顶层与树内)"
+        "系统元数据不应进包(顶层与树内)"
+    );
+    assert_file_eq(&inp.join(&user_dot), &restore1.join(&user_dot));
+    assert_file_eq(
+        &inp.join("Novel/.gitignore"),
+        &restore1.join("Novel/.gitignore"),
     );
     assert!(
         restore1.join("Novel/notes.tmp").exists(),
         "未命中模式的垃圾文件默认保留"
     );
 
-    // 2) --include-hidden-files: 隐藏回来
+    // 2) --include-hidden-files: 系统元数据回来
     let r = run_tool(&[
         "compress",
         "-i",
@@ -743,11 +749,12 @@ fn compress_exclusion_rules_matrix() {
     );
     let restore2 = fx.root.join("restore2");
     // .DS_Store 在 include 模式下是独立顶层条目(产出自己的包), 一并还原
-    for name in ["Novel", "media", "photo.jpg", ".DS_Store"] {
+    for name in ["Novel", "media", "photo.jpg", ".DS_Store", ".env"] {
         extract_archive(&out2.join(format!("{name}.zip")), &restore2, None);
     }
     assert_file_eq(&inp.join(&hidden_top), &restore2.join(&hidden_top));
     assert_file_eq(&inp.join(&hidden_inner), &restore2.join(&hidden_inner));
+    assert_file_eq(&inp.join(&user_dot), &restore2.join(&user_dot));
 
     // 3) --exclude 与隐藏集叠加: 树内 *.tmp + 顶层 photo.jpg
     let r = run_tool(&[

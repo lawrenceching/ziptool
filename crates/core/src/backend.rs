@@ -1161,7 +1161,7 @@ mod tests {
             split_size: split,
             password: password.map(String::from),
             random_name: false,
-            // 命令形状测试不涉排除; Unix 隐藏注入由专门用例覆盖
+            // 命令形状测试不涉排除; Unix 没有基于名字的隐藏开关
             exclude: crate::ExcludeRules {
                 include_hidden: true,
                 patterns: vec![],
@@ -1216,7 +1216,7 @@ mod tests {
     fn zip_command_appends_exclude_switches_after_entry_name() {
         // Info-ZIP 语法: -x 必须在条目名之后(zip -r out.zip A -x pat...)
         let mut o = opts_fmt(Format::Zip, None);
-        o.exclude.include_hidden = true; // 用户模式形状与平台无关; Unix 隐藏注入另测
+        o.exclude.include_hidden = true; // 用户模式形状与平台无关
         o.exclude.patterns = vec!["Thumbs.db".into(), "sub/*.log".into()];
         let cmd = Backend::Zip
             .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
@@ -1266,7 +1266,7 @@ mod tests {
     #[test]
     fn sevenzip_command_emits_exclude_before_separator() {
         let mut o = opts_fmt(Format::SevenZ, None);
-        o.exclude.include_hidden = true; // 用户模式形状与平台无关; Unix 隐藏注入另测
+        o.exclude.include_hidden = true; // 用户模式形状与平台无关
         o.exclude.patterns = vec!["Thumbs.db".into(), "sub/*.log".into()];
         let cmd = Backend::SevenZip
             .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o, &[])
@@ -1328,8 +1328,8 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn unix_hidden_default_set_becomes_dot_star_pattern() {
-        // 默认(include_hidden=false)注入统一隐藏模式
+    fn unix_default_has_no_name_based_hidden_switches() {
+        // Unix 没有可移植的文件隐藏属性; `.` 前缀不是隐藏, 不生成 `.*` 开关。
         let cmd = Backend::Zip
             .compress_command(
                 Path::new("/in"),
@@ -1338,16 +1338,6 @@ mod tests {
                 &opts_fmt(Format::Zip, None),
                 &[],
             )
-            .unwrap();
-        assert_eq!(
-            args_of(&cmd),
-            ["-r", "/out/A.zip", "A", "-x", "*/.*", "-x", "*/.*/*"]
-        );
-        // include_hidden=true: 无任何隐藏开关
-        let mut o = opts_fmt(Format::Zip, None);
-        o.exclude.include_hidden = true;
-        let cmd = Backend::Zip
-            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
             .unwrap();
         assert_eq!(args_of(&cmd), ["-r", "/out/A.zip", "A"]);
     }
@@ -1383,7 +1373,7 @@ mod tests {
     #[test]
     fn sevenzip_command_7z_format_emits_lzma2() {
         let mut o = opts_fmt(Format::SevenZ, None);
-        o.exclude.include_hidden = true; // 命令形状测试不涉排除; Unix 隐藏注入另测
+        o.exclude.include_hidden = true; // 命令形状测试不涉排除
         let cmd = Backend::SevenZip
             .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o, &[])
             .unwrap();
@@ -1410,7 +1400,7 @@ mod tests {
         let mut o = opts_fmt(Format::SevenZ, Some(9));
         o.split_size = Some(2 * 1024 * 1024 * 1024);
         o.password = Some("pw".into());
-        o.exclude.include_hidden = true; // 命令形状测试不涉排除; Unix 隐藏注入另测
+        o.exclude.include_hidden = true; // 命令形状测试不涉排除
         let cmd = Backend::SevenZip
             .compress_command(Path::new("D:/data"), "B", Path::new("E:/out/B.7z"), &o, &[])
             .unwrap();

@@ -1,7 +1,8 @@
 # 设置页面与文件排除策略技术方案
 
 > 状态: 已实现(2026-10-20, P0–P6); 决策 D-1 / D-2 / D-3 / D-4 / D-6 / D-11 / D-12 均已落地
-> 范围: `crates/tauri-app`(UI + 壳层)与 `crates/core`(策略展开); CLI 行为不变
+> 2026-10-20 修订: **移除 Unix `.` 前缀隐藏口径**——`.` 开头可能是用户文件; 系统隐藏改为 Windows 隐藏属性 + 系统元数据名单(见 §4)
+> 范围: `crates/tauri-app`(UI + 壳层)与 `crates/core`(策略展开 + 隐藏口径); CLI 参数不变, 默认隐藏口径同步修订(不再排 `.` 前缀)
 > 相关: [exclude-rules.md](exclude-rules.md)(模式语法与后端归一化)、[ui-backend.md](ui-backend.md)(命令面 / DTO / 状态机)、[i18n.md](i18n.md)(词条规则)、[compress.md](compress.md)(压缩编排 / 取消)、[progress.md](progress.md)
 >
 > **已确认**: D-1 `lang-temp` 默认开、D-2 `os-hidden` 默认开、D-3 设置存 `app_config_dir()/settings.json`、D-4 关机本期仅 UI、D-6 内建清单按当前表、D-11 OS 元数据并入 `os-hidden`、D-12 关机控件 **B(置灰 + 即将支持)**
@@ -56,8 +57,8 @@
 | 层 | 现状 | 与本方案相关的点 |
 |---|---|---|
 | UI | `ui/index.html` + `ui/app.js`, 纯静态无打包器 | 单视图; 选项行已有「高级 → 排除」文本框; 语言下拉在状态栏 |
-| 壳层 | `crates/tauri-app/src/lib.rs`, 5 个命令 | `scan` / `compress` 接收 `excludes`; `ScanContext` 保鲜并比对规则; UI 恒定 `include_hidden=false` |
-| core | `ExcludeRules { include_hidden, patterns }` | Unix = `.*` 名字隐藏 + 属性隐藏(Windows); 用户模式按统一语法匹配; 后端命令按 exclude-rules.md §3 归一化 |
+| 壳层 | `crates/tauri-app/src/lib.rs`, 8 个命令 | `scan` / `compress` 接收 `filters` + `excludes`; `ScanContext` 保鲜并比对展开后的规则; `load_settings` / `save_settings` 管理设置 |
+| core | `ExcludeRules { include_hidden, patterns }` | Windows 属性隐藏 + 系统元数据/用户模式; Unix 不按 `.` 前缀隐藏; 后端命令按 exclude-rules.md §3 归一化 |
 | 设置 | 无 | 只有 `localStorage["ziptool.locale"]`(语言偏好) |
 | 测试 | Rust 单测 + 壳层单测 + Node UI 单测 + CLI e2e | UI 测试「表面真实、传输造假」, 命令名与参数形状按真实链路校验 |
 
@@ -83,7 +84,7 @@
 | D7 | 关机范围 | **本期仅 UI 占位**: 控件置灰 + 「即将支持」, 不实现实际关机, 不接受修改; 字段保留, 后续 ticket 消费 | 与 D-4 / D-12 的确认一致; 避免发布一个「看起来能关机、实际不关」的开关 |
 | D8 | 与自定义模式的关系 | **保留高级区「排除」输入**, 与策略模式**并集** | 不破坏现有用法; 策略负责全局默认, 自定义负责单次特例 |
 | D9 | 内建名单尺度 | 只收**明确由工具生成、可再生**的缓存/临时物; 不收 `build` / `dist` / `target` / `vendor` 等通用名 | 通用名碰撞会误删用户数据; 宁可漏排, 用户可用自定义模式补 |
-| D10 | CLI | **不变** | 本次只做 UI 设置; CLI 已有 `--exclude` / `--include-hidden-files`, 后续可接同一策略目录 |
+| D10 | CLI | **参数不变, 默认口径同步** | CLI 不读 `settings.json`; 但移除 `.` 前缀隐藏后, CLI 默认改为 Windows 隐藏属性 + 系统元数据名单 |
 
 ## 4. 文件排除策略
 
@@ -91,11 +92,11 @@
 
 | id | 标题(zh-CN) | 默认 | 展开方式 |
 |---|---|---|---|
-| `os-hidden` | 操作系统隐藏文件 | **开**(已确认) | `ExcludeRules.include_hidden = false` + OS 元数据模式 |
+| `os-hidden` | 操作系统隐藏文件 | **开**(已确认) | Windows `include_hidden=false` + OS 元数据模式; Unix 仅元数据模式(不排 `.` 前缀) |
 | `lang-temp` | 编程语言的临时文件 | **开**(已确认) | 追加语言临时模式 |
 
 - 开关语义为**正向**: 「排除 …」= 开。core 的 `include_hidden` 是反向命名, 映射时取反, 见 §4.2。
-- `os-hidden` 默认开: **隐藏判定口径与现状一致**(现状 UI 恒 `include_hidden=false`), 但额外加入 6 条跨平台 OS 元数据模式(§4.3), 因此默认产物会比现状多排除 `Thumbs.db`、`.DS_Store` 等非隐藏口径的元数据文件。D-11 已确认并入, 这是有意的行为增强。
+- `os-hidden` 默认开: Windows 排除隐藏属性; Unix/macOS **不按 `.` 前缀批量排除**, 只排除系统元数据名单(§4.3)。用户自建的 `.git`、`.env`、`.config` 默认保留。
 - `lang-temp` 默认开(D-1 已确认)会让 `node_modules`、`__pycache__` 等从默认压缩内容中消失, 是**有意的行为升级**; 扫描表仍会显示被排除的顶层条目(默认不勾选), 用户可手动勾选覆盖。若要改回默认关, 只改 core 默认函数与 UI 默认常量即可。
 
 ### 4.2 展开映射
@@ -118,7 +119,7 @@ ExcludeRules {
 }
 ```
 
-- `os-hidden` 关 = `include_hidden=true`: Unix 不再注入 `.*`, Windows 不再收集隐藏属性, 元数据模式也不加。若仍想排除 `Thumbs.db` 等元数据, 把对应名字填入高级区自定义模式。
+- `os-hidden` 关 = `include_hidden=true`: Windows 不再收集隐藏属性, 系统元数据模式也不加; Unix 本来就不排 `.` 前缀。若仍想排除 `Thumbs.db` 等元数据, 把对应名字填入高级区自定义模式。
 - `lang-temp` 关 = 不追加语言模式; 自定义模式照旧生效。
 - 策略模式与自定义模式**没有否定语义**, 并集生效; 用户要「只排除 A 不排除 B」时关掉策略、用自定义模式表达。
 - 展开只发生在扫描 / 压缩入口各一次, 之后仍走 `scan_dir` / `compress_entries` / 后端 `exclusion_args` 的既有路径。
@@ -154,13 +155,30 @@ ExcludeRules {
 | `Thumbs.db` | Windows 缩略图缓存 |
 | `ehthumbs.db` | Windows 媒体缩略图缓存 |
 | `desktop.ini` | Windows 文件夹配置 |
+| `$RECYCLE.BIN` | Windows 回收站目录 |
+| `System Volume Information` | Windows 卷系统信息 |
 | `.DS_Store` | macOS Finder 元数据 |
 | `._*` | macOS AppleDouble 资源分支 |
 | `__MACOSX` | macOS 解压产生的资源目录 |
+| `.Spotlight-V100` | macOS Spotlight 索引 |
+| `.Trashes` | macOS 废纸篓 |
+| `.fseventsd` | macOS 文件事件日志 |
+| `.TemporaryItems` | macOS 临时项 |
+| `.apdisk` | macOS 分区元数据 |
+| `.VolumeIcon.icns` | macOS 卷图标 |
+| `.com.apple.timemachine.donotpresent` | macOS Time Machine 标记 |
+| `.DocumentRevisions-V100` | macOS 文档版本 |
+| `.PKInstallSandboxManager` | macOS 安装沙箱 |
+| `.MobileBackups` | macOS 移动备份 |
+| `lost+found` | Linux 文件系统恢复目录 |
+| `.Trash` / `.Trash-*` | Linux 废纸篓 |
+| `.directory` | KDE 目录元数据 |
+| `.fuse_hidden*` | FUSE 临时隐藏文件 |
+| `.nfs*` | NFS 临时文件 |
 
-- 这 6 条是**跨平台补齐**: 在 Linux 上复制 Windows 盘、或在 Windows 上复制 macOS 盘时, 对方的「隐藏」口径不生效。
-- `$RECYCLE.BIN` / `System Volume Information` 不列入: Windows 上通常带隐藏属性, 已由 `include_hidden=false` 覆盖; 其他平台若需要, 用户可自定义。
-- 上述模式与 Unix `.*` 名字隐藏、Windows 属性隐藏**叠加**, 不替代。
+- 这些是**系统自身生成**的元数据, 跨平台按名字排除; 不按 `.` 前缀批量排除用户文件。
+- 上述模式与 Windows 属性隐藏**叠加**, 不替代。
+- 用户自建 `.git` / `.env` / `.ssh` / `.config` 等默认保留; 需要排除时用高级区自定义模式。
 
 #### 编程语言 / 构建工具临时物(`lang-temp`)
 
@@ -206,8 +224,8 @@ ExcludeRules {
 1. **`.yarn/cache` 只锚定条目根**: 受语法限制(`**` 只能结尾), 无法表达「任意深度的 `.yarn/cache`」。monorepo 子目录里的 `.yarn/cache` 不排除; 需要时用自定义模式, 或未来扩展语法。
 2. **`venv` 是通用词**: 确有极小概率误排普通目录; 换来的收益是常见 Python 虚拟环境。审核可决定删掉 `venv`, 保留 `.venv`。
 3. **`*.o` 与 `*.class` 按扩展名**: 其他领域若有同名文件类型会被误排; 这两类扩展名在数据目录中极少见, 暂保留。
-4. **Unix 的 `os-hidden` 会排除 `.git` / `.env`**: 这是现状 `include_hidden=false` 的行为, 不是本方案新增。设置页描述已明示; 代码仓库备份场景建议关闭 `os-hidden`, 或只勾选需要的顶层条目。
-5. **Unix 上点开头的语言缓存受两重策略影响**: 即使关掉 `lang-temp`, 只要 `os-hidden` 还开着, `.next` / `.venv` / `.pytest_cache` 等仍会因 `.` 前缀被排除。要完全包含它们, 需同时关 `os-hidden`, 或手动勾选对应的顶层条目。Windows 上这些名字不是隐藏属性, 只受 `lang-temp` 控制。
+4. **Unix 点文件默认保留**: `.git` / `.env` / `.ssh` / `.config` 等用户文件不会因为 `.` 前缀被排除; 需要排除时由用户在高级区显式填 `.*` 或具体模式。
+5. **Unix 系统隐藏判定有限**: Linux/macOS 没有可移植的文件隐藏属性, 只按 §4.3 的系统元数据名单排除; 名单外的系统垃圾可能漏排, 用自定义模式补。
 6. **语言名单不覆盖所有生态**: 未列出的工具(如 Rust `target`、Go `vendor`、PHP `vendor`)请用自定义模式; 见 §4.5。
 
 ### 4.5 刻意不收录的通用名
@@ -529,10 +547,12 @@ scan(mode, path, filters?, excludes?, on_progress) -> ScanResult
 | `ScanContext.rules` | 已存在 | 内容改为展开后规则, 比较逻辑不变 |
 | Rust DTO 测试 | `CompressOptions` 构造无 `filters` | 所有构造点补 `filters: None` 或默认值 |
 
-### 6.5 CLI 不变
+### 6.5 CLI
 
 - `ziptool compress` 仍只有 `--exclude` / `--include-hidden-files`; 不读 `settings.json`。
-- `crates/core` 的 `Options::default()` 保持 `include_hidden=false`、无用户模式; 新增 `filter` 模块不影响现有调用。
+- 默认排除改为 **Windows 隐藏属性 + 系统元数据名单**; 不再按 `.` 前缀排除用户文件。
+- `--include-hidden-files` 同时关闭 Windows 属性与元数据名单。
+- `crates/core` 的 `Options::default()` 仍无默认模式; CLI 在构造 `Options` 时显式加入 `OS_METADATA_PATTERNS`, 库调用方按需自行加入。
 - 后续可加 `--filter-policy <id>`(复用 `effective_rules`), 不在本次范围。
 
 ## 7. UI 设计
@@ -765,7 +785,7 @@ boot ── load_settings ──▶ ready
 | `settings.filters.heading` | 文件排除 |
 | `settings.filters.intro` | 策略在压缩扫描时生效; 修改后会在关闭设置页时重新扫描当前源文件夹。被排除的条目仍会显示, 但默认不勾选。单次任务仍可在主界面的「高级」中添加自定义模式。 |
 | `settings.filters.osHidden.title` | 操作系统隐藏文件 |
-| `settings.filters.osHidden.desc` | 排除操作系统标记为隐藏的文件与目录: Windows 为隐藏属性, Linux/macOS 为以 . 开头的名字(含 .git、.env), 以及 Thumbs.db、desktop.ini 等系统元数据。 |
+| `settings.filters.osHidden.desc` | 排除操作系统隐藏属性与系统元数据文件: Windows 为隐藏属性, 以及 Thumbs.db、desktop.ini、.DS_Store、.Spotlight-V100 等系统元数据。不会按 . 前缀批量排除用户自己创建的文件。 |
 | `settings.filters.langTemp.title` | 编程语言的临时文件 |
 | `settings.filters.langTemp.desc` | 排除编程语言与构建工具生成的缓存和临时文件, 例如 JavaScript 的 node_modules、Python 的 __pycache__、Java 的 .gradle 与 *.class。 |
 | `status.settingsLoadFailed` | 读取设置失败, 已使用默认值: {{error}} |
@@ -797,7 +817,8 @@ boot ── load_settings ──▶ ready
 - 自定义模式追加、与内建重复时只保留一份、顺序为「OS → 语言 → 自定义」。
 - 安全回归:
   - 内建语言模式不匹配 `.git`、`.git/config`、`data`、`src`、`target`、`build`、`dist`、`vendor`
-  - `os-hidden` 的 Unix 语义仍排除 `.git`(现有行为, 用条件编译测试)
+  - OS 元数据名单不匹配 `.env`、`.git`、`.gitignore`、`.ssh`、`.config` 等用户点文件
+  - `.` 前缀文件在扫描中默认保留(不再产生 `.*` / `-xr!.*`)
 - 非法自定义模式 → `Err`; 内建清单不会被误改成非法。
 - `matches_pattern` 无 `\` 时的零分配改造不改变现有匹配矩阵(现有测试全绿)。
 
@@ -861,7 +882,7 @@ boot ── load_settings ──▶ ready
 ### 10.5 实机验收
 
 - 准备夹具: 隐藏属性文件(Windows 用 `attrib +H`)、`.DS_Store`、`Thumbs.db`、`node_modules/`、`__pycache__/`、`.git/`、普通数据文件。
-- 策略全开扫描: 顶层被排除项显示且默认不勾选; 目录大小扣除; `.git` 在 Windows 保留、在 Linux/macOS 被 `os-hidden` 排除(符合现有口径)。
+- 策略全开扫描: 顶层被排除项显示且默认不勾选; 目录大小扣除; `.git` / `.env` 等用户点文件在所有平台都保留; 系统元数据按名单排除。
 - 逐项关闭策略: 重新扫描后对应条目恢复可选; 压缩后用 `7z l` / `unzip -l` 确认包内容与扫描口径一致。
 - 设置持久化: 改开关 → 退出 → 重开, 状态保持; 手工写坏 `settings.json` → 启动默认值 + 警告。
 - 关机控件: 置灰不可点击; 描述明确「即将支持」; 手工把 `settings.json` 的字段改为 `true` 后启动, 控件显示 disabled + checked, 修改策略保存后文件仍为 `true`; 执行压缩成功不发生关机 / 电源命令。
@@ -870,7 +891,7 @@ boot ── load_settings ──▶ ready
 ### 10.6 回归
 
 - `cargo test --workspace`
-- `cargo test -p zip-tool-e2e`(CLI 行为不变)
+- `cargo test -p zip-tool-e2e`(CLI 排除口径已更新, e2e 同步)
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all --check`
 - `cd crates/tauri-app && npm test`
 - `npm run css` 后确认 `ui/app.css` 含新增类名(开关、侧栏、设置页布局)
@@ -900,13 +921,14 @@ boot ── load_settings ──▶ ready
 - [ ] 切换策略立即持久化; 写盘失败时开关回滚并提示, 不出现「显示开、实际关」
 - [ ] 策略变化后, 压缩模式已有扫描结果在关闭设置页时自动重扫; 解压模式不重扫
 - [ ] 修改策略后不重扫直接点压缩 → 壳层拒绝并提示扫描过期(兜底)
-- [ ] 关闭 `os-hidden` 后隐藏文件可被压缩; 关闭 `lang-temp` 后 `node_modules` 等恢复可选
+- [ ] 关闭 `os-hidden` 后系统元数据/Windows 隐藏属性可被压缩; 关闭 `lang-temp` 后 `node_modules` 等恢复可选
+- [ ] `.env` / `.git` / `.gitignore` 等用户点文件默认保留, 不出现 `.*` / `-xr!.*` 批量排除
 - [ ] 关机控件不可切换; 即使 `settings.json` 中字段为 `true`, 执行压缩成功也不发生关机 / 无倒计时横幅 / 无电源命令与日志
 - [ ] 代码中不存在 `power_off` 命令、平台关机命令、`status.shutdown*`; 只有通用区 `settings.general.shutdown.*` 文案, 没有单独的 `settings.shutdown.*`
 - [ ] 设置文件损坏 / 版本过新时应用正常启动并使用默认值, 状态栏提示
 - [ ] 五种语言下设置页、策略描述、关机占位文案完整; 切换语言即时生效
 - [ ] `cargo test --workspace`、`cargo test -p zip-tool-e2e`、`npm test`、clippy / fmt 全绿
-- [ ] CLI 行为与输出不变; 现有 `_docs/exclude-rules.md` 的语义不变
+- [ ] CLI 参数不变; 默认排除已同步为系统元数据名单, 不再出现 `.*` / `-xr!.*`
 - [ ] 扫描性能基准额外开销 ≤ 15%(策略全开 vs 全关, 10 万文件)
 
 ## 13. 风险与缓解
@@ -914,7 +936,7 @@ boot ── load_settings ──▶ ready
 | 风险 | 影响 | 缓解 |
 |---|---|---|
 | 内建名单误排用户数据 | 压缩包缺文件 | 保守名单(§4.5); 被排除顶层项可见可勾选; 策略可关; 单测锁定 `.git` 等关键名不被语言模式命中 |
-| Unix `os-hidden` 排除 `.git` / `.env` | 代码仓库备份缺历史 / 配置 | 现状行为; 描述明示; 建议代码备份关闭该策略; 自定义模式无法「加回」隐藏文件, 只能关策略或勾选顶层项 |
+| Unix 点文件被误排 | 代码仓库备份缺 `.git` / `.env` | 已改为只排系统元数据名单, 不按 `.` 前缀批量排除; 单测覆盖 `.git` / `.env` 保留 |
 | 用户不知道 `lang-temp` 默认开 | 产物比预期小 | 设置页描述 + 扫描表排除行; README 标明默认值 |
 | 策略切换后忘记重扫 | 用旧规则? | UI 自动重扫 + 壳层规则过期双保险 |
 | 设置文件损坏 / 权限不足 | 设置丢失 | 默认值 + 警告; 保存失败回滚; 文件路径固定 |

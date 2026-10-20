@@ -116,7 +116,7 @@ window.__ZIPTOOL_LOCALES__["en"] = {
         "intro": "Policies apply when scanning for compression; changing them rescans the current source folder when you close Settings. Excluded items remain visible but are unchecked by default. Per-run custom patterns are still available under Advanced on the main screen.",
         "osHidden": {
           "title": "OS hidden files",
-          "desc": "Exclude files and folders marked hidden by the OS: the hidden attribute on Windows, dot-prefixed names on Linux/macOS (including .git and .env), plus OS metadata such as Thumbs.db and desktop.ini."
+          "desc": "Exclude OS hidden attributes and system metadata: the hidden attribute on Windows, plus system metadata such as Thumbs.db, desktop.ini, .DS_Store, and .Spotlight-V100. Dot-prefixed user files are not excluded by default."
         },
         "langTemp": {
           "title": "Language temporary files",

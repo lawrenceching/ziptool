@@ -47,7 +47,8 @@ enum Command {
         /// 排除模式(可重复): 不含/ = 任意深度文件名(如 Thumbs.db, *.tmp); 含/ = 从源根锚定的相对路径(如 node_modules/**)
         #[arg(long = "exclude")]
         exclude: Vec<String>,
-        /// 不排除隐藏文件(默认排除: Windows=文件系统隐藏属性, Linux/mac=. 开头)
+        /// 不排除隐藏/系统元数据(默认: Windows 隐藏属性 + Thumbs.db/.DS_Store 等系统元数据;
+        /// Unix 的 . 前缀不按隐藏处理)
         #[arg(long)]
         include_hidden_files: bool,
     },
@@ -96,6 +97,17 @@ fn main() -> ExitCode {
                 eprintln!("error: invalid --exclude: {e}");
                 return ExitCode::from(2);
             }
+            // 默认排除系统元数据(不按 `.` 前缀排除用户文件);
+            // --include-hidden-files 同时关闭 Windows 属性与元数据名单。
+            let mut patterns = if include_hidden_files {
+                Vec::new()
+            } else {
+                zip_tool_core::OS_METADATA_PATTERNS
+                    .iter()
+                    .map(|p| (*p).to_string())
+                    .collect()
+            };
+            patterns.extend(exclude);
             let opts = Options {
                 split_size,
                 password,
@@ -107,7 +119,7 @@ fn main() -> ExitCode {
                 level,
                 exclude: zip_tool_core::ExcludeRules {
                     include_hidden: include_hidden_files,
-                    patterns: exclude,
+                    patterns,
                 },
                 verify: true,
             };

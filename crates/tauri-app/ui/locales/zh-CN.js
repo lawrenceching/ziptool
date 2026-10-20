@@ -117,7 +117,7 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
           "策略在压缩扫描时生效; 修改后会在关闭设置页时重新扫描当前源文件夹。被排除的条目仍会显示, 但默认不勾选。单次任务仍可在主界面的「高级」中添加自定义模式。",
         osHidden: {
           title: "操作系统隐藏文件",
-          desc: "排除操作系统标记为隐藏的文件与目录: Windows 为隐藏属性, Linux/macOS 为以 . 开头的名字(含 .git、.env), 以及 Thumbs.db、desktop.ini 等系统元数据。",
+          desc: "排除操作系统隐藏属性与系统元数据文件: Windows 为隐藏属性, 以及 Thumbs.db、desktop.ini、.DS_Store、.Spotlight-V100 等系统元数据。不会按 . 前缀批量排除用户自己创建的文件。",
         },
         langTemp: {
           title: "编程语言的临时文件",

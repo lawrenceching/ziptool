@@ -5,8 +5,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::exclude::{
-    AttrCollector, ExcludeReason, ExcludeRules, ExcludedEntry, is_hidden_attr, is_hidden_name,
-    matches_patterns, validate_patterns,
+    AttrCollector, ExcludeReason, ExcludeRules, ExcludedEntry, is_hidden_attr, matches_patterns,
+    validate_patterns,
 };
 use crate::progress::{Phase, Progress};
 use crate::{CoreError, Result};
@@ -104,13 +104,13 @@ pub fn scan_dir(
                 (EntryKind::File, 0, 0)
             }
         };
-        // 顶层打标: 隐藏(OS 原生口径: Unix 名字 / Windows 属性)优先, 其次用户模式
+        // 顶层打标: OS 隐藏属性(仅 Windows)优先, 其次模式命中。
+        // Unix 的 `.` 前缀不参与隐藏判定(可能是用户自建文件)。
         let hidden = !rules.include_hidden
-            && (is_hidden_name(&name)
-                || collect_attrs
-                    && fs::symlink_metadata(&path)
-                        .map(|m| is_hidden_attr(&m))
-                        .unwrap_or(false));
+            && collect_attrs
+            && fs::symlink_metadata(&path)
+                .map(|m| is_hidden_attr(&m))
+                .unwrap_or(false);
         let exclude = if hidden {
             Some(ExcludeReason::Hidden)
         } else {
@@ -153,8 +153,9 @@ pub fn scan_dir(
 /// 递归累加目录下所有普通文件/链接自身的大小与条目数(目录自身计 1);
 /// 栈式迭代避免深递归。
 /// 无权限等读不了的子树计 0 并记 warning, 不中断。
-/// 排除(树内): 用户模式(条目名前缀相对路径, 与后端开关同坐标系)+ Unix 名字隐藏;
+/// 排除(树内): 模式(条目名前缀相对路径, 与后端开关同坐标系)+ Windows 隐藏属性;
 /// 命中文件不计尺寸, 命中目录整树不下钻。Windows 属性隐藏(attrs=Some 时)收集相对路径而非打标。
+/// Unix 的 `.` 前缀不参与排除(用户可能自建 .env/.git 等)。
 fn dir_size(
     dir: &Path,
     entry_name: &str,
@@ -200,9 +201,8 @@ fn dir_size(
             // 模式坐标系 = 条目名前缀的相对路径(与 7z -x! 开关、属性路径一致:
             // 用户按扫描表所见路径写模式, 如 `App/cache`、`Novel/sub/*.log`)
             let key = format!("{entry_name}/{rel}");
-            let excluded = attr_hidden
-                || (!rules.include_hidden && is_hidden_name(&name))
-                || matches_patterns(&rules.patterns, &key).is_some();
+            // 隐藏只走 Windows 属性; `.` 前缀不排除(用户可能自建 .env/.git 等)
+            let excluded = attr_hidden || matches_patterns(&rules.patterns, &key).is_some();
             if excluded {
                 if attr_hidden {
                     // 条目名前缀 + / 分隔, 供后端逐条开关(§4)
@@ -236,38 +236,52 @@ mod tests {
     }
 
     #[test]
-    fn scan_unix_hidden_marks_top_level_and_deducts_total() {
-        if cfg!(windows) {
-            return; // Windows 无名字口径, 该用例仅 Unix 语义
-        }
-        let root = unique_temp("scan-hidden");
+    fn scan_does_not_treat_dot_prefix_as_hidden() {
+        // `.` 前缀是 Unix 命名约定, 用户可能自建 .env/.git/.config;
+        // 隐藏只走 OS 属性(Windows), 不能用名字批量排除。
+        let root = unique_temp("scan-dot-name");
         fs::create_dir_all(root.join("in/.hid")).unwrap();
-        fs::write(root.join("in/.hid/x"), "xx").unwrap(); // 2 字节, 整树剔除
+        fs::write(root.join("in/.hid/x"), "xx").unwrap(); // 2 字节, 不再整树剔除
         fs::write(root.join("in/.file"), "fff").unwrap(); // 3 字节
+        fs::write(root.join("in/.env"), "ee").unwrap(); // 2 字节
         fs::write(root.join("in/keep.txt"), "k").unwrap(); // 1 字节
 
         let report = scan_with(&root.join("in"), &ExcludeRules::default());
-        // 顶层永远返回, 但被标 Hidden
-        let hid = report.entries.iter().find(|e| e.name == ".hid").unwrap();
-        assert_eq!(hid.exclude, Some(ExcludeReason::Hidden));
-        assert_eq!(hid.size, 2, "条目自身 size 保留真实值(展示用)");
-        let f = report.entries.iter().find(|e| e.name == ".file").unwrap();
-        assert_eq!(f.exclude, Some(ExcludeReason::Hidden));
-        // 被标条目不计入总量
-        assert_eq!(report.total_bytes, 1, "只有 keep.txt 计入");
-        // excluded 名单
-        let names: Vec<&str> = report.excluded.iter().map(|x| x.name.as_str()).collect();
-        assert_eq!(names, [".file", ".hid"]);
+        for name in [".hid", ".file", ".env", "keep.txt"] {
+            let entry = report.entries.iter().find(|e| e.name == name).unwrap();
+            assert!(entry.exclude.is_none(), "{name} 不应按名字排除");
+        }
+        assert_eq!(report.total_bytes, 8, "全部普通文件都计入");
+        assert!(report.excluded.is_empty());
 
-        // include_hidden=true: 全部保留不打标
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scan_excludes_system_metadata_by_pattern() {
+        let root = unique_temp("scan-meta");
+        fs::create_dir_all(root.join("in/Novel")).unwrap();
+        fs::write(root.join("in/Thumbs.db"), "tt").unwrap(); // 2 字节
+        fs::write(root.join("in/Novel/.DS_Store"), "d").unwrap(); // 1 字节
+        fs::write(root.join("in/Novel/keep.txt"), "kk").unwrap(); // 2 字节
+
         let rules = ExcludeRules {
-            include_hidden: true,
-            patterns: vec![],
+            include_hidden: true, // 与属性无关, 只验证模式
+            patterns: vec!["Thumbs.db".into(), ".DS_Store".into()],
         };
         let report = scan_with(&root.join("in"), &rules);
-        assert!(report.entries.iter().all(|e| e.exclude.is_none()));
-        assert_eq!(report.total_bytes, 6);
-        assert!(report.excluded.is_empty());
+        let thumbs = report
+            .entries
+            .iter()
+            .find(|e| e.name == "Thumbs.db")
+            .unwrap();
+        assert_eq!(
+            thumbs.exclude,
+            Some(ExcludeReason::Pattern("Thumbs.db".into()))
+        );
+        let novel = report.entries.iter().find(|e| e.name == "Novel").unwrap();
+        assert_eq!(novel.size, 2, "树内 .DS_Store 被扣除");
+        assert_eq!(report.total_bytes, 2, "keep.txt 计入, 元数据不计");
 
         fs::remove_dir_all(&root).unwrap();
     }

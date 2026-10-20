@@ -1,17 +1,19 @@
-//! 排除规则:内建隐藏默认集 + 用户自定义模式,叠加(并集)生效。
+//! 排除规则:系统元数据模式 + 用户自定义模式,叠加(并集)生效。
 //! 统一语法见 _docs/exclude-rules.md §3:
 //! - 不含 `/`:任意深度的文件/目录名(basename, 如 `Thumbs.db`、`*.tmp`)
 //! - 含 `/`:从条目根锚定匹配相对路径(`*`/`?` 不跨 `/`,`**` 只允许在结尾)
-//! - 隐藏判定仅用 OS 原生口径:Unix = `.` 前缀约定,Windows = 文件系统隐藏属性
+//! - 隐藏判定**只用 OS 原生属性**(Windows 隐藏属性);Unix 没有可移植的
+//!   文件隐藏属性, `.` 前缀只是命名约定, 可能是用户文件, 不作为隐藏口径
+//! - 系统元数据(Thumbs.db / .DS_Store 等)由模式名单排除, 见 filter 模块
 //! - 不变式:统计口径 ≡ 后端实压内容(任何护栏回退都以"加回统计"保持一致)
 
-/// 排除规则:UI 恒定 `include_hidden = false`(被标行显示不勾选);
-/// CLI 默认排除隐藏,`--include-hidden-files` 置 true 关闭
+/// 排除规则:UI 由 `os-hidden` 策略决定 `include_hidden`;
+/// CLI 默认排除 Windows 隐藏属性 + 系统元数据,`--include-hidden-files` 关闭
 #[derive(Debug, Default, Clone)]
 pub struct ExcludeRules {
-    /// true = 不排除任何隐藏项(内建默认集关闭;此时不会产生 Hidden 标记)
+    /// true = 不排除 OS 隐藏属性(Windows);Unix 上没有可移植属性, 该开关不影响 `.` 前缀
     pub include_hidden: bool,
-    /// 用户自定义模式,多条叠加;无否定语义
+    /// 系统元数据 + 用户自定义模式, 多条叠加; 无否定语义
     pub patterns: Vec<String>,
 }
 
@@ -45,10 +47,6 @@ pub struct ExcludedEntry {
 pub const EXCLUDE_PATH_LIMIT: usize = 1000;
 /// 排除开关字符预算(与 EXCLUDE_PATH_LIMIT 双护栏, 收集端同步执行)
 pub const EXCLUDE_ARG_BUDGET: usize = 24_000;
-
-/// Unix 内建隐藏默认集的统一模式(任意深度 basename 以 `.` 开头)。
-/// Windows 不用名字口径(`.` 开头不算隐藏), 不注入此模式。
-pub const HIDDEN_UNIX_PATTERN: &str = ".*";
 
 /// 校验用户模式(非法即报错, 宁停不错):
 /// 空串 / 空路径段(首尾或连续 `/`)/ 单独 `**` / `**` 不在结尾, 都非法
@@ -144,14 +142,11 @@ pub fn matches_patterns(patterns: &[String], rel: &str) -> Option<String> {
     patterns.iter().find(|p| matches_pattern(p, rel)).cloned()
 }
 
-/// 内建隐藏判定(名字口径):仅 Unix 原生约定(`.` 前缀);
-/// Windows 无名字口径(`.` 开头可能是用户自命名), 恒 false, 走属性判定
-pub fn is_hidden_name(name: &str) -> bool {
-    !cfg!(windows) && name.starts_with('.')
-}
-
 /// Windows 文件系统隐藏属性(stable std API: `MetadataExt::file_attributes`);
 /// 非 Windows 恒 false
+///
+/// Unix 没有等价的可移植属性: `.` 前缀只是命名约定, 用户也可能创建
+/// `.env` / `.git` / `.config`, 因此**不**把 `.` 前缀当作隐藏。
 pub fn is_hidden_attr(md: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -171,16 +166,6 @@ pub fn is_hidden_attr(md: &std::fs::Metadata) -> bool {
 const SEP: char = '\\';
 #[cfg(not(windows))]
 const SEP: char = '/';
-
-/// 生效模式集 = 内建隐藏默认集(include_hidden=false 且非 Windows 时)+ 用户模式
-fn effective_patterns(rules: &ExcludeRules) -> Vec<String> {
-    let mut v = Vec::new();
-    if !rules.include_hidden && !cfg!(windows) {
-        v.push(HIDDEN_UNIX_PATTERN.to_string());
-    }
-    v.extend(rules.patterns.iter().cloned());
-    v
-}
 
 /// 追加一组 argv token;字符预算不足时整组丢弃(护栏;收集端已控量, 正常不触发)。
 /// 返回 false = 预算耗尽。
@@ -250,9 +235,9 @@ pub(crate) fn exclusion_args(
     let mut budget = EXCLUDE_ARG_BUDGET;
     match backend {
         crate::backend::Backend::Zip => {
-            for p in effective_patterns(rules) {
+            for p in &rules.patterns {
                 // `/**` 结尾 → 取前缀(目录 at-or-below 双开关);其余 `**` 已被校验排除
-                let base = p.strip_suffix("/**").unwrap_or(&p);
+                let base = p.strip_suffix("/**").unwrap_or(p);
                 if !push_tokens(
                     &mut args,
                     &mut budget,
@@ -279,7 +264,7 @@ pub(crate) fn exclusion_args(
             }
         }
         crate::backend::Backend::SevenZip => {
-            for p in effective_patterns(rules) {
+            for p in &rules.patterns {
                 let tok = if !p.contains('/') {
                     format!("-xr!{p}")
                 } else if let Some(prefix) = p.strip_suffix("/**") {
@@ -349,6 +334,18 @@ mod match_tests {
     use super::*;
 
     #[test]
+    fn default_rules_emit_no_dot_star_hidden_pattern() {
+        // 回归: 曾把 Unix `.` 前缀当作隐藏, 生成 `-xr!.*`, 误排 .git/.env。
+        let args = exclusion_args(
+            crate::backend::Backend::SevenZip,
+            "A",
+            &ExcludeRules::default(),
+            &[],
+        );
+        assert!(!args.iter().any(|a| a.contains(".*")), "{args:?}");
+    }
+
+    #[test]
     fn basename_pattern_matches_any_depth_without_crossing() {
         // 不含 / 的模式 = 任意深度的 basename(只与末段比)
         assert!(matches_pattern("Thumbs.db", "Thumbs.db"));
@@ -393,20 +390,5 @@ mod match_tests {
         assert_eq!(matches_patterns(&pats, "cache"), Some("cache".into()));
         assert_eq!(matches_patterns(&pats, "keep.txt"), None);
         assert_eq!(matches_patterns(&[], "anything"), None);
-    }
-
-    #[test]
-    fn hidden_name_uses_unix_convention_only() {
-        if cfg!(windows) {
-            // Windows 无名字口径: . 开头不算隐藏(可能是用户自命名)
-            assert!(!is_hidden_name(".DS_Store"));
-            assert!(!is_hidden_name(".git"));
-        } else {
-            assert!(is_hidden_name(".DS_Store"));
-            assert!(is_hidden_name(".."));
-            assert!(is_hidden_name(".git"));
-            assert!(!is_hidden_name("git"));
-            assert!(!is_hidden_name("a.txt"));
-        }
     }
 }

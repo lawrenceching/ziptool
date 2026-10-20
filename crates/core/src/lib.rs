@@ -244,7 +244,8 @@ pub struct Options {
     pub format: Format,
     /// 压缩级别 0-9(0=仅存储);`None` = 不传级别参数,用后端默认
     pub level: Option<u8>,
-    /// 排除规则:内建隐藏默认集 + 用户模式;Default = 排除隐藏、无用户模式
+    /// 排除规则:Windows 隐藏属性 + 系统元数据/用户模式;
+    /// Default = 排除 Windows 隐藏属性、无用户模式(Unix 不按 `.` 前缀隐藏)
     pub exclude: ExcludeRules,
     /// 压缩成功后做结构校验(默认开启;UI 勾选框可关闭)
     pub verify: bool,
@@ -277,7 +278,7 @@ mod tests {
         assert_eq!(opts.format, Format::Zip, "默认 zip(最大兼容)");
         assert!(opts.level.is_none(), "默认不传级别, 用后端默认");
         assert!(opts.exclude.patterns.is_empty(), "默认无用户模式");
-        assert!(!opts.exclude.include_hidden, "默认排除隐藏文件");
+        assert!(!opts.exclude.include_hidden, "默认排除 Windows 隐藏属性");
         assert!(opts.verify, "默认压缩后做结构校验");
     }
 
