@@ -63,15 +63,6 @@
       id="options"
       class="px-4 py-2 bg-white border-b border-slate-200 flex items-center gap-x-5 gap-y-1.5 flex-wrap text-xs text-slate-500"
     >
-      <span id="opt-split-wrap" class="flex items-center gap-1.5">
-        <label for="opt-split" data-i18n="options.split" class="shrink-0">分包</label>
-        <input
-          id="opt-split"
-          data-i18n-placeholder="options.splitPlaceholder"
-          class="w-40 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
-          placeholder="如 2g / 500m,留空不分包"
-        />
-      </span>
       <span id="opt-password-wrap" class="flex items-center gap-1.5">
         <label for="opt-password" data-i18n="options.password" class="shrink-0">密码</label>
         <input
@@ -166,6 +157,69 @@
       </label>
     </div>
 
+    <!-- 打包策略: 仅压缩模式; 阈值改动只重算方案, 不重新扫描 -->
+    <div
+      id="strategy-row"
+      class="px-4 py-2 bg-white border-b border-slate-200 flex items-center gap-x-4 gap-y-1.5 flex-wrap text-xs text-slate-500"
+    >
+      <span data-i18n="strategy.label" class="font-medium text-slate-600">打包策略</span>
+      <label class="flex items-center gap-1.5">
+        <span data-i18n="strategy.mergeBelow">合并≤</span>
+        <input
+          id="opt-merge-below"
+          value="100m"
+          data-i18n-placeholder="strategy.mergeBelowPlaceholder"
+          data-i18n-title="strategy.mergeBelowTitle"
+          class="w-20 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
+          placeholder="100m"
+        />
+      </label>
+      <label class="flex items-center gap-1.5">
+        <span><span data-i18n="options.split">分包</span>&gt;</span>
+        <input
+          id="opt-split"
+          value="2g"
+          data-i18n-placeholder="strategy.splitAbovePlaceholder"
+          data-i18n-title="strategy.splitAboveTitle"
+          class="w-20 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
+          placeholder="2g"
+        />
+      </label>
+      <label class="flex items-center gap-1.5">
+        <span data-i18n="strategy.bundleMax">合并包≤</span>
+        <input
+          id="opt-bundle-max"
+          data-i18n-placeholder="strategy.bundleMaxPlaceholder"
+          data-i18n-title="strategy.bundleMaxTitle"
+          class="w-24 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
+          placeholder="跟随分包"
+        />
+      </label>
+      <label class="flex items-center gap-1.5">
+        <span data-i18n="strategy.maxEntries">条目≤</span>
+        <input
+          id="opt-max-entries"
+          type="number"
+          min="1"
+          value="50000"
+          data-i18n-placeholder="strategy.maxEntriesPlaceholder"
+          data-i18n-title="strategy.maxEntriesTitle"
+          class="w-24 px-2 py-1 rounded-md border border-slate-300 text-slate-700 focus:outline-none focus:border-blue-400"
+          placeholder="50000"
+        />
+      </label>
+      <span id="plan-summary" role="status" aria-live="polite" class="text-slate-600"></span>
+      <button
+        id="plan-open"
+        type="button"
+        disabled
+        data-i18n="strategy.viewPlan"
+        class="px-2 py-1 rounded-md border border-slate-300 text-blue-600 enabled:hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        查看方案
+      </button>
+    </div>
+
     <!-- 条目表格: 通栏铺满剩余空间 -->
     <main class="flex-1 min-h-0 overflow-auto">
       <table class="w-full">
@@ -184,6 +238,7 @@
             </th>
             <th data-i18n="table.name" class="py-2 pr-2 text-left font-medium">文件名</th>
             <th data-i18n="table.size" class="py-2 pr-4 text-right font-medium">大小</th>
+            <th id="th-package" data-i18n="table.package" class="w-24 py-2 pr-2 text-left font-medium">打包</th>
             <th data-i18n="table.status" class="w-24 py-2 pr-4 text-left font-medium">状态</th>
           </tr>
         </thead>
@@ -193,6 +248,43 @@
         点击「源文件夹」选择目录, 也可直接拖入文件夹
       </div>
     </main>
+
+    <!-- 打包方案抽屉: 只读审核; 包卡片与源表双向高亮 -->
+    <div id="plan-backdrop" class="hidden fixed inset-0 z-40 bg-slate-900/40 p-4">
+      <div
+        id="plan-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="plan-title"
+        class="mx-auto mt-8 flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+      >
+        <header class="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+          <h2 id="plan-title" data-i18n="plan.title" class="font-medium text-slate-800">打包方案</h2>
+          <button
+            id="plan-close"
+            type="button"
+            data-i18n="plan.close"
+            data-i18n-aria-label="plan.close"
+            aria-label="关闭"
+            class="rounded p-1 text-slate-500 hover:bg-slate-100"
+          >
+            ×
+          </button>
+        </header>
+        <div id="plan-strategy" class="border-b border-slate-100 px-4 py-2 text-xs text-slate-500"></div>
+        <div id="plan-filters" class="flex flex-wrap gap-2 border-b border-slate-100 px-4 py-2 text-xs">
+          <button type="button" id="plan-filter-all" data-plan-filter="all" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
+          <button type="button" id="plan-filter-direct" data-plan-filter="direct" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
+          <button type="button" id="plan-filter-split" data-plan-filter="split" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
+          <button type="button" id="plan-filter-bundle" data-plan-filter="bundle" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
+        </div>
+        <div id="plan-warnings" class="hidden border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-700"></div>
+        <div id="plan-list" class="min-h-0 flex-1 space-y-3 overflow-auto p-4"></div>
+        <div class="border-t border-slate-100 px-4 py-2 text-xs text-slate-400" data-i18n="plan.note">
+          大小为原始大小；压缩后大小/实际卷数未知。
+        </div>
+      </div>
+    </div>
 
     <!-- 状态栏 -->
     <footer class="flex items-center justify-between px-4 py-1.5 bg-white border-t border-slate-200 text-xs text-slate-500">

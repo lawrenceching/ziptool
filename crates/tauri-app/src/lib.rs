@@ -9,8 +9,11 @@
 //! 命令在 `spawn_blocking` 中调 core, 进度经 `tauri::ipc::Channel` 推给前端;
 //! scan/compress/extract 单任务互斥, 任务结束释放忙闲标志并清空取消旗标。
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,7 @@ use tauri::Manager;
 use tauri::State;
 use tauri::ipc::Channel;
 
+use zip_tool_core::strategy::{self, PackageKind, StrategyItem, StrategyParams};
 use zip_tool_core::{
     CancelFlag, Entry, EntryKind, ExcludeReason, ExcludeRules, ExtractGroup, ExtractScan, Format,
     Options, Phase, Progress, ScanReport,
@@ -35,6 +39,8 @@ struct AppState {
     busy: Mutex<Option<&'static str>>,
     /// 最近一次 scan 的结果(保鲜: 确认时校验 mode + src, 名单严格匹配)
     scan: Mutex<Option<ScanContext>>,
+    /// 扫描代数: 每次成功 scan 递增, 用于 planId 失效旧方案
+    scan_generation: AtomicU64,
 }
 
 /// scan 命令缓存的扫描结果(mode + src + 规则匹配才可用)
@@ -43,6 +49,8 @@ struct ScanContext {
     src: PathBuf,
     /// 扫描时的排除规则(compress 模式;确认时比对, 不一致 = 过期)
     rules: ExcludeRules,
+    /// 成功扫描的代数; planId 的一部分
+    generation: u64,
     data: ScanData,
 }
 
@@ -110,7 +118,7 @@ struct ScanResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompressOptions {
-    /// "2g"/"500m"/字节数; None = 不分包
+    /// "2g"/"500m"/字节数; None = 不分包(旧路径兼容字段)
     split_size: Option<String>,
     /// 空串按 None(不加密)
     password: Option<String>,
@@ -124,6 +132,75 @@ struct CompressOptions {
     /// 压缩成功后结构校验;缺省 true(旧客户端不带该字段也保持默认开启)
     #[serde(default = "default_true")]
     verify: bool,
+    /// 打包策略; None = 旧逐条目路径(保持兼容)
+    packaging: Option<PackagingOptions>,
+}
+
+/// 打包策略参数。空字符串/空值 = 关闭对应维度。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PackagingOptions {
+    /// "100m"/字节; None = 不合并
+    merge_below: Option<String>,
+    /// "2g"/字节; None = 不分包
+    split_above: Option<String>,
+    /// "2g"/字节; None = 跟随 split_above
+    bundle_max: Option<String>,
+    /// 单个合并包条目上限; None = 不限制
+    max_entries: Option<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectivePackagingDto {
+    merge_below: Option<u64>,
+    split_above: Option<u64>,
+    bundle_max: Option<u64>,
+    max_entries: Option<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanPackageDto {
+    id: String,
+    /// "direct" | "split" | "bundle"
+    kind: String,
+    /// 指向 scan items 的行下标
+    member_indexes: Vec<usize>,
+    input_bytes: u64,
+    entry_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanSummaryDto {
+    total_packages: usize,
+    direct: usize,
+    split: usize,
+    bundle: usize,
+    selected_bytes: u64,
+    max_direct_or_bundle_bytes: u64,
+    max_bundle_entries: usize,
+    effective: EffectivePackagingDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanWarningDto {
+    /// "tooManyEntries"
+    code: String,
+    member_index: usize,
+    entry_count: usize,
+    limit: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanResult {
+    plan_id: String,
+    packages: Vec<PlanPackageDto>,
+    summary: PlanSummaryDto,
+    warnings: Vec<PlanWarningDto>,
 }
 
 #[derive(Deserialize)]
@@ -143,9 +220,23 @@ struct ArchiveInfo {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CompressedPackageInfo {
+    id: String,
+    /// "direct" | "split" | "bundle"
+    kind: String,
+    archive: String,
+    members: Vec<String>,
+    input_bytes: u64,
+    entry_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CompressResult {
     cancelled: bool,
+    /// 旧客户端字段; 打包路径为空, 新 UI 用 packages
     entries: Vec<ArchiveInfo>,
+    packages: Vec<CompressedPackageInfo>,
     warnings: Vec<String>,
 }
 
@@ -246,20 +337,170 @@ fn kind_str(k: EntryKind) -> &'static str {
     }
 }
 
+fn package_kind_str(kind: PackageKind) -> &'static str {
+    match kind {
+        PackageKind::Direct => "direct",
+        PackageKind::Split => "split",
+        PackageKind::Bundle => "bundle",
+    }
+}
+
+/// 打包阈值文本 → 字节; 空串/None = 关闭该维度
+fn parse_packaging_size(value: &Option<String>, field: &str) -> Result<Option<u64>, String> {
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(s) => zip_tool_core::parse_size(s)
+            .map(Some)
+            .map_err(|e| format!("{field}: {e}")),
+    }
+}
+
+/// UI packaging DTO → strategy 参数(含自洽性校验)
+fn to_strategy_params(o: &PackagingOptions) -> Result<StrategyParams, String> {
+    let params = StrategyParams {
+        merge_below: parse_packaging_size(&o.merge_below, "合并阈值")?,
+        split_above: parse_packaging_size(&o.split_above, "分包阈值")?,
+        bundle_max: parse_packaging_size(&o.bundle_max, "合并包上限")?,
+        max_entries: o.max_entries,
+    };
+    params.validate().map_err(|e| e.to_string())?;
+    Ok(params)
+}
+
+/// planId = 扫描代数 + 勾选名单(扫描序) + 生效的 packaging 参数。
+/// 新扫描、改勾选、改阈值都会变; 格式/密码/目标目录不影响。
+fn plan_signature(generation: u64, names: &[&str], params: &StrategyParams) -> String {
+    let mut hasher = DefaultHasher::new();
+    generation.hash(&mut hasher);
+    names.len().hash(&mut hasher);
+    for name in names {
+        name.hash(&mut hasher);
+    }
+    params.merge_below.hash(&mut hasher);
+    params.split_above.hash(&mut hasher);
+    params.effective_bundle_max().hash(&mut hasher);
+    params.max_entries.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// 构建 UI 的可审核方案。`rows` 是 (scan 行下标, Entry), 保持扫描序。
+fn build_plan_result(
+    generation: u64,
+    rows: &[(usize, Entry)],
+    params: &StrategyParams,
+) -> Result<PlanResult, String> {
+    let items: Vec<StrategyItem> = rows
+        .iter()
+        .map(|(_, entry)| StrategyItem::new(entry.name.clone(), entry.size, entry.entry_count))
+        .collect();
+    let strategy_plan = strategy::plan(&items, params).map_err(|e| e.to_string())?;
+
+    let name_to_index: std::collections::HashMap<&str, usize> = rows
+        .iter()
+        .map(|(index, entry)| (entry.name.as_str(), *index))
+        .collect();
+
+    let mut packages = Vec::with_capacity(strategy_plan.packages.len());
+    for (index, package) in strategy_plan.packages.iter().enumerate() {
+        let member_indexes = package
+            .members
+            .iter()
+            .map(|name| {
+                name_to_index
+                    .get(name.as_str())
+                    .copied()
+                    .ok_or_else(|| "内部错误: 方案成员不在扫描结果中".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        packages.push(PlanPackageDto {
+            id: format!("p{index}"),
+            kind: package_kind_str(package.kind).into(),
+            member_indexes,
+            input_bytes: package.input_bytes,
+            entry_count: package.entry_count,
+        });
+    }
+
+    let selected_bytes: u64 = rows.iter().map(|(_, entry)| entry.size).sum();
+    let max_direct_or_bundle_bytes = packages
+        .iter()
+        .filter(|package| package.kind != "split")
+        .map(|package| package.input_bytes)
+        .max()
+        .unwrap_or(0);
+    let max_bundle_entries = packages
+        .iter()
+        .filter(|package| package.kind == "bundle")
+        .map(|package| package.entry_count)
+        .max()
+        .unwrap_or(0);
+    let warnings = strategy_plan
+        .warnings
+        .iter()
+        .filter_map(|warning| {
+            let index = *name_to_index.get(warning.item.as_str())?;
+            match &warning.reason {
+                strategy::WarningReason::TooManyEntries { entry_count, limit } => {
+                    Some(PlanWarningDto {
+                        code: "tooManyEntries".into(),
+                        member_index: index,
+                        entry_count: *entry_count,
+                        limit: *limit,
+                    })
+                }
+            }
+        })
+        .collect();
+
+    let names: Vec<&str> = rows.iter().map(|(_, entry)| entry.name.as_str()).collect();
+    Ok(PlanResult {
+        plan_id: plan_signature(generation, &names, params),
+        packages,
+        summary: PlanSummaryDto {
+            total_packages: strategy_plan.packages.len(),
+            direct: strategy_plan
+                .packages
+                .iter()
+                .filter(|package| package.kind == PackageKind::Direct)
+                .count(),
+            split: strategy_plan
+                .packages
+                .iter()
+                .filter(|package| package.kind == PackageKind::Split)
+                .count(),
+            bundle: strategy_plan
+                .packages
+                .iter()
+                .filter(|package| package.kind == PackageKind::Bundle)
+                .count(),
+            selected_bytes,
+            max_direct_or_bundle_bytes,
+            max_bundle_entries,
+            effective: EffectivePackagingDto {
+                merge_below: params.merge_below,
+                split_above: params.split_above,
+                bundle_max: params.effective_bundle_max(),
+                max_entries: params.max_entries,
+            },
+        },
+        warnings,
+    })
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
-/// 从缓存的压缩扫描结果中按名单严格筛选;
+/// 从缓存的压缩扫描结果中按名单严格筛选, 返回 (扫描代数, [(行下标, Entry)])。
 /// mode/src 失配、规则不一致或名单含未知名 = 扫描过期(宁停不错, 5.4)
-fn select_compress(
+fn select_compress_rows(
     scan: Option<&ScanContext>,
     src: &str,
     entries: &[String],
     rules: &ExcludeRules,
-) -> Result<Vec<Entry>, String> {
+) -> Result<(u64, Vec<(usize, Entry)>), String> {
     let ctx = match scan {
         Some(c) if c.mode == "compress" && c.src == Path::new(src) && rules_eq(&c.rules, rules) => {
             c
@@ -270,16 +511,40 @@ fn select_compress(
         ScanData::Compress(r) => r,
         _ => return Err(EXPIRED.into()),
     };
-    let selected: Vec<Entry> = report
+    let selected = select_from_report(report, entries)?;
+    Ok((ctx.generation, selected))
+}
+
+fn select_from_report(
+    report: &ScanReport,
+    entries: &[String],
+) -> Result<Vec<(usize, Entry)>, String> {
+    let wanted: std::collections::HashSet<&str> = entries.iter().map(String::as_str).collect();
+    if wanted.len() != entries.len() {
+        return Err(EXPIRED.into());
+    }
+    let selected: Vec<(usize, Entry)> = report
         .entries
         .iter()
-        .filter(|e| entries.iter().any(|n| n == &e.name))
-        .cloned()
+        .enumerate()
+        .filter(|(_, entry)| wanted.contains(entry.name.as_str()))
+        .map(|(index, entry)| (index, entry.clone()))
         .collect();
-    if selected.len() != entries.len() {
+    if selected.len() != wanted.len() {
         return Err(EXPIRED.into());
     }
     Ok(selected)
+}
+
+#[cfg(test)]
+fn select_compress(
+    scan: Option<&ScanContext>,
+    src: &str,
+    entries: &[String],
+    rules: &ExcludeRules,
+) -> Result<Vec<Entry>, String> {
+    let (_, rows) = select_compress_rows(scan, src, entries, rules)?;
+    Ok(rows.into_iter().map(|(_, entry)| entry).collect())
 }
 
 /// 从缓存的解压扫描结果中按名单严格筛选(名单 = 入口卷文件名)
@@ -445,42 +710,97 @@ async fn scan(
         ScanData::Extract(s) => extract_scan_dto(s),
     };
     // 扫描成功才覆盖缓存(失败保留旧值, 但确认命令会因 src/mode 校验拒绝误用)
+    let generation = state.scan_generation.fetch_add(1, Ordering::Relaxed) + 1;
     *state.scan.lock().map_err(|_| POISONED.to_string())? = Some(ScanContext {
         mode,
         src: src_for_ctx,
         rules,
+        generation,
         data,
     });
     release_busy(&state.busy);
     Ok(dto)
 }
 
+/// 计算可审核的打包方案(纯内存, 不读盘/不压缩/不占忙锁)。
+/// 结果基于最近一次 compress scan; 方案内容只由勾选名单 + packaging 参数决定。
+#[tauri::command]
+fn plan_packages(
+    src: String,
+    entries: Vec<String>,
+    packaging: PackagingOptions,
+    state: State<'_, AppState>,
+) -> Result<PlanResult, String> {
+    let params = to_strategy_params(&packaging)?;
+    let scan = state.scan.lock().map_err(|_| POISONED.to_string())?;
+    let ctx = scan.as_ref().ok_or_else(|| EXPIRED.to_string())?;
+    if ctx.mode != "compress" || ctx.src != Path::new(&src) {
+        return Err(EXPIRED.into());
+    }
+    let report = match &ctx.data {
+        ScanData::Compress(report) => report,
+        ScanData::Extract(_) => return Err(EXPIRED.into()),
+    };
+    let rows = select_from_report(report, &entries)?;
+    build_plan_result(ctx.generation, &rows, &params)
+}
+
 /// 批量压缩(3.2): src 必须与最近一次 scan(compress) 的源一致,
-/// entries = 勾选名单(scan 返回的原样条目名), 执行 = plan + compress_entries。
+/// entries = 勾选名单(scan 返回的原样条目名)。
+/// 无 packaging = 旧逐条目路径; 有 packaging = 包级策略路径(必须先审核 planId)。
 #[tauri::command]
 async fn compress(
     src: String,
     dst: String,
     entries: Vec<String>,
-    options: CompressOptions,
+    mut options: CompressOptions,
+    plan_id: Option<String>,
     on_progress: Channel<ProgressEvent>,
     state: State<'_, AppState>,
 ) -> Result<CompressResult, String> {
-    let opts = to_core_options(options)?;
+    let packaging = options.packaging.clone();
+    // 包级路径以 packaging.splitAbove 为准; 旧 splitSize 仅用于无 packaging 的旧路径
+    if packaging.is_some() {
+        options.split_size = None;
+    }
+    let mut opts = to_core_options(options)?;
+    let strategy_params = match packaging.as_ref() {
+        Some(packaging) => Some(to_strategy_params(packaging)?),
+        None => None,
+    };
+    if let Some(params) = &strategy_params
+        && params.split_above.is_some()
+    {
+        opts.split_size = params.split_above;
+    }
 
     acquire_busy(&state.busy, "compress")?;
     // ScanContext 校验与筛选(纯内存; 锁在 await 前释放)
     let selected = {
         let scan = state.scan.lock().map_err(|_| POISONED.to_string())?;
-        select_compress(scan.as_ref(), &src, &entries, &opts.exclude)
+        select_compress_rows(scan.as_ref(), &src, &entries, &opts.exclude)
     };
-    let selected = match selected {
+    let (generation, selected_rows) = match selected {
         Ok(v) => v,
         Err(e) => {
             release_busy(&state.busy);
             return Err(e);
         }
     };
+    let selected: Vec<Entry> = selected_rows.into_iter().map(|(_, entry)| entry).collect();
+
+    if let Some(params) = &strategy_params {
+        let names: Vec<&str> = selected.iter().map(|entry| entry.name.as_str()).collect();
+        let expected = plan_signature(generation, &names, params);
+        let Some(got) = plan_id else {
+            release_busy(&state.busy);
+            return Err("缺少打包方案 id, 请先审核打包方案".into());
+        };
+        if got != expected {
+            release_busy(&state.busy);
+            return Err("打包方案已变化, 请重新审核".into());
+        }
+    }
 
     let flag = CancelFlag::new();
     if let Ok(mut c) = state.current.lock() {
@@ -488,38 +808,81 @@ async fn compress(
     }
     let src_path = PathBuf::from(&src);
     let dst_path = PathBuf::from(&dst);
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let mut selected = selected;
-        let cb_flag = flag.clone();
-        zip_tool_core::plan(&src_path, &dst_path, &mut selected, &opts)?;
-        zip_tool_core::compress_entries(
-            &src_path,
-            &dst_path,
-            &selected,
-            &opts,
-            &flag,
-            &cb_flag.into_callback(|p| {
-                let _ = on_progress.send(ProgressEvent::from(p));
-            }),
-        )
-    })
-    .await
-    .map_err(|e| e.to_string());
+    let result =
+        tauri::async_runtime::spawn_blocking(move || -> zip_tool_core::Result<CompressOutcome> {
+            let cb_flag = flag.clone();
+            if let Some(params) = strategy_params {
+                let set =
+                    zip_tool_core::plan_packages(&src_path, &dst_path, &selected, &params, &opts)?;
+                let report = zip_tool_core::compress_packages(
+                    &src_path,
+                    &dst_path,
+                    &set.packages,
+                    &opts,
+                    params.split_above,
+                    &flag,
+                    &cb_flag.into_callback(|p| {
+                        let _ = on_progress.send(ProgressEvent::from(p));
+                    }),
+                )?;
+                return Ok(CompressOutcome::Packaged(report));
+            }
+
+            let mut selected = selected;
+            zip_tool_core::plan(&src_path, &dst_path, &mut selected, &opts)?;
+            let report = zip_tool_core::compress_entries(
+                &src_path,
+                &dst_path,
+                &selected,
+                &opts,
+                &flag,
+                &cb_flag.into_callback(|p| {
+                    let _ = on_progress.send(ProgressEvent::from(p));
+                }),
+            )?;
+            Ok(CompressOutcome::Legacy(report))
+        })
+        .await
+        .map_err(|e| e.to_string());
 
     finish_job(&state);
-    let report = result?.map_err(|e| e.to_string())?;
-    Ok(CompressResult {
-        cancelled: report.cancelled,
-        warnings: report.warnings,
-        entries: report
-            .entries
-            .into_iter()
-            .map(|e| ArchiveInfo {
-                archive: e.archive.display().to_string(),
-                original: e.original,
-            })
-            .collect(),
-    })
+    match result?.map_err(|e| e.to_string())? {
+        CompressOutcome::Legacy(report) => Ok(CompressResult {
+            cancelled: report.cancelled,
+            warnings: report.warnings,
+            entries: report
+                .entries
+                .into_iter()
+                .map(|e| ArchiveInfo {
+                    archive: e.archive.display().to_string(),
+                    original: e.original,
+                })
+                .collect(),
+            packages: Vec::new(),
+        }),
+        CompressOutcome::Packaged(report) => Ok(CompressResult {
+            cancelled: report.cancelled,
+            warnings: report.warnings,
+            entries: Vec::new(),
+            packages: report
+                .packages
+                .into_iter()
+                .map(|package| CompressedPackageInfo {
+                    id: package.id,
+                    kind: package_kind_str(package.kind).into(),
+                    archive: package.archive.display().to_string(),
+                    members: package.members,
+                    input_bytes: package.input_bytes,
+                    entry_count: package.entry_count,
+                })
+                .collect(),
+        }),
+    }
+}
+
+enum CompressOutcome {
+    Legacy(zip_tool_core::Report),
+    Packaged(zip_tool_core::PackageReport),
 }
 
 /// 批量解压(3.3): src 必须与最近一次 scan(extract) 的源一致,
@@ -635,6 +998,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             scan,
+            plan_packages,
             compress,
             extract_archive,
             validate_dir,
@@ -664,11 +1028,15 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
     fn entry(name: &str, size: u64, kind: EntryKind) -> Entry {
         Entry {
             name: name.into(),
             kind,
             size,
+            entry_count: 1,
             dst: String::new(),
             format: String::new(),
             exclude: None,
@@ -681,6 +1049,7 @@ mod tests {
             mode: "compress",
             src: PathBuf::from(src),
             rules: ExcludeRules::default(),
+            generation: 1,
             data: ScanData::Compress(ScanReport {
                 entries: vec![
                     entry("A", 1, EntryKind::Dir),
@@ -757,6 +1126,7 @@ mod tests {
             mode: "extract",
             src: PathBuf::from("s"),
             rules: ExcludeRules::default(),
+            generation: 1,
             data: ScanData::Extract(ExtractScan {
                 groups: vec![ExtractGroup {
                     resolved: zip_tool_core::extract::ResolvedArchive {
@@ -911,6 +1281,7 @@ mod tests {
             level: None,
             excludes: None,
             verify: true,
+            packaging: None,
         };
         let mut o = base();
         o.format = Some("7z".into());
@@ -950,6 +1321,7 @@ mod tests {
             level: None,
             excludes: Some(vec!["Thumbs.db".into(), "sub/*.log".into()]),
             verify: true,
+            packaging: None,
         };
         let core = to_core_options(base()).unwrap();
         assert_eq!(core.exclude.patterns.len(), 2);
@@ -979,6 +1351,138 @@ mod tests {
         };
         let err = select_compress(Some(&ctx), "C:\\s", &s(&["A"]), &other).unwrap_err();
         assert!(err.contains("过期"), "{err}");
+    }
+
+    #[test]
+    fn packaging_options_parse_and_validate() {
+        let base = || PackagingOptions {
+            merge_below: Some("100m".into()),
+            split_above: Some("2g".into()),
+            bundle_max: None,
+            max_entries: Some(50_000),
+        };
+
+        let params = to_strategy_params(&base()).unwrap();
+        assert_eq!(params.merge_below, Some(100 * MIB));
+        assert_eq!(params.split_above, Some(2 * GIB));
+        assert_eq!(params.effective_bundle_max(), Some(2 * GIB));
+        assert_eq!(params.max_entries, Some(50_000));
+
+        // 空串 = 关闭
+        let mut o = base();
+        o.merge_below = Some("  ".into());
+        o.split_above = None;
+        let params = to_strategy_params(&o).unwrap();
+        assert_eq!(params.merge_below, None);
+        assert_eq!(params.split_above, None);
+        assert_eq!(params.effective_bundle_max(), None);
+
+        // 不自洽 / 非法值
+        let mut o = base();
+        o.merge_below = Some("200m".into());
+        o.split_above = Some("100m".into());
+        assert!(to_strategy_params(&o).is_err());
+        let mut o = base();
+        o.max_entries = Some(0);
+        assert!(to_strategy_params(&o).is_err());
+        let mut o = base();
+        o.split_above = Some("abc".into());
+        assert!(to_strategy_params(&o).is_err());
+    }
+
+    #[test]
+    fn plan_signature_changes_with_generation_names_and_params() {
+        let params = to_strategy_params(&PackagingOptions {
+            merge_below: Some("100m".into()),
+            split_above: Some("2g".into()),
+            bundle_max: None,
+            max_entries: Some(50_000),
+        })
+        .unwrap();
+        let names = ["A", "B"];
+        let base = plan_signature(1, &names, &params);
+        assert_eq!(base, plan_signature(1, &names, &params));
+        assert_ne!(base, plan_signature(2, &names, &params));
+        assert_ne!(base, plan_signature(1, &["B", "A"], &params));
+
+        let mut changed = params.clone();
+        changed.merge_below = Some(50 * MIB);
+        assert_ne!(base, plan_signature(1, &names, &changed));
+    }
+
+    #[test]
+    fn build_plan_result_maps_members_indexes_and_summary() {
+        let params = to_strategy_params(&PackagingOptions {
+            merge_below: Some("100m".into()),
+            split_above: Some("2g".into()),
+            bundle_max: None,
+            max_entries: Some(50_000),
+        })
+        .unwrap();
+        let rows = vec![
+            (0, entry("A", 3 * GIB, EntryKind::Dir)),
+            (1, entry("b.txt", 2 * MIB, EntryKind::File)),
+            (2, entry("C", MIB, EntryKind::File)),
+        ];
+        let result = build_plan_result(7, &rows, &params).unwrap();
+
+        assert_eq!(
+            result.plan_id,
+            plan_signature(7, &["A", "b.txt", "C"], &params)
+        );
+        assert_eq!(result.summary.total_packages, 2);
+        assert_eq!(result.summary.direct, 0);
+        assert_eq!(result.summary.split, 1);
+        assert_eq!(result.summary.bundle, 1);
+        assert_eq!(result.summary.selected_bytes, 3 * GIB + 3 * MIB);
+        assert_eq!(result.summary.max_direct_or_bundle_bytes, 3 * MIB);
+        assert_eq!(result.summary.max_bundle_entries, 2);
+        assert_eq!(result.summary.effective.bundle_max, Some(2 * GIB));
+
+        assert_eq!(result.packages[0].kind, "split");
+        assert_eq!(result.packages[0].member_indexes, vec![0]);
+        assert_eq!(result.packages[1].kind, "bundle");
+        assert_eq!(result.packages[1].member_indexes, vec![1, 2]);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn build_plan_result_preserves_entry_limit_warning() {
+        let params = to_strategy_params(&PackagingOptions {
+            merge_below: Some("100m".into()),
+            split_above: Some("2g".into()),
+            bundle_max: None,
+            max_entries: Some(1),
+        })
+        .unwrap();
+        let mut big = entry("bigdir", 10 * MIB, EntryKind::Dir);
+        big.entry_count = 2;
+        let rows = vec![(4, big), (5, entry("small", 10 * MIB, EntryKind::File))];
+        let result = build_plan_result(1, &rows, &params).unwrap();
+
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code, "tooManyEntries");
+        assert_eq!(result.warnings[0].member_index, 4);
+        assert_eq!(result.warnings[0].entry_count, 2);
+        assert_eq!(result.warnings[0].limit, 1);
+        assert!(
+            result
+                .packages
+                .iter()
+                .any(|package| { package.kind == "direct" && package.member_indexes == vec![4] })
+        );
+    }
+
+    #[test]
+    fn select_from_report_rejects_unknown_names() {
+        let report = ScanReport {
+            entries: vec![entry("A", 1, EntryKind::Dir)],
+            total_bytes: 1,
+            warnings: Vec::new(),
+            excluded: Vec::new(),
+        };
+        assert!(select_from_report(&report, &s(&["A"])).is_ok());
+        assert!(select_from_report(&report, &s(&["missing"])).is_err());
     }
 
     #[test]

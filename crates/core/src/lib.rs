@@ -29,9 +29,11 @@ pub mod doctor;
 pub mod exclude;
 pub mod extract;
 pub mod naming;
+pub mod packaging;
 pub mod progress;
 pub mod scan;
 mod sevenz_progress;
+pub mod strategy;
 
 pub use backend::{Format, parse_size};
 pub use cancel::CancelFlag;
@@ -40,6 +42,10 @@ pub use exclude::{ExcludeReason, ExcludeRules, ExcludedEntry, validate_patterns}
 pub use extract::{
     ExtractGroup, ExtractReport, ExtractScan, MetaFile, ScanIssue, extract, extract_prepared,
     scan_groups,
+};
+pub use packaging::{
+    PackagePlanSet, PackageReport, PackagedArchive, PlannedPackage, compress_packages,
+    plan_packages,
 };
 pub use progress::{Phase, Progress};
 pub use scan::{Entry, EntryKind, ScanReport, scan_dir};
@@ -91,6 +97,8 @@ pub enum CoreError {
     ToolMissing(String),
     /// 压缩:用户排除模式非法(空串 / 空段 / `**` 位置错误)
     InvalidExclude(String),
+    /// 打包策略参数非法(阈值组合不自洽 / 超出后端能力)
+    InvalidPackaging(String),
     /// 解压:输入目录里没有任何压缩包组
     NoArchives(PathBuf),
     /// 压缩:条目在扫描之后、执行之前消失(分阶段 API 的存在性复核, 提示重新扫描)
@@ -175,6 +183,7 @@ impl fmt::Display for CoreError {
                 write!(f, "required tool {program:?} not found in PATH")
             }
             CoreError::InvalidExclude(msg) => write!(f, "invalid exclude pattern: {msg}"),
+            CoreError::InvalidPackaging(msg) => write!(f, "invalid packaging strategy: {msg}"),
             CoreError::NoArchives(p) => write!(f, "no archives found in: {}", p.display()),
             CoreError::EntryMissing { name } => write!(
                 f,

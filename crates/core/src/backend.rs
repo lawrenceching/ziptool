@@ -2,6 +2,7 @@
 //! - [`Backend::Zip`]:Linux 系统 `zip` 命令,分包 `-s`(B.z01..B.zip)
 //! - [`Backend::SevenZip`]:`7z` 命令(Windows),分包 `-v` + `-tzip`(B.zip.001..)
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -335,6 +336,114 @@ impl Backend {
                     cmd.arg(tok);
                 }
                 cmd.arg("--").arg(out_zip).arg(name);
+            }
+        }
+        cmd.current_dir(work_dir);
+        Ok(cmd)
+    }
+
+    /// 构造"把 work_dir 下多个条目压缩为一个包"的命令(包级策略用)。
+    ///
+    /// 与单条目 `compress_command` 的差异:
+    /// - 多个源条目共用同一个输出包; `Bundle` 不切卷, `Split` 才传 `-s`/`-v`
+    /// - 排除开关按成员逐个生成并去重(zip 全局模式只留一份; 7z 锚定路径各自保留)
+    /// - 7z 成员过多时用 `@listfile`(调用方写文件并清理); zip 后端不支持 listfile
+    pub(crate) fn compress_package_command(
+        &self,
+        work_dir: &Path,
+        sources: &[crate::packaging::PackageSource<'_>],
+        out_archive: &Path,
+        opts: &Options,
+        list_file: Option<&Path>,
+    ) -> Result<Command> {
+        if sources.is_empty() {
+            return Err(CoreError::InvalidPackaging(
+                "package has no source entries".into(),
+            ));
+        }
+
+        let mut cmd = Command::new(self.program());
+        let mut seen = HashSet::new();
+        match self {
+            Backend::Zip => {
+                if list_file.is_some() {
+                    return Err(CoreError::InvalidPackaging(
+                        "zip backend does not support source list files".into(),
+                    ));
+                }
+                cmd.arg("-r");
+                if let Some(size) = opts.split_size {
+                    cmd.arg("-s").arg(format_split_size(size));
+                }
+                if let Some(pw) = &opts.password {
+                    cmd.arg("-P").arg(pw);
+                }
+                if let Some(n) = opts.level {
+                    cmd.arg(format!("-{n}"));
+                }
+                cmd.arg(out_archive);
+                for source in sources {
+                    let src = if source.name.starts_with('-') {
+                        format!("./{}", source.name)
+                    } else {
+                        source.name.to_string()
+                    };
+                    cmd.arg(src);
+                }
+                // Info-ZIP 语法: 排除开关必须在条目名之后
+                for source in sources {
+                    for tok in crate::exclude::exclusion_args(
+                        *self,
+                        source.name,
+                        &opts.exclude,
+                        source.attr_hidden,
+                    ) {
+                        if seen.insert(tok.clone()) {
+                            cmd.arg(tok);
+                        }
+                    }
+                }
+            }
+            Backend::SevenZip => {
+                cmd.arg("a");
+                match opts.format {
+                    Format::Zip => cmd.arg("-tzip"),
+                    Format::SevenZ => cmd.arg("-t7z").arg("-m0=LZMA2"),
+                };
+                if let Some(size) = opts.split_size {
+                    cmd.arg(format!("-v{}", format_split_size(size)));
+                }
+                if let Some(pw) = &opts.password {
+                    cmd.arg(format!("-p{pw}"));
+                }
+                if let Some(n) = opts.level {
+                    cmd.arg(format!("-mx={n}"));
+                }
+                cmd.args(["-bso0", "-bsp1", "-bse1"]);
+                for source in sources {
+                    for tok in crate::exclude::exclusion_args(
+                        *self,
+                        source.name,
+                        &opts.exclude,
+                        source.attr_hidden,
+                    ) {
+                        if seen.insert(tok.clone()) {
+                            cmd.arg(tok);
+                        }
+                    }
+                }
+                if let Some(list) = list_file {
+                    // listfile 用 UTF-8; -spd 关闭通配符解释, 成员名按字面量处理。
+                    // 必须用 -i@list 而不是 -- 后的 @list: -- 会停止开关解析, @list 会被当成普通文件名。
+                    cmd.arg("-scsUTF-8").arg("-spd");
+                    cmd.arg(format!("-i@{}", list.display()));
+                }
+                cmd.arg("--").arg(out_archive);
+                if list_file.is_none() {
+                    for source in sources {
+                        cmd.arg(source.name);
+                    }
+                }
             }
         }
         cmd.current_dir(work_dir);
@@ -1521,6 +1630,146 @@ mod tests {
         assert_eq!(format_split_size(500 * 1024 * 1024), "500m");
         assert_eq!(format_split_size(64 * 1024), "64k");
         assert_eq!(format_split_size(100_000), "100000");
+    }
+
+    fn sources<'a>(names: &'a [&'a str]) -> Vec<crate::packaging::PackageSource<'a>> {
+        names
+            .iter()
+            .map(|name| crate::packaging::PackageSource {
+                name,
+                attr_hidden: &[],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sevenzip_package_command_uses_multiple_sources_without_split() {
+        let names = ["A", "B", "C"];
+        let cmd = Backend::SevenZip
+            .compress_package_command(
+                Path::new("D:/data"),
+                &sources(&names),
+                Path::new("E:/out/_bundle_0001.zip"),
+                &opts_fmt(Format::Zip, None),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "a",
+                "-tzip",
+                "-bso0",
+                "-bsp1",
+                "-bse1",
+                "--",
+                "E:/out/_bundle_0001.zip",
+                "A",
+                "B",
+                "C"
+            ]
+        );
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("D:/data")));
+    }
+
+    #[test]
+    fn sevenzip_package_command_split_only_when_requested() {
+        let names = ["A"];
+        let mut o = opts_fmt(Format::SevenZ, None);
+        o.split_size = Some(2 * 1024 * 1024 * 1024);
+        let cmd = Backend::SevenZip
+            .compress_package_command(
+                Path::new("D:/data"),
+                &sources(&names),
+                Path::new("E:/out/A.7z"),
+                &o,
+                None,
+            )
+            .unwrap();
+        let args = args_of(&cmd);
+        assert!(args.contains(&"-v2g".to_string()), "{args:?}");
+        assert_eq!(args.last().unwrap(), "A");
+    }
+
+    #[test]
+    fn sevenzip_package_command_list_file_uses_utf8_and_spd() {
+        let names = ["A", "B"];
+        let cmd = Backend::SevenZip
+            .compress_package_command(
+                Path::new("D:/data"),
+                &sources(&names),
+                Path::new("E:/out/_bundle_0001.zip"),
+                &opts_fmt(Format::Zip, None),
+                Some(Path::new("E:/out/list.txt")),
+            )
+            .unwrap();
+        let args = args_of(&cmd);
+        assert!(args.contains(&"-scsUTF-8".to_string()), "{args:?}");
+        assert!(args.contains(&"-spd".to_string()), "{args:?}");
+        assert!(args.contains(&"-i@E:/out/list.txt".to_string()), "{args:?}");
+        assert!(
+            !args.contains(&"A".to_string()),
+            "listfile 不应再传名字: {args:?}"
+        );
+    }
+
+    #[test]
+    fn zip_package_command_places_excludes_after_all_sources() {
+        let names = ["A", "B"];
+        let mut o = opts_fmt(Format::Zip, None);
+        o.exclude.include_hidden = true;
+        o.exclude.patterns = vec!["*.tmp".into()];
+        let cmd = Backend::Zip
+            .compress_package_command(
+                Path::new("/in"),
+                &sources(&names),
+                Path::new("/out/_bundle_0001.zip"),
+                &o,
+                None,
+            )
+            .unwrap();
+        let args = args_of(&cmd);
+        let a = args.iter().position(|x| x == "A").unwrap();
+        let b = args.iter().position(|x| x == "B").unwrap();
+        let x = args.iter().position(|x| x == "-x").unwrap();
+        assert!(a < b && b < x, "排除开关必须在全部条目名之后: {args:?}");
+        assert!(args.contains(&"*/ *.tmp".to_string()) || args.contains(&"*/*.tmp".to_string()));
+    }
+
+    #[test]
+    fn package_command_rejects_empty_sources() {
+        let err = Backend::SevenZip
+            .compress_package_command(
+                Path::new("D:/data"),
+                &[],
+                Path::new("E:/out/x.zip"),
+                &opts_fmt(Format::Zip, None),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidPackaging(_)));
+    }
+
+    #[test]
+    fn package_command_dedupes_global_excludes() {
+        let names = ["A", "B", "C"];
+        let mut o = opts_fmt(Format::SevenZ, None);
+        o.exclude.include_hidden = true;
+        o.exclude.patterns = vec!["Thumbs.db".into()];
+        let cmd = Backend::SevenZip
+            .compress_package_command(
+                Path::new("D:/data"),
+                &sources(&names),
+                Path::new("E:/out/_bundle_0001.7z"),
+                &o,
+                None,
+            )
+            .unwrap();
+        let count = args_of(&cmd)
+            .iter()
+            .filter(|arg| arg.as_str() == "-xr!Thumbs.db")
+            .count();
+        assert_eq!(count, 1, "全局 basename 模式只应发一次");
     }
 }
 

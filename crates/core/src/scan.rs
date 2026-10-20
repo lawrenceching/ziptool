@@ -19,6 +19,8 @@ pub struct Entry {
     pub kind: EntryKind,
     /// 递归统计的字节大小:文件为自身大小, 目录为其中所有普通文件大小之和
     pub size: u64,
+    /// 包内条目数(普通文件 + 目录; 目录自身也计 1; 空目录 = 1)
+    pub entry_count: usize,
     /// 压缩包基础名(不带扩展名), 由 Step 2 填充; 扫描后为空串
     pub dst: String,
     /// 压缩包格式("zip"/"7z"), 由 Step 2 按 Options.format 填充; 扫描后为空串
@@ -78,12 +80,12 @@ pub fn scan_dir(
     for (i, name) in names.into_iter().enumerate() {
         let path = input.join(&name);
         let mut attr_hidden = Vec::new();
-        let (kind, size) = match fs::symlink_metadata(&path) {
+        let (kind, size, entry_count) = match fs::symlink_metadata(&path) {
             Ok(md) => {
                 if md.file_type().is_dir() {
                     let mut collector = AttrCollector::new(name.clone());
                     // 目录: 只统计普通文件与链接自身, 不跟随目录链接(避免循环与重复计数)
-                    let sz = dir_size(
+                    let (sz, count) = dir_size(
                         &path,
                         &name,
                         rules,
@@ -91,15 +93,15 @@ pub fn scan_dir(
                         collect_attrs.then_some(&mut collector),
                     );
                     attr_hidden = collector.finish(&mut report.warnings);
-                    (EntryKind::Dir, sz)
+                    (EntryKind::Dir, sz, count)
                 } else {
                     // 文件与符号链接都按自身大小计, 链接归为 File
-                    (EntryKind::File, md.len())
+                    (EntryKind::File, md.len(), 1)
                 }
             }
             Err(e) => {
                 report.warnings.push(format!("{}: {e}", path.display()));
-                (EntryKind::File, 0)
+                (EntryKind::File, 0, 0)
             }
         };
         // 顶层打标: 隐藏(OS 原生口径: Unix 名字 / Windows 属性)优先, 其次用户模式
@@ -124,6 +126,7 @@ pub fn scan_dir(
             name,
             kind,
             size,
+            entry_count,
             dst: String::new(),
             format: String::new(),
             exclude,
@@ -147,7 +150,8 @@ pub fn scan_dir(
     Ok(report)
 }
 
-/// 递归累加目录下所有普通文件/链接自身的大小; 栈式迭代避免深递归。
+/// 递归累加目录下所有普通文件/链接自身的大小与条目数(目录自身计 1);
+/// 栈式迭代避免深递归。
 /// 无权限等读不了的子树计 0 并记 warning, 不中断。
 /// 排除(树内): 用户模式(条目名前缀相对路径, 与后端开关同坐标系)+ Unix 名字隐藏;
 /// 命中文件不计尺寸, 命中目录整树不下钻。Windows 属性隐藏(attrs=Some 时)收集相对路径而非打标。
@@ -157,8 +161,10 @@ fn dir_size(
     rules: &ExcludeRules,
     warnings: &mut Vec<String>,
     mut attrs: Option<&mut AttrCollector>,
-) -> u64 {
+) -> (u64, usize) {
     let mut total = 0u64;
+    // 目录自身也计 1 个条目(空目录 = 1, 与 strategy::StrategyItem.entry_count 对齐)
+    let mut entries = 1usize;
     let mut stack = vec![(dir.to_path_buf(), String::new())]; // (目录, 相对条目根的前缀)
     while let Some((d, prefix)) = stack.pop() {
         let rd = match fs::read_dir(&d) {
@@ -207,6 +213,7 @@ fn dir_size(
                 }
                 continue; // 不计尺寸; 目录不入栈(整树剔除/不下钻)
             }
+            entries += 1;
             if md.file_type().is_dir() {
                 stack.push((path, rel));
             } else {
@@ -214,7 +221,7 @@ fn dir_size(
             }
         }
     }
-    total
+    (total, entries)
 }
 
 #[cfg(test)]
@@ -394,12 +401,18 @@ mod tests {
         assert_eq!(report.entries[0].name, "a.txt");
         assert_eq!(report.entries[0].kind, EntryKind::File);
         assert_eq!(report.entries[0].size, 1);
+        assert_eq!(report.entries[0].entry_count, 1);
         assert_eq!(report.entries[1].name, "b_dir");
         assert_eq!(report.entries[1].kind, EntryKind::Dir);
         assert_eq!(report.entries[1].size, 7, "目录大小 = 递归文件大小之和");
+        assert_eq!(
+            report.entries[1].entry_count, 4,
+            "b_dir 自身 + nested 目录 + 2 个文件"
+        );
         assert_eq!(report.entries[2].name, "empty_dir");
         assert_eq!(report.entries[2].kind, EntryKind::Dir);
         assert_eq!(report.entries[2].size, 0);
+        assert_eq!(report.entries[2].entry_count, 1, "空目录自身计 1");
         assert_eq!(report.total_bytes, 8);
         assert!(report.warnings.is_empty());
         // dst 与 format 均由 Step 2 填充, 扫描不感知格式

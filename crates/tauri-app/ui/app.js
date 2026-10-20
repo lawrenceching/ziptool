@@ -11,7 +11,20 @@ const t = (key, params) => i18n.t(key, params);
 const state = {
   mode: "compress",
   rows: [], // 行序 = scan 返回序(行状态推导协议依赖此顺序)
-  run: null, // { sel: [行下标], done, total, failed } 运行中才非空
+  run: null, // { sel: [行下标], done, total, failed, finished }
+  plan: null, // { planId, packages, summary, warnings }
+  planSeq: 0, // 丢弃过期异步方案
+  planning: false,
+  planError: null,
+  planOpen: false,
+  planFilter: "all",
+};
+
+const DEFAULT_PACKAGING = {
+  mergeBelow: "100m",
+  splitAbove: "2g",
+  bundleMax: "",
+  maxEntries: "50000",
 };
 
 // 原生拖拽: 两个投放区 + 最近命中行 + 校验竞态 token
@@ -31,6 +44,14 @@ const BADGE = {
   failed: "bg-red-50 text-red-600",
   meta: "bg-slate-100 text-slate-400",
   warning: "bg-amber-50 text-amber-600",
+};
+
+const PKG_BADGE = {
+  direct: "bg-slate-100 text-slate-600",
+  split: "bg-amber-50 text-amber-700",
+  bundle: "bg-blue-50 text-blue-700",
+  warning: "bg-amber-50 text-amber-700",
+  none: "text-slate-400",
 };
 
 // 压缩模式预设 = 底层参数组合(格式 + 强度);core/CLI 无"模式"概念(_docs/compress-modes.md)
@@ -157,6 +178,8 @@ document.addEventListener("keydown", (e) => {
 window.addEventListener("localechange", () => {
   renderStatus();
   renderTable(state.rows);
+  renderPlanSummary();
+  renderPlanDialog();
   updatePwHint();
   syncActionButton();
   syncLanguageMenu();
@@ -196,13 +219,15 @@ function clearTable() {
   state.run = null;
   $("rows").textContent = "";
   $("empty").classList.remove("hidden");
+  clearPlan();
   syncConfirm();
 }
 
 // —— 任务互斥的 UI 侧: 任务期间锁控件(确认钮另行切换成取消) ——
 const LOCK_IDS = [
   "mode-compress", "mode-extract", "src", "dst",
-  "opt-split", "opt-password", "opt-random", "opt-force",
+  "opt-split", "opt-merge-below", "opt-bundle-max", "opt-max-entries",
+  "opt-password", "opt-random", "opt-force",
   "preset-compat", "preset-balanced", "opt-advanced", "opt-format", "opt-level",
   "opt-exclude", "opt-verify",
 ];
@@ -228,8 +253,10 @@ function setMode(mode) {
     "px-5 py-1.5 font-medium bg-white text-slate-600 hover:bg-slate-50 transition-colors";
   $("mode-compress").className = mode === "compress" ? on : off;
   $("mode-extract").className = mode === "extract" ? on : off + " border-l border-slate-300";
-  // 选项显隐: 压缩=分包+随机名, 解压=覆盖; 密码两模式共用
-  $("opt-split-wrap").classList.toggle("hidden", mode !== "compress");
+  // 选项显隐: 压缩=策略/随机名, 解压=覆盖; 密码两模式共用
+  $("strategy-row").classList.toggle("hidden", mode !== "compress");
+  $("strategy-row").classList.toggle("flex", mode === "compress");
+  $("th-package").classList.toggle("hidden", mode !== "compress");
   $("opt-random-wrap").classList.toggle("hidden", mode !== "compress");
   $("opt-verify-wrap").classList.toggle("hidden", mode !== "compress");
   $("opt-force-wrap").classList.toggle("hidden", mode !== "extract");
@@ -238,6 +265,7 @@ function setMode(mode) {
   $("opt-preset-wrap").classList.toggle("flex", mode === "compress");
   $("opt-advanced-wrap").classList.toggle("hidden", mode !== "compress");
   $("opt-advanced-wrap").classList.toggle("flex", mode === "compress");
+  if (switched) clearPlan();
   if (switched && state.rows.length > 0) {
     $("src").value = "";
     clearTable();
@@ -272,6 +300,503 @@ function parseExcludes() {
     .filter(Boolean);
 }
 
+// —— 打包策略输入 / 勾选名单 ——
+function readPackaging() {
+  const maxRaw = $("opt-max-entries").value.trim();
+  return {
+    mergeBelow: $("opt-merge-below").value.trim() || null,
+    splitAbove: $("opt-split").value.trim() || null,
+    bundleMax: $("opt-bundle-max").value.trim() || null,
+    maxEntries: maxRaw === "" ? null : Number(maxRaw),
+  };
+}
+
+function selectedRowIndexes() {
+  return state.rows
+    .map((r, i) => (r.status === "pending" && r.checked ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+// 浏览器预览: 简单复刻 strategy 的分类/FFD, 只用于 mock 模式
+function parseMockSize(text, fallback) {
+  if (text == null || String(text).trim() === "") return fallback;
+  const m = /^(\d+(?:\.\d+)?)\s*([kmg])?$/i.exec(String(text).trim());
+  if (!m) return fallback;
+  const n = Number(m[1]);
+  const unit = (m[2] || "").toLowerCase();
+  const mult = unit === "g" ? 1024 ** 3 : unit === "m" ? 1024 ** 2 : unit === "k" ? 1024 : 1;
+  return Math.round(n * mult);
+}
+
+function mockPlan(indexes) {
+  const p = readPackaging();
+  const merge = parseMockSize(p.mergeBelow, 100 * 1024 ** 2);
+  const split = parseMockSize(p.splitAbove, 2 * 1024 ** 3);
+  const bundleMax = parseMockSize(p.bundleMax, split ?? 2 * 1024 ** 3);
+  const maxEntries = p.maxEntries && p.maxEntries > 0 ? p.maxEntries : null;
+
+  const packages = [];
+  const candidates = [];
+  indexes.forEach((idx) => {
+    const row = state.rows[idx];
+    const item = { index: idx, size: row.size, entries: 1 };
+    if (split != null && row.size > split) {
+      packages.push({ kind: "split", members: [item] });
+    } else if (merge != null && row.size <= merge) {
+      candidates.push(item);
+    } else {
+      packages.push({ kind: "direct", members: [item] });
+    }
+  });
+
+  const bundles = [];
+  candidates
+    .sort((a, b) => b.size - a.size || a.index - b.index)
+    .forEach((item) => {
+      const target = bundles.find(
+        (b) =>
+          b.bytes + item.size <= bundleMax &&
+          (!maxEntries || b.entries + item.entries <= maxEntries)
+      );
+      if (target) {
+        target.members.push(item);
+        target.bytes += item.size;
+        target.entries += item.entries;
+      } else {
+        bundles.push({ members: [item], bytes: item.size, entries: item.entries });
+      }
+    });
+  bundles.forEach((b) => {
+    if (b.members.length === 1) {
+      packages.push({ kind: "direct", members: b.members });
+    } else {
+      packages.push({ kind: "bundle", members: b.members });
+    }
+  });
+
+  const out = packages.map((pkg, i) => ({
+    id: `p${i}`,
+    kind: pkg.kind,
+    memberIndexes: pkg.members.map((m) => m.index),
+    inputBytes: pkg.members.reduce((s, m) => s + m.size, 0),
+    entryCount: pkg.members.reduce((s, m) => s + m.entries, 0),
+  }));
+  const count = (kind) => out.filter((pkg) => pkg.kind === kind).length;
+  const maxDirectOrBundleBytes = out
+    .filter((pkg) => pkg.kind !== "split")
+    .reduce((max, pkg) => Math.max(max, pkg.inputBytes), 0);
+  const maxBundleEntries = out
+    .filter((pkg) => pkg.kind === "bundle")
+    .reduce((max, pkg) => Math.max(max, pkg.entryCount), 0);
+  return {
+    planId: `mock-${indexes.join(",")}-${JSON.stringify(p)}`,
+    packages: out,
+    summary: {
+      totalPackages: out.length,
+      direct: count("direct"),
+      split: count("split"),
+      bundle: count("bundle"),
+      selectedBytes: indexes.reduce((s, i) => s + state.rows[i].size, 0),
+      maxDirectOrBundleBytes,
+      maxBundleEntries,
+      effective: {
+        mergeBelow: merge,
+        splitAbove: split,
+        bundleMax,
+        maxEntries,
+      },
+    },
+    warnings: [],
+  };
+}
+
+// —— 打包方案: 计算 / 行映射 / 摘要 / 抽屉 ——
+let planTimer = null;
+
+function invalidatePlan() {
+  state.planSeq++;
+  state.plan = null;
+  state.planError = null;
+  state.planning = true;
+  applyPlanToRows();
+  renderTable(state.rows);
+  renderPlanSummary();
+  if (state.planOpen) renderPlanDialog();
+  syncConfirm();
+}
+
+function schedulePlan() {
+  if (state.mode !== "compress") return;
+  invalidatePlan();
+  if (planTimer) clearTimeout(planTimer);
+  planTimer = setTimeout(() => {
+    planTimer = null;
+    refreshPlan();
+  }, 180);
+}
+
+function clearPlan() {
+  state.planSeq++;
+  state.plan = null;
+  state.planning = false;
+  state.planError = null;
+  state.planOpen = false;
+  $("plan-backdrop")?.classList.add("hidden");
+  state.rows.forEach((row) => {
+    delete row.packageId;
+    delete row.packageKind;
+    delete row.packageIndex;
+    delete row.packageOrdinal;
+    delete row.packageTip;
+    delete row.packageWarning;
+  });
+  renderPlanSummary();
+  syncConfirm();
+}
+
+function applyPlanToRows() {
+  state.rows.forEach((row) => {
+    delete row.packageId;
+    delete row.packageKind;
+    delete row.packageIndex;
+    delete row.packageOrdinal;
+    delete row.packageTip;
+    delete row.packageWarning;
+  });
+  if (!state.plan) return;
+  const eff = state.plan.summary?.effective ?? {};
+  const warnings = new Map(
+    (state.plan.warnings ?? []).map((warning) => [warning.memberIndex, warning])
+  );
+  const ordinals = { direct: 0, split: 0, bundle: 0 };
+  state.plan.packages.forEach((pkg, packageIndex) => {
+    ordinals[pkg.kind] = (ordinals[pkg.kind] ?? 0) + 1;
+    pkg.memberIndexes.forEach((rowIndex) => {
+      const row = state.rows[rowIndex];
+      if (!row) return;
+      row.packageId = pkg.id;
+      row.packageKind = pkg.kind;
+      row.packageIndex = packageIndex;
+      row.packageOrdinal = ordinals[pkg.kind];
+      const warning = warnings.get(rowIndex);
+      if (warning) {
+        row.packageWarning = true;
+        row.packageTip = t("plan.warning.tooManyEntries", {
+          name: row.name,
+          count: warning.entryCount,
+          limit: warning.limit,
+        });
+      } else if (pkg.kind === "split") {
+        row.packageTip = t("plan.reason.split", {
+          size: fmtBytes(row.size),
+          limit: fmtBytes(eff.splitAbove ?? 0),
+        });
+      } else if (pkg.kind === "bundle") {
+        row.packageTip = t("plan.reason.merge", {
+          size: fmtBytes(row.size),
+          limit: fmtBytes(eff.mergeBelow ?? 0),
+        });
+      } else {
+        row.packageTip = t("plan.reason.direct", { size: fmtBytes(row.size) });
+      }
+    });
+  });
+}
+
+function packageLabel(row) {
+  if (!row.packageKind) return "—";
+  if (row.packageWarning) return t("plan.kind.directOver");
+  if (row.packageKind === "bundle") {
+    return t("plan.kind.bundleN", { n: row.packageOrdinal });
+  }
+  return t(`plan.kind.${row.packageKind}`);
+}
+
+function packageBadgeClass(row) {
+  if (!row.packageKind) return PKG_BADGE.none;
+  if (row.packageWarning) return PKG_BADGE.warning;
+  return PKG_BADGE[row.packageKind] ?? PKG_BADGE.none;
+}
+
+function planSummaryText() {
+  if (state.mode !== "compress") return "";
+  if (!state.rows.length) return t("plan.summary.idle");
+  if (!selectedRowIndexes().length) return t("plan.summary.noSelection");
+  if (state.planError) return t("plan.summary.error", { error: state.planError });
+  if (state.planning) return t("plan.summary.planning");
+  if (!state.plan) return t("plan.summary.noSelection");
+  const s = state.plan.summary;
+  let text = t("plan.summary.text", {
+    total: s.totalPackages,
+    direct: s.direct,
+    split: s.split,
+    bundle: s.bundle,
+    max: fmtBytes(s.maxDirectOrBundleBytes),
+  });
+  if (s.split > 0) {
+    text += " · " + t("plan.summary.splitNote", {
+      count: s.split,
+      limit: fmtBytes(s.effective?.splitAbove ?? 0),
+    });
+  }
+  if ((state.plan.warnings ?? []).length > 0) {
+    text += " · " + t("plan.summary.warnings", {
+      count: state.plan.warnings.length,
+    });
+  }
+  return text;
+}
+
+function renderPlanSummary() {
+  const el = $("plan-summary");
+  const button = $("plan-open");
+  if (!el || !button) return;
+  const text = planSummaryText();
+  el.textContent = text;
+  el.title = text;
+  el.className = "text-xs " +
+    (state.planError ? "text-red-600" : state.planning ? "text-slate-400" : "text-slate-600");
+  button.disabled =
+    state.mode !== "compress" || !state.plan || state.planning || !!state.planError;
+}
+
+async function refreshPlan() {
+  if (state.mode !== "compress" || !$("src").value || !state.rows.length) {
+    clearPlan();
+    return;
+  }
+  const indexes = selectedRowIndexes();
+  if (!indexes.length) {
+    clearPlan();
+    renderTable(state.rows);
+    return;
+  }
+
+  const seq = ++state.planSeq;
+  state.planning = true;
+  state.planError = null;
+  renderPlanSummary();
+  syncConfirm();
+  const names = indexes.map((i) => state.rows[i].name);
+  try {
+    const result = hasTauri()
+      ? await invoke("plan_packages", {
+          src: $("src").value,
+          entries: names,
+          packaging: readPackaging(),
+        })
+      : mockPlan(indexes);
+    if (seq !== state.planSeq) return;
+    state.plan = result;
+    state.planning = false;
+    state.planError = null;
+    applyPlanToRows();
+    renderTable(state.rows);
+    renderPlanSummary();
+    if (state.planOpen) renderPlanDialog();
+  } catch (error) {
+    if (seq !== state.planSeq) return;
+    state.plan = null;
+    state.planning = false;
+    state.planError = String(error);
+    applyPlanToRows();
+    renderTable(state.rows);
+    renderPlanSummary();
+    if (state.planOpen) renderPlanDialog();
+  }
+  syncConfirm();
+}
+
+function planKindLabel(pkg) {
+  if (pkg.kind === "bundle") {
+    const n =
+      state.plan.packages.filter((p) => p.kind === "bundle").indexOf(pkg) + 1;
+    return t("plan.kind.bundleN", { n });
+  }
+  return t(`plan.kind.${pkg.kind}`);
+}
+
+function formatLimit(value) {
+  return value == null ? "—" : fmtBytes(value);
+}
+
+function renderPlanCard(pkg) {
+  const card = document.createElement("div");
+  card.className = "rounded-lg border border-slate-200 overflow-hidden";
+
+  const header = document.createElement("div");
+  header.className = "flex flex-wrap items-center gap-2 bg-slate-50 px-3 py-2";
+  const badge = document.createElement("span");
+  badge.className =
+    "inline-block rounded-full px-2 py-0.5 text-xs " +
+    (PKG_BADGE[pkg.kind] ?? PKG_BADGE.none);
+  badge.textContent = planKindLabel(pkg);
+  const meta = document.createElement("span");
+  meta.className = "text-xs text-slate-500";
+  meta.textContent = t("plan.packageMeta", {
+    size: fmtBytes(pkg.inputBytes),
+    members: pkg.memberIndexes.length,
+    entries: pkg.entryCount,
+  });
+  header.append(badge, meta);
+
+  const body = document.createElement("div");
+  body.className = "space-y-1 px-3 py-2";
+  pkg.memberIndexes.slice(0, 20).forEach((rowIndex) => {
+    const row = state.rows[rowIndex];
+    if (!row) return;
+    const line = document.createElement("button");
+    line.type = "button";
+    line.dataset.rowIndex = String(rowIndex);
+    line.className =
+      "flex w-full items-center justify-between gap-3 rounded px-1.5 py-1 text-left text-xs text-slate-700 hover:bg-blue-50";
+    const name = document.createElement("span");
+    name.className = "truncate";
+    name.textContent = row.name;
+    const size = document.createElement("span");
+    size.className = "shrink-0 tabular-nums text-slate-500";
+    size.textContent = fmtBytes(row.size);
+    line.append(name, size);
+    body.append(line);
+  });
+  if (pkg.memberIndexes.length > 20) {
+    const more = document.createElement("div");
+    more.className = "px-1.5 text-xs text-slate-400";
+    more.textContent = t("plan.moreMembers", {
+      count: pkg.memberIndexes.length - 20,
+    });
+    body.append(more);
+  }
+  if (pkg.kind === "split") {
+    const note = document.createElement("p");
+    note.className = "px-1.5 pt-1 text-xs text-amber-700";
+    note.textContent = t("plan.splitCardNote", {
+      limit: formatLimit(state.plan?.summary?.effective?.splitAbove),
+    });
+    body.append(note);
+  }
+
+  card.append(header, body);
+  return card;
+}
+
+function renderPlanDialog() {
+  const backdrop = $("plan-backdrop");
+  if (!backdrop) return;
+  backdrop.classList.toggle("hidden", !state.planOpen);
+  if (!state.planOpen) return;
+
+  const plan = state.plan;
+  const eff = plan?.summary?.effective ?? {};
+  $("plan-strategy").textContent = plan
+    ? t("plan.strategyLine", {
+        merge: formatLimit(eff.mergeBelow),
+        split: formatLimit(eff.splitAbove),
+        bundle: formatLimit(eff.bundleMax),
+        entries: eff.maxEntries == null ? "∞" : eff.maxEntries,
+      })
+    : "";
+
+  const counts = {
+    all: plan?.packages.length ?? 0,
+    direct: plan?.summary?.direct ?? 0,
+    split: plan?.summary?.split ?? 0,
+    bundle: plan?.summary?.bundle ?? 0,
+  };
+  document.querySelectorAll("[data-plan-filter]").forEach((button) => {
+    const filter = button.dataset.planFilter;
+    button.textContent = `${t(`plan.filter.${filter}`)} ${counts[filter] ?? 0}`;
+    const active = state.planFilter === filter;
+    button.className =
+      "rounded-full border px-2 py-0.5 " +
+      (active
+        ? "border-blue-500 bg-blue-50 text-blue-700"
+        : "border-slate-300 text-slate-600");
+  });
+
+  const warnings = $("plan-warnings");
+  if (plan?.warnings?.length) {
+    warnings.classList.remove("hidden");
+    warnings.textContent = plan.warnings
+      .map((warning) => {
+        const row = state.rows[warning.memberIndex];
+        return t("plan.warning.tooManyEntries", {
+          name: row?.name ?? "?",
+          count: warning.entryCount,
+          limit: warning.limit,
+        });
+      })
+      .join("；");
+  } else {
+    warnings.classList.add("hidden");
+    warnings.textContent = "";
+  }
+
+  const list = $("plan-list");
+  list.textContent = "";
+  if (!plan) {
+    const empty = document.createElement("p");
+    empty.className = "py-10 text-center text-sm text-slate-400";
+    empty.textContent = state.planning
+      ? t("plan.summary.planning")
+      : t("plan.summary.noSelection");
+    list.append(empty);
+    return;
+  }
+  const packages = plan.packages.filter(
+    (pkg) => state.planFilter === "all" || pkg.kind === state.planFilter
+  );
+  if (!packages.length) {
+    const empty = document.createElement("p");
+    empty.className = "py-10 text-center text-sm text-slate-400";
+    empty.textContent = t("plan.empty");
+    list.append(empty);
+    return;
+  }
+  const limit = 200;
+  packages.slice(0, limit).forEach((pkg) => list.append(renderPlanCard(pkg)));
+  if (packages.length > limit) {
+    const more = document.createElement("p");
+    more.className = "py-2 text-center text-xs text-slate-400";
+    more.textContent = t("plan.morePackages", { count: packages.length - limit });
+    list.append(more);
+  }
+}
+
+function setPlanOpen(open) {
+  state.planOpen = open;
+  renderPlanDialog();
+  if (open) $("plan-close")?.focus();
+  else $("plan-open")?.focus();
+}
+
+function highlightRow(rowIndex) {
+  const tr = $("rows").querySelector(`tr[data-row-index="${rowIndex}"]`);
+  if (!tr) return;
+  tr.scrollIntoView?.({ block: "center" });
+  tr.classList.add("bg-amber-50");
+  setTimeout(() => tr.classList.remove("bg-amber-50"), 1200);
+}
+
+$("plan-open").addEventListener("click", () => setPlanOpen(true));
+$("plan-close").addEventListener("click", () => setPlanOpen(false));
+$("plan-backdrop").addEventListener("click", (event) => {
+  if (event.target === $("plan-backdrop")) setPlanOpen(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.planOpen) setPlanOpen(false);
+});
+$("plan-filters").addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-plan-filter]");
+  if (!button) return;
+  state.planFilter = button.dataset.planFilter;
+  renderPlanDialog();
+});
+$("plan-list").addEventListener("click", (event) => {
+  const target = event.target.closest?.("[data-row-index]");
+  if (target) highlightRow(Number(target.dataset.rowIndex));
+});
+
 // —— 扫描: invoke("scan"), 结果渲染表格并缓存在外壳 ——
 async function doScan(path) {
   clearTable();
@@ -282,6 +807,7 @@ async function doScan(path) {
       const items = mockScan(path);
       renderTable(items);
       setStatus("status.previewScan", { path, count: items.length });
+      await refreshPlan();
       return;
     }
     const args = { mode: state.mode, path, onProgress: makeChannel() };
@@ -294,7 +820,9 @@ async function doScan(path) {
       bytes: res.totalBytes,
       warnings: res.warnings,
     });
+    await refreshPlan();
   } catch (e) {
+    clearPlan();
     setStatus("status.scanFailed", { error: String(e) });
   } finally {
     setLocked(false);
@@ -434,6 +962,13 @@ function displayStatus(i) {
   const r = state.rows[i];
   if (r.status !== "pending") return r.status; // meta / warning / done / failed
   if (!state.run) return "pending";
+  if (state.plan && r.packageIndex != null) {
+    if (r.packageIndex < state.run.done) return "done";
+    if (r.packageIndex === state.run.done) {
+      return state.run.finished ? "done" : "running";
+    }
+    return "pending";
+  }
   const pos = state.run.sel.indexOf(i);
   if (pos === -1 || pos > state.run.done) return "pending";
   if (pos < state.run.done) return "done";
@@ -468,6 +1003,7 @@ function renderTable(items) {
     cb.addEventListener("change", () => {
       state.rows[i].checked = cb.checked;
       syncConfirm();
+      schedulePlan();
     });
     td0.appendChild(cb);
 
@@ -478,6 +1014,7 @@ function renderTable(items) {
       r.excluded,
       r.original ? t("row.original", { name: r.original }) : null,
       r.detail,
+      r.packageTip,
     ]
       .filter(Boolean)
       .join(", ");
@@ -487,6 +1024,16 @@ function renderTable(items) {
     const td2 = document.createElement("td");
     td2.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
     td2.textContent = fmtBytes(r.size);
+
+    const tdPkg = document.createElement("td");
+    tdPkg.className = "py-2 pr-2 text-xs";
+    tdPkg.classList.toggle("hidden", state.mode !== "compress");
+    const pkgBadge = document.createElement("span");
+    pkgBadge.className =
+      "inline-block rounded-full px-2 py-0.5 text-xs " + packageBadgeClass(r);
+    pkgBadge.textContent = packageLabel(r);
+    if (r.packageTip) pkgBadge.title = r.packageTip;
+    tdPkg.appendChild(pkgBadge);
 
     const td3 = document.createElement("td");
     td3.className = "py-2 pr-4";
@@ -513,7 +1060,8 @@ function renderTable(items) {
     if (st === "warning") badge.title = r.detail || "";
     td3.appendChild(badge);
 
-    tr.append(td0, td1, td2, td3);
+    tr.dataset.rowIndex = String(i);
+    tr.append(td0, td1, td2, tdPkg, td3);
     tbody.appendChild(tr);
   }
   syncConfirm();
@@ -524,7 +1072,10 @@ function syncConfirm() {
   const selectable = state.rows.filter((r) => r.status === "pending");
   const n = selectable.filter((r) => r.checked).length;
   const all = selectable.length > 0 && n === selectable.length;
-  $("confirm").disabled = !!state.run ? false : n === 0;
+  const needPlan =
+    state.mode === "compress" &&
+    (!!state.planError || (!state.plan && !state.planning));
+  $("confirm").disabled = !!state.run ? false : n === 0 || needPlan;
   const allBox = $("check-all");
   allBox.checked = all;
   allBox.indeterminate = n > 0 && !all;
@@ -536,6 +1087,7 @@ $("check-all").addEventListener("change", (e) => {
     if (r.status === "pending") state.rows[i].checked = e.target.checked;
   }
   renderTable(state.rows);
+  schedulePlan();
 });
 
 // —— 确认 → 执行 / 运行中 → 取消 ——
@@ -546,12 +1098,18 @@ $("confirm").addEventListener("click", async () => {
     else mockCancel?.();
     return;
   }
-  const sel = state.rows
-    .map((r, i) => (r.status === "pending" && r.checked ? i : -1))
-    .filter((i) => i >= 0);
+  const sel = selectedRowIndexes();
   if (sel.length === 0) {
     setStatus("status.needSelection");
     return;
+  }
+  if (state.mode === "compress" && (!state.plan || state.planning)) {
+    // 用户刚改勾选/阈值就点确认: 等最新方案算完, 不拿旧方案开工
+    if (planTimer) {
+      clearTimeout(planTimer);
+      planTimer = null;
+    }
+    await refreshPlan();
   }
   if (!$("dst").value.trim()) {
     setStatus("status.needDst");
@@ -559,24 +1117,30 @@ $("confirm").addEventListener("click", async () => {
     return;
   }
   const isCompress = state.mode === "compress";
+  if (isCompress && !state.plan) {
+    setStatus("status.needPlan");
+    return;
+  }
   const names = sel.map((i) => state.rows[i].name);
   // 强度留空 = 不传级别(后端默认);Number("") 是 0 = 仅存储, 空值必须显式归 null
   const lvl = $("opt-level").value.trim();
   const options = isCompress
     ? {
-        splitSize: $("opt-split").value.trim() || null,
+        splitSize: null,
         password: $("opt-password").value || null,
         randomName: $("opt-random").checked,
         format: $("opt-format").value,
         level: lvl === "" ? null : Number(lvl),
         excludes: parseExcludes(),
         verify: $("opt-verify").checked,
+        packaging: readPackaging(),
       }
     : {
         password: $("opt-password").value || null,
         force: $("opt-force").checked,
       };
-  state.run = { sel, done: 0, total: sel.length, failed: false, finished: false };
+  const total = isCompress && state.plan ? state.plan.packages.length : sel.length;
+  state.run = { sel, done: 0, total, failed: false, finished: false };
   setLocked(true);
   $("confirm").className = BTN_CANCEL;
   syncActionButton();
@@ -593,6 +1157,7 @@ $("confirm").addEventListener("click", async () => {
         dst: $("dst").value,
         entries: names,
         options,
+        planId: state.plan?.planId ?? null,
         onProgress: makeChannel(),
       });
     } else {
@@ -608,9 +1173,18 @@ $("confirm").addEventListener("click", async () => {
     if (!res.cancelled) state.run.done = state.run.total;
     // 终态烘焙: 完成(含取消前的部分)标"完成", 不再参与后续勾选
     const doneCount = state.run.done;
-    state.run.sel.forEach((rowIdx, pos) => {
-      if (pos < doneCount) state.rows[rowIdx].status = "done";
-    });
+    if (isCompress && state.plan) {
+      state.run.sel.forEach((rowIdx) => {
+        const packageIndex = state.rows[rowIdx].packageIndex;
+        if (packageIndex != null && packageIndex < doneCount) {
+          state.rows[rowIdx].status = "done";
+        }
+      });
+    } else {
+      state.run.sel.forEach((rowIdx, pos) => {
+        if (pos < doneCount) state.rows[rowIdx].status = "done";
+      });
+    }
     // 结果汇报: 压缩=包数; 解压=组数; 告警统一由 renderStatus 追加在消息尾
     if (res.cancelled) {
       setStatus("status.cancelled", {
@@ -620,7 +1194,7 @@ $("confirm").addEventListener("click", async () => {
       });
     } else if (isCompress) {
       setStatus("status.compressDone", {
-        count: res.entries.length,
+        count: res.packages?.length ?? res.entries?.length ?? 0,
         dst: $("dst").value,
         warnings: res.warnings,
       });
@@ -632,15 +1206,27 @@ $("confirm").addEventListener("click", async () => {
       });
     }
   } catch (e) {
-    // 失败: 当前行标"失败"(悬停徽章看原因), 已完成的行保留完成态(宁停不错)
+    // 失败: 当前包/行标"失败"(悬停徽章看原因), 已完成的行保留完成态(宁停不错)
     const done = state.run.done;
-    state.run.sel.forEach((rowIdx, pos) => {
-      if (pos < done) state.rows[rowIdx].status = "done";
-      else if (pos === done) {
-        state.rows[rowIdx].status = "failed";
-        state.rows[rowIdx].failMsg = String(e);
-      }
-    });
+    if (isCompress && state.plan) {
+      state.run.sel.forEach((rowIdx) => {
+        const packageIndex = state.rows[rowIdx].packageIndex;
+        if (packageIndex != null && packageIndex < done) {
+          state.rows[rowIdx].status = "done";
+        } else if (packageIndex === done) {
+          state.rows[rowIdx].status = "failed";
+          state.rows[rowIdx].failMsg = String(e);
+        }
+      });
+    } else {
+      state.run.sel.forEach((rowIdx, pos) => {
+        if (pos < done) state.rows[rowIdx].status = "done";
+        else if (pos === done) {
+          state.rows[rowIdx].status = "failed";
+          state.rows[rowIdx].failMsg = String(e);
+        }
+      });
+    }
     setStatus(isCompress ? "status.compressFailed" : "status.extractFailed", {
       error: String(e),
     });
@@ -673,6 +1259,10 @@ $("opt-advanced").addEventListener("change", (e) => {
 for (const id of ["opt-format", "opt-level"]) {
   $(id).addEventListener("input", () => highlightPreset("custom"));
 }
+// 打包阈值改动只重算方案(不重扫); 立即作废旧方案, 防误按确认
+for (const id of ["opt-merge-below", "opt-split", "opt-bundle-max", "opt-max-entries"]) {
+  $(id).addEventListener("input", schedulePlan);
+}
 // 密码语义随格式: zip=ZipCrypto(兼容优先, 强度弱), 7z=AES-256
 function updatePwHint() {
   const hint = $("pw-hint");
@@ -694,6 +1284,7 @@ $("opt-format").addEventListener("change", updatePwHint);
 setMode(state.mode);
 applyPreset("compat");
 renderStatus();
+renderPlanSummary();
 syncActionButton();
 syncLanguageMenu();
 
@@ -719,31 +1310,67 @@ function mockScan(path) {
 function mockRun(names) {
   const phase = state.mode === "compress" ? "compressing" : "extracting";
   const totalBytes = state.run.sel.reduce((s, i) => s + state.rows[i].size, 0);
+  const packages = state.mode === "compress" ? state.plan?.packages ?? null : null;
+  const total = packages ? packages.length : names.length;
   return new Promise((resolve) => {
     let done = 0;
     const t = setInterval(() => {
       done += 1;
-      const frac = names.slice(0, done).reduce((s, n) => {
-        const r = state.rows.find((x) => x.name === n);
-        return s + (r ? r.size : 0);
-      }, 0);
+      let frac;
+      let entry;
+      if (packages) {
+        frac = packages
+          .slice(0, done)
+          .reduce((sum, pkg) => sum + pkg.inputBytes, 0);
+        const pkg = packages[done - 1];
+        entry = pkg.kind === "bundle"
+          ? t("plan.kind.bundleN", {
+              n: packages.filter((p) => p.kind === "bundle").indexOf(pkg) + 1,
+            })
+          : state.rows[pkg.memberIndexes[0]]?.name ?? pkg.id;
+      } else {
+        frac = names.slice(0, done).reduce((sum, name) => {
+          const row = state.rows.find((x) => x.name === name);
+          return sum + (row ? row.size : 0);
+        }, 0);
+        entry = names[done - 1];
+      }
       onProgress({
-        phase, done, total: names.length,
-        doneBytes: frac, totalBytes,
-        entry: names[done - 1],
+        phase,
+        done,
+        total,
+        doneBytes: frac,
+        totalBytes,
+        entry,
       });
-      if (done >= names.length) {
+      if (done >= total) {
         clearInterval(t);
-        resolve(
-          state.mode === "compress"
-            ? { cancelled: false, entries: names.map((n) => ({ archive: "C:\\out\\" + n + ".zip", original: n })), warnings: [] }
-            : { cancelled: false, groups: names.map((n) => ({ entry: n, original: n, files: 3 })), warnings: [] }
-        );
+        if (packages) {
+          resolve({
+            cancelled: false,
+            entries: [],
+            packages: packages.map((pkg) => ({
+              id: pkg.id,
+              kind: pkg.kind,
+              archive: `C:\\out\\${pkg.id}.zip`,
+              members: pkg.memberIndexes.map((idx) => state.rows[idx]?.name),
+              inputBytes: pkg.inputBytes,
+              entryCount: pkg.entryCount,
+            })),
+            warnings: [],
+          });
+        } else {
+          resolve({
+            cancelled: false,
+            groups: names.map((n) => ({ entry: n, original: n, files: 3 })),
+            warnings: [],
+          });
+        }
       }
     }, 400);
     mockCancel = () => {
       clearInterval(t);
-      resolve({ cancelled: true, entries: [], groups: [], warnings: [] });
+      resolve({ cancelled: true, entries: [], packages: [], groups: [], warnings: [] });
     };
   });
 }

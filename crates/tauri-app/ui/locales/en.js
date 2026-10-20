@@ -43,11 +43,64 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "pwHintZip": "zip format: ZipCrypto encryption (best compatibility, less secure)",
       "pwHint7z": "7z format: AES-256 encryption"
     },
+    "strategy": {
+      "label": "Packaging",
+      "mergeBelow": "Merge ≤",
+      "mergeBelowPlaceholder": "100m",
+      "mergeBelowTitle": "Top-level items at or below this size enter the merge pool; leave empty to disable merging",
+      "splitAbove": "Split >",
+      "splitAbovePlaceholder": "2g",
+      "splitAboveTitle": "Items larger than this are split into volumes of this size; leave empty to disable splitting",
+      "bundleMax": "Bundle ≤",
+      "bundleMaxPlaceholder": "Follow split",
+      "bundleMaxTitle": "Maximum raw size of one merged bundle; leave empty to follow the split threshold",
+      "maxEntries": "Entries ≤",
+      "maxEntriesPlaceholder": "50000",
+      "maxEntriesTitle": "Maximum archive entries in one merged bundle; leave empty for no limit",
+      "viewPlan": "View plan"
+    },
+    "plan": {
+      "title": "Packaging plan",
+      "close": "Close",
+      "strategyLine": "Strategy: merge ≤ {{merge}} · split > {{split}} · bundle ≤ {{bundle}} · entries ≤ {{entries}}",
+      "filter": { "all": "All", "direct": "Direct", "split": "Split", "bundle": "Merged" },
+      "kind": {
+        "direct": "Direct",
+        "split": "Split",
+        "bundle": "Merged",
+        "bundleN": "Merged #{{n}}",
+        "directOver": "Direct · over limit"
+      },
+      "reason": {
+        "split": "{{size}} > split threshold {{limit}}",
+        "merge": "{{size}} ≤ merge threshold {{limit}}",
+        "direct": "{{size}} did not enter the merge pool"
+      },
+      "summary": {
+        "idle": "Select a source folder to generate a packaging plan",
+        "noSelection": "No items selected",
+        "planning": "Calculating packaging plan…",
+        "error": "Plan invalid: {{error}}",
+        "text": "Expected {{total}} logical packages ({{direct}} direct · {{split}} split · {{bundle}} merged) · max {{max}}",
+        "splitNote": "{{count}} split package(s) at {{limit}}",
+        "warnings": "{{count}} notice(s)"
+      },
+      "packageMeta": "{{size}} · {{members}} item(s) · {{entries}} entries",
+      "moreMembers": "{{count}} more member(s)",
+      "morePackages": "{{count}} more package(s) not shown; narrow the filter",
+      "empty": "No packages match this filter",
+      "splitCardNote": "Single item above the split threshold; compressed into volumes of {{limit}}, actual count depends on compressed size",
+      "note": "Sizes are raw; compressed size and actual volume count are unknown.",
+      "warning": {
+        "tooManyEntries": "{{name}} has {{count}} entries, over the limit {{limit}}; changed to direct compression"
+      }
+    },
     "table": {
       "caption": "Item list",
       "selectAll": "Select all",
       "name": "Name",
       "size": "Size",
+      "package": "Package",
       "status": "Status",
       "empty": "Click Source folder to select a directory, or drop a folder here"
     },
@@ -90,6 +143,7 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "dragUnavailable": "Folder drag-and-drop unavailable: {{error}}",
       "needSelection": "Select items to process first",
       "needDst": "Select a destination folder first",
+      "needPlan": "Packaging plan is not ready yet; please wait",
       "modeSwitched": "Mode changed; select the source folder again",
       "cancelled": "Cancelled (completed {{done}}/{{total}})",
       "compressDone_one": "Compression complete: {{count}} archive → {{dst}}",

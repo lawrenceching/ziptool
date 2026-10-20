@@ -246,14 +246,14 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
 }
 
 /// 随机命名时创建 mapping.csv 并写表头(Step 3 开始前调用)
-fn mapping_create(out_dir: &Path) -> Result<()> {
+pub(crate) fn mapping_create(out_dir: &Path) -> Result<()> {
     let mut f = fs::File::create(out_dir.join("mapping.csv"))?;
     f.write_all(b"archive,original\n")?;
     Ok(())
 }
 
 /// 每个条目完成后追加一行并落盘, 中断/断电时已完成部分的对应关系不丢
-fn mapping_append(out_dir: &Path, archive: &str, original: &str) -> Result<()> {
+pub(crate) fn mapping_append(out_dir: &Path, archive: &str, original: &str) -> Result<()> {
     let mut f = fs::OpenOptions::new()
         .append(true)
         .open(out_dir.join("mapping.csv"))?;
@@ -263,7 +263,7 @@ fn mapping_append(out_dir: &Path, archive: &str, original: &str) -> Result<()> {
 }
 
 /// 删除某条目压缩失败后的半成品: 主文件 {dst}.{ext}、zip -s 的 {dst}.zNN、分卷 {dst}.{ext}.NNN
-fn cleanup_partial(out_dir: &Path, dst: &str, ext: &str) {
+pub(crate) fn cleanup_partial(out_dir: &Path, dst: &str, ext: &str) {
     let Ok(rd) = fs::read_dir(out_dir) else {
         return;
     };
@@ -340,14 +340,14 @@ fn assign_dsts_with(
 }
 
 /// 该 dst 的压缩包(不分卷主文件, 或分卷首卷 {dst}.{ext}.001)是否已存在
-fn target_exists(out_dir: &Path, dst: &str, ext: &str) -> bool {
+pub(crate) fn target_exists(out_dir: &Path, dst: &str, ext: &str) -> bool {
     out_dir.join(format!("{dst}.{ext}")).exists()
         || out_dir.join(format!("{dst}.{ext}.001")).exists()
 }
 
 /// 相对路径转为绝对路径(基于当前工作目录)。
 /// 不用 canonicalize: Windows 上它产生 \\?\ verbatim 路径, 部分外部命令不认。
-fn absolutize(p: &Path) -> PathBuf {
+pub(crate) fn absolutize(p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
     } else {
@@ -356,7 +356,7 @@ fn absolutize(p: &Path) -> PathBuf {
 }
 
 /// child 是否等于 parent 或位于其下; 按组件比较(避免字符串前缀误判), Windows 下大小写不敏感
-fn path_within(child: &Path, parent: &Path) -> bool {
+pub(crate) fn path_within(child: &Path, parent: &Path) -> bool {
     let fold = |s: &std::ffi::OsStr| -> String {
         let s = s.to_string_lossy().into_owned();
         if cfg!(windows) { s.to_lowercase() } else { s }
@@ -368,7 +368,7 @@ fn path_within(child: &Path, parent: &Path) -> bool {
 
 /// 返回压缩包主文件:优先 {base}.{ext}(zip -s 的末卷 / 不分卷),
 /// 否则分卷首卷 {base}.{ext}.001。
-fn resolve_primary_archive(out_dir: &Path, base: &str, ext: &str) -> PathBuf {
+pub(crate) fn resolve_primary_archive(out_dir: &Path, base: &str, ext: &str) -> PathBuf {
     let plain = out_dir.join(format!("{base}.{ext}"));
     if plain.exists() {
         return plain;
@@ -397,6 +397,7 @@ mod dst_tests {
                     EntryKind::Dir
                 },
                 size: 1,
+                entry_count: 1,
                 dst: String::new(),
                 format: String::new(),
                 exclude: None,
@@ -780,6 +781,7 @@ mod fake_tests {
                 name: "A".into(),
                 kind: crate::scan::EntryKind::Dir,
                 size: 3,
+                entry_count: 1,
                 dst: "A".into(),
                 format: String::new(),
                 exclude: None,
@@ -789,6 +791,7 @@ mod fake_tests {
                 name: "B".into(),
                 kind: crate::scan::EntryKind::Dir,
                 size: 4,
+                entry_count: 1,
                 dst: "B".into(),
                 format: String::new(),
                 exclude: None,
@@ -847,6 +850,7 @@ mod fake_tests {
                 name: "A".into(),
                 kind: crate::scan::EntryKind::Dir,
                 size: 0,
+                entry_count: 1,
                 dst: "A".into(),
                 format: String::new(),
                 exclude: None,
@@ -856,6 +860,7 @@ mod fake_tests {
                 name: "B".into(),
                 kind: crate::scan::EntryKind::Dir,
                 size: 4,
+                entry_count: 1,
                 dst: "B".into(),
                 format: String::new(),
                 exclude: None,
@@ -1341,6 +1346,7 @@ mod staged_tests {
             name: name.into(),
             kind: EntryKind::Dir,
             size,
+            entry_count: 1,
             dst: String::new(),
             format: String::new(),
             exclude: None,

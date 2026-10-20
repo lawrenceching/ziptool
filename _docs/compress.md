@@ -9,6 +9,7 @@
 ### 目标
 
 - 输入一个源目录, 把其中**每个顶层条目**(文件或目录)各压缩为一个独立 zip 包, 输出到另一目录
+- 可选: 第 12 节的**打包策略**可把多个小顶层条目合并为一个包; `strategy` 只产出打包计划, 不执行压缩. 未启用时仍保持"每个顶层条目一个包"
 - 支持分包(用后端原生能力, 保持默认命名), 支持密码, 支持随机包名
 - 全程进度可上报(CLI 与 Tauri 共用回调), 可取消(条目间 Break;条目内杀后端进程)
 - 每个条目压缩成功后做一次**结构校验**(方案 A, 见 6.8, 默认开启、可关闭): 只读包头/中央目录, 确认解压端能正常打开; 校验不过按半成品处理, 坏包不进入 Report/mapping
@@ -54,6 +55,8 @@ pub struct Entry {
     pub kind: EntryKind,
     /// 递归统计的字节大小: 文件为自身大小, 目录为其中所有普通文件大小之和
     pub size: u64,
+    /// 包内条目数(普通文件 + 目录; 目录自身也计 1; 空目录 = 1)
+    pub entry_count: usize,
     /// 压缩包基础名(不带扩展名), Step 2 填充; 产物为 {dst}.zip 或其分卷
     pub dst: String,
     /// 压缩包格式, 当前恒为 "zip"
@@ -361,3 +364,160 @@ CLI 退出码: `0` 成功(含 cancelled 完整返回), `1` 一般错误(CoreErro
 4. **空间预检**: 输出盘剩余空间 < total_bytes 时提前失败(需 fs4 之类的依赖获取剩余空间, 与零依赖取向冲突, 故列为后续)
 5. ~~**字节级进度**~~: 7z 系已实现(2026-10)——压缩走 `-bsp1` 百分比流(见 7.1 与 [progress.md](progress.md)); zip 无机器可读进度, 维持条目级
 6. **--dry-run**: 扫描+命名后打印预览表(核心已具备能力, 属 CLI 外壳功能)
+
+## 12. 打包策略(strategy)
+
+> 定位: 可选规划层, 代码 `crates/core/src/strategy.rs`. 输入顶层条目列表 + 策略参数, 输出"哪些条目合并 / 哪些条目分包 / 哪些直接压缩"的纯内存计划; 不执行压缩、不命名、不写盘.
+> P1/P2 已落地: `Entry.entry_count`、`crates/core/src/packaging.rs` 的 `plan_packages` / `compress_packages`; 与旧 `compress` 路径并行, 尚未接入 CLI/UI 编排.
+
+### 12.1 目标与非目标
+
+目标:
+
+- 把"零碎条目合并"与"超大条目分包"从压缩执行中分离为可单测的决策层
+- 阈值全部由用户配置; 软件只校验参数自洽性并给出默认值, 不替用户判断可接受的风险
+- 输出确定性计划: 同一输入 + 同一参数 → 同一计划
+
+非目标:
+
+- 不估计压缩后大小/压缩率; `Split` 只表示"原始大小超过上阈值", 实际卷数由执行层决定
+- 不决定包名、随机名、mapping.csv 格式
+- 不引入传输、校验、重传逻辑
+- 不把单个顶层条目拆到多个合并包; 一个顶层条目最多属于一个输出包
+
+### 12.2 数据结构
+
+```rust
+pub struct StrategyItem {
+    pub name: String,
+    pub size: u64,
+    pub entry_count: usize,
+}
+
+pub struct StrategyParams {
+    pub merge_below: Option<u64>,
+    pub split_above: Option<u64>,
+    pub bundle_max: Option<u64>,
+    pub max_entries: Option<usize>,
+}
+
+pub enum PackageKind { Direct, Split, Bundle }
+
+pub struct PackagePlan {
+    pub kind: PackageKind,
+    pub members: Vec<String>,
+    pub input_bytes: u64,
+    pub entry_count: usize,
+}
+
+pub struct StrategyPlan {
+    pub packages: Vec<PackagePlan>,
+    pub warnings: Vec<StrategyWarning>,
+}
+
+pub fn plan(
+    items: &[StrategyItem],
+    params: &StrategyParams,
+) -> Result<StrategyPlan, StrategyError>
+```
+
+`entry_count` = 该条目解压后在包内产生的条目数(普通文件 + 目录; 单文件 = 1, 空目录 = 1), 用于 `max_entries` 约束.
+
+### 12.3 参数
+
+| 参数 | 默认 | 语义 |
+|---|---|---|
+| `merge_below` | 100 MiB | `size <=` 它 → 合并候选; `None` = 不合并 |
+| `split_above` | 2 GiB | `size >` 它 → `Split`; `None` = 不分包 |
+| `bundle_max` | 取 `split_above`; 上阈值也 `None` 时取 2 GiB | 单个合并包的原始大小上限; 不启用合并时忽略 |
+| `max_entries` | 50_000 | 单个合并包的条目数上限; `None` = 不限制 |
+
+- `StrategyParams::default()` = 上表默认值
+- `StrategyParams::disabled()` = 全部 `None`, 每个顶层条目各自 `Direct`
+- `max_entries` 只约束合并包; 单条目 `Direct` / `Split` 包的条目数由源目录决定, 本策略无法降低. 若这类目录本身条目过多, 需要执行层的"大目录独立分包"能力, 不在本阶段范围
+- 默认值是二进制单位(100 MiB / 2 GiB). 如果目的地按十进制 2 GB 限制, 2 GiB 会超; 用户应显式下调, 软件不擅自改用户设定值
+
+### 12.4 分类规则
+
+按顺序判定, 上阈值优先:
+
+1. `split_above = Some(s)` 且 `size > s` → `Split`(单条目, 执行层分包)
+2. `merge_below = Some(m)` 且 `size <= m` → 合并候选
+3. 其余 → `Direct`(单条目, 不分包)
+
+边界:
+
+- 恰好等于 `merge_below` → 合并候选(`<=`)
+- 恰好等于 `split_above` → `Direct`(分包用严格 `>`)
+- 若希望"等于阈值也分包/也直接", 由用户把阈值下调/上调 1 字节; 本模块不提供第二种边界语义
+
+参数校验:
+
+- `split_above` / `bundle_max` / `max_entries` 显式给出时必须 > 0
+- `merge_below <= split_above`
+- 启用合并时: `merge_below <= effective bundle_max <= split_above`(后一个仅当上阈值给出)
+- 条目名在大小写不敏感比较下重复 → `DuplicateName`(输出盘通常是 NTFS/FAT)
+
+### 12.5 合并装箱
+
+候选按 `(size 降序, name 升序)` 排序, 做首次适应递减(FFD):
+
+- 依次尝试放入已有包, 条件: `input_bytes + item.size <= bundle_max` 且 `entry_count + item.entry_count <= max_entries`
+- 放不下就开新包
+- 单条目 `entry_count > max_entries` 时无法进任何包 → `Direct` + `StrategyWarning::TooManyEntries`
+- 规划结束后, 只有一个成员的合并包退化为 `Direct`, 以保留原名; 成员数 >= 2 才是 `Bundle`
+
+结果顺序: 输入顺序中的 `Direct` / `Split` 先输出, 合并包按 FFD 创建顺序追加在末尾; 单成员退化包也追加在末尾.
+
+### 12.6 示例
+
+参数: `merge_below = 100 MiB`, `split_above = 2 GiB`, `bundle_max` 取 2 GiB, `max_entries = 50_000`.
+
+| 条目 | 大小 | 计划 |
+|---|---|---|
+| FolderA | 26 GiB | `Split` |
+| FolderB | 100 MiB | 合并候选(`<=` 下阈值) |
+| fileC | 16 KiB | 合并候选 |
+| fileD | 1 KiB | 合并候选 |
+| fileE | 100 MiB | 合并候选 |
+| folderF | 20 MiB | 合并候选 |
+
+合并候选合计约 220 MiB → 一个 `Bundle`(5 个成员). 若候选总量是 50 GiB, 则按 `bundle_max` 切成多个 `Bundle`, 而不是一个 50 GiB 包.
+
+注意: 原例子把 FolderB / fileE 标为"直接压缩"; 按本策略的 `>` / `<=` 规则, 恰好等于下阈值的条目会进合并池. 若希望"等于下阈值直接压缩", 把 `merge_below` 下调 1 字节; 当前实现固定为 `<=`.
+
+### 12.7 与执行层的关系
+
+- `strategy` 只产出 `StrategyPlan`; 执行层(`packaging.rs`)按 `PackagePlan` 分组:
+  - `Direct` / `Split`: 一个成员, 沿用原条目名
+  - `Bundle`: 多个成员, 合成包名 `_bundle_NNNN`(随机模式为 `zt_*`)
+- P2 已实现 `plan_packages` / `compress_packages`:
+  - 多源命令: `zip -r out A B C` / `7z a out A B C`; 7z 成员 > 64 时用 `-i@listfile`(UTF-8 + `-spd`), zip 后端上限 10k 源
+  - `Bundle` 不切卷; `Split` 才传 `-s`/`-v`, 分包大小取 `split_above`
+  - 输出存在性/大小写重名/`OutInsideInput` 在 `plan_packages` 预检
+  - 1:N mapping: 有 `Bundle` 或随机名时写 `mapping.csv`, 一包多行; 失败/取消按半成品清理
+  - 进度按包计数(`done/total`), `entry` 为包标签; `Split` 的单条目仍是一个包
+- `Split` 不携带卷数; 实际卷数由压缩后大小决定, 执行层不预测
+- `bundle_max` 是**原始大小**上限; 压缩后可能略大(尤其不可压缩数据 + 每条目头部). 执行层按原始预算装箱, 并在产物阶段复核主卷实际大小; 超过 `split_above` 即失败并清理半成品, 不自动二次分卷/降级
+- UI 已切到 `plan_packages` / `planId` / 包级 `compress`; CLI 尚未切到 `packaging` 路径; 旧 `compress` 仍保持"每个顶层条目一个包"
+
+### 12.8 测试
+
+`strategy.rs` 内置单测覆盖:
+
+- 默认/禁用参数, 上下阈值严格边界
+- 示例分类与合并
+- FFD 装箱, `bundle_max` 恰好装满, `max_entries` 拆包
+- 单成员退化, 条目数超限 → `Direct` + warning
+- 非法参数, 大小写重复名, 空输入
+- partition 不变量(每个条目恰好出现一次), 容量约束, 确定性
+
+`packaging.rs` 单测 + 集成测试覆盖:
+
+- 包级命名/冲突: `_bundle_NNNN`、`zt_*`、已有产物、直接包重名
+- 多源命令 argv: Bundle 不切卷、Split 传 `-v`、排除开关去重、zip 排除在成员名之后
+- 7z listfile: >64 成员走 `-i@listfile`, 运行后清理
+- 包级进度/字节权重、取消保留已完成包、失败/校验失败清理半成品
+- 真实后端 roundtrip: bundle / 64k 分卷 / 65 成员 listfile, 解压还原
+
+`cargo test -p zip-tool-core` 覆盖; 真实 roundtrip 在 `crates/core/tests/packaging.rs`.

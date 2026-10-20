@@ -54,6 +54,45 @@ const SCAN_EXTRACT = {
   totalBytes: 3_490_204_800,
 };
 
+// 默认 plan 响应: 测试只关心 UI, 不重复 strategy 的完整装箱; 每个勾选项一个包。
+function defaultPlan(args) {
+  const items = SCAN_COMPRESS.items;
+  const packages = (args.entries ?? []).map((name, i) => {
+    const index = items.findIndex((item) => item.name === name);
+    const size = items[index]?.size ?? 0;
+    return {
+      id: `p${i}`,
+      kind: size > 2 * 1024 ** 3 ? "split" : "direct",
+      memberIndexes: [index],
+      inputBytes: size,
+      entryCount: 1,
+    };
+  });
+  const count = (kind) => packages.filter((pkg) => pkg.kind === kind).length;
+  return {
+    planId: "test-plan",
+    packages,
+    summary: {
+      totalPackages: packages.length,
+      direct: count("direct"),
+      split: count("split"),
+      bundle: count("bundle"),
+      selectedBytes: packages.reduce((sum, pkg) => sum + pkg.inputBytes, 0),
+      maxDirectOrBundleBytes: packages
+        .filter((pkg) => pkg.kind !== "split")
+        .reduce((max, pkg) => Math.max(max, pkg.inputBytes), 0),
+      maxBundleEntries: 0,
+      effective: {
+        mergeBelow: 100 * 1024 ** 2,
+        splitAbove: 2 * 1024 ** 3,
+        bundleMax: 2 * 1024 ** 3,
+        maxEntries: 50_000,
+      },
+    },
+    warnings: [],
+  };
+}
+
 // 回放一条 Rust → JS 的进度消息(真实 Channel 排序协议)
 function sendProgress(callbacks, channel, i, message) {
   callbacks.get(channel.id)({ index: i, message });
@@ -102,7 +141,12 @@ function makeHarness(withTauri, invokeImpl, options = {}) {
           return Promise.resolve(channelSeq++);
         }
         if (cmd === "plugin:event|unlisten") return Promise.resolve(null);
-        return Promise.resolve(invokeImpl({ cmd, args, callbacks, calls }));
+        const result = invokeImpl({ cmd, args, callbacks, calls });
+        // 本文件多数用例只关心压缩/解压; plan_packages 未显式 mock 时给默认方案
+        if (cmd === "plan_packages" && (result === undefined || result === null)) {
+          return Promise.resolve(defaultPlan(args));
+        }
+        return Promise.resolve(result);
       },
       convertFileSrc: (p) => p,
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
@@ -146,6 +190,8 @@ async function pickSource(h, path = "C:\\demo\\data") {
   await h.flush();
   assert.equal(h.doc.getElementById("src").value, path);
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** 通过语言菜单切换语言并等 changeLanguage/重渲染完成 */
 async function switchLang(h, code) {
@@ -244,14 +290,21 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
   assert.ok(comp, "应调用 compress 命令");
   jsonEq(comp.args.entries, ["Novel", "photo.jpg"]);
   jsonEq(comp.args.options, {
-    splitSize: "2g",
+    splitSize: null,
     password: "pw",
     randomName: true,
     format: "zip",
     level: null, // 默认预设不传级别(后端默认 zip -6); Number("") 是 0=store, 空值必须显式归 null
     excludes: [],
     verify: true,
+    packaging: {
+      mergeBelow: "100m",
+      splitAbove: "2g",
+      bundleMax: null,
+      maxEntries: 50000,
+    },
   });
+  assert.equal(comp.args.planId, "test-plan");
   assert.equal(comp.args.src, "C:\\demo\\data");
   assert.equal(comp.args.dst, "C:\\out");
 
@@ -346,7 +399,7 @@ test("行为: 解压模式 — 选项显隐、meta/warning 行、extract_archive
   });
 
   h.doc.getElementById("mode-extract").click();
-  assert.ok(h.doc.getElementById("opt-split-wrap").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("strategy-row").classList.contains("hidden"));
   assert.ok(h.doc.getElementById("opt-random-wrap").classList.contains("hidden"));
   assert.ok(!h.doc.getElementById("opt-force-wrap").classList.contains("hidden"));
 
@@ -430,7 +483,7 @@ test("行为: 首次打开(未点过模式)— 压缩模式控件初始可见, �
   const h = makeHarness(false, () => null);
   assert.ok(!h.doc.getElementById("opt-preset-wrap").classList.contains("hidden"), "「模式」预设开关初始可见");
   assert.ok(!h.doc.getElementById("opt-advanced-wrap").classList.contains("hidden"), "「高级」checkbox 初始可见");
-  assert.ok(h.doc.getElementById("opt-split-wrap").classList.contains("hidden") === false);
+  assert.ok(h.doc.getElementById("strategy-row").classList.contains("hidden") === false);
   assert.ok(h.doc.getElementById("opt-force-wrap").classList.contains("hidden"), "解压专属「覆盖」初始隐藏");
   assert.ok(h.doc.getElementById("opt-format-wrap").classList.contains("hidden"), "高级子项仍等勾选展开");
 });
@@ -496,6 +549,12 @@ test("契约: 平衡预设的参数透传到 compress 调用", async () => {
     level: 5,
     excludes: [],
     verify: true,
+    packaging: {
+      mergeBelow: "100m",
+      splitAbove: "2g",
+      bundleMax: null,
+      maxEntries: 50000,
+    },
   });
 });
 
@@ -915,4 +974,208 @@ test("i18n: 语言菜单点击外部/Esc 关闭", async () => {
   );
   assert.ok(menu.classList.contains("hidden"));
   assert.equal(h.doc.activeElement, toggle);
+});
+
+test("契约: 扫描后自动算方案; 阈值改动只重算方案, 不重扫", async () => {
+  let planCalls = 0;
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:app|version") return "1.2.3";
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "plan_packages") {
+      planCalls += 1;
+      return defaultPlan(args);
+    }
+    return null;
+  });
+
+  await pickSource(h);
+  assert.equal(planCalls, 1, "扫描完成后应自动算一次方案");
+  assert.match(h.doc.getElementById("plan-summary").textContent, /预计/);
+  assert.equal(h.doc.getElementById("plan-open").disabled, false);
+
+  const merge = h.doc.getElementById("opt-merge-below");
+  merge.value = "50m";
+  merge.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await sleep(260);
+  await h.flush();
+
+  assert.equal(planCalls, 2, "阈值改动应重算方案");
+  assert.equal(
+    h.calls.filter((call) => call.cmd === "scan").length,
+    1,
+    "阈值改动不应重新扫描"
+  );
+  const lastPlan = h.calls.filter((call) => call.cmd === "plan_packages").at(-1);
+  assert.equal(lastPlan.args.packaging.mergeBelow, "50m");
+  assert.equal(lastPlan.args.packaging.splitAbove, "2g");
+});
+
+test("行为: 摘要/打包列/方案抽屉展示只读方案", async () => {
+  const plan = {
+    planId: "custom-plan",
+    packages: [
+      {
+        id: "p0",
+        kind: "split",
+        memberIndexes: [0],
+        inputBytes: 2_600_000_000,
+        entryCount: 1,
+      },
+      {
+        id: "p1",
+        kind: "bundle",
+        memberIndexes: [1, 2],
+        inputBytes: 890_204_800,
+        entryCount: 2,
+      },
+    ],
+    summary: {
+      totalPackages: 2,
+      direct: 0,
+      split: 1,
+      bundle: 1,
+      selectedBytes: 3_490_204_800,
+      maxDirectOrBundleBytes: 890_204_800,
+      maxBundleEntries: 2,
+      effective: {
+        mergeBelow: 100 * 1024 ** 2,
+        splitAbove: 2 * 1024 ** 3,
+        bundleMax: 2 * 1024 ** 3,
+        maxEntries: 50_000,
+      },
+    },
+    warnings: [],
+  };
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:app|version") return "1.2.3";
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "plan_packages") return plan;
+    return null;
+  });
+
+  await pickSource(h);
+  assert.match(h.doc.getElementById("plan-summary").textContent, /2 个逻辑包/);
+  assert.deepEqual(
+    h.rows().map((tr) => tr.children[3].textContent),
+    ["分包", "合并 #1", "合并 #1"]
+  );
+
+  h.doc.getElementById("plan-open").click();
+  assert.ok(!h.doc.getElementById("plan-backdrop").classList.contains("hidden"));
+  assert.equal(h.doc.querySelectorAll("#plan-list > div").length, 2);
+  assert.match(h.doc.getElementById("plan-list").textContent, /media/);
+  assert.match(h.doc.getElementById("plan-list").textContent, /photo\.jpg/);
+
+  h.doc.getElementById("plan-filter-bundle").click();
+  assert.equal(h.doc.querySelectorAll("#plan-list > div").length, 1);
+  assert.match(h.doc.getElementById("plan-list").textContent, /media/);
+
+  h.doc.getElementById("plan-close").click();
+  assert.ok(h.doc.getElementById("plan-backdrop").classList.contains("hidden"));
+});
+
+test("行为: 条目超限 warning 显示在摘要/行/抽屉", async () => {
+  const plan = {
+    planId: "warn-plan",
+    packages: [
+      { id: "p0", kind: "direct", memberIndexes: [0], inputBytes: 2_600_000_000, entryCount: 1 },
+      { id: "p1", kind: "direct", memberIndexes: [1], inputBytes: 890_000_000, entryCount: 60000 },
+      { id: "p2", kind: "direct", memberIndexes: [2], inputBytes: 204_800, entryCount: 1 },
+    ],
+    summary: {
+      totalPackages: 3,
+      direct: 3,
+      split: 0,
+      bundle: 0,
+      selectedBytes: 3_490_204_800,
+      maxDirectOrBundleBytes: 2_600_000_000,
+      maxBundleEntries: 0,
+      effective: {
+        mergeBelow: 100 * 1024 ** 2,
+        splitAbove: 2 * 1024 ** 3,
+        bundleMax: 2 * 1024 ** 3,
+        maxEntries: 50000,
+      },
+    },
+    warnings: [
+      { code: "tooManyEntries", memberIndex: 1, entryCount: 60000, limit: 50000 },
+    ],
+  };
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:app|version") return "1.2.3";
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "plan_packages") return plan;
+    return null;
+  });
+
+  await pickSource(h);
+  assert.match(h.doc.getElementById("plan-summary").textContent, /1 条提醒/);
+  assert.deepEqual(
+    h.rows().map((tr) => tr.children[3].textContent),
+    ["直接", "直接 · 超限", "直接"]
+  );
+
+  h.doc.getElementById("plan-open").click();
+  assert.match(h.doc.getElementById("plan-warnings").textContent, /media/);
+  assert.match(h.doc.getElementById("plan-warnings").textContent, /60000/);
+  h.doc.getElementById("plan-close").click();
+});
+
+test("行为: 包级进度失败时, 合并包所有成员一起标失败", async () => {
+  const plan = {
+    planId: "progress-plan",
+    packages: [
+      { id: "p0", kind: "direct", memberIndexes: [0], inputBytes: 2_600_000_000, entryCount: 1 },
+      { id: "p1", kind: "bundle", memberIndexes: [1, 2], inputBytes: 890_204_800, entryCount: 2 },
+    ],
+    summary: {
+      totalPackages: 2,
+      direct: 1,
+      split: 0,
+      bundle: 1,
+      selectedBytes: 3_490_204_800,
+      maxDirectOrBundleBytes: 2_600_000_000,
+      maxBundleEntries: 2,
+      effective: {
+        mergeBelow: 100 * 1024 ** 2,
+        splitAbove: 2 * 1024 ** 3,
+        bundleMax: 2 * 1024 ** 3,
+        maxEntries: 50000,
+      },
+    },
+    warnings: [],
+  };
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:app|version") return "1.2.3";
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "plan_packages") return plan;
+    if (cmd === "compress") {
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "compressing",
+        done: 1,
+        total: 2,
+        doneBytes: 2_600_000_000,
+        totalBytes: 3_490_204_800,
+        entry: "Novel",
+      });
+      return Promise.reject("boom");
+    }
+    return null;
+  });
+
+  await pickSource(h);
+  h.doc.getElementById("dst").click();
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("confirm").click();
+  await h.flush();
+  await h.flush();
+
+  assert.deepEqual(h.badges(), ["完成", "失败", "失败"]);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("压缩失败"));
 });

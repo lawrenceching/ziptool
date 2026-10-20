@@ -43,11 +43,64 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "pwHintZip": "zip 格式: ZipCrypto 加密(相容性最好, 強度較弱)",
       "pwHint7z": "7z 格式: AES-256 加密"
     },
+    "strategy": {
+      "label": "打包策略",
+      "mergeBelow": "合併≤",
+      "mergeBelowPlaceholder": "100m",
+      "mergeBelowTitle": "小於等於此大小的頂層項目會進入合併池; 留空不合併",
+      "splitAbove": "分卷>",
+      "splitAbovePlaceholder": "2g",
+      "splitAboveTitle": "大於此大小的項目會按此大小分卷; 留空不分卷",
+      "bundleMax": "合併包≤",
+      "bundleMaxPlaceholder": "跟隨分卷",
+      "bundleMaxTitle": "單一合併包的原始大小上限; 留空跟隨分卷門檻",
+      "maxEntries": "項目≤",
+      "maxEntriesPlaceholder": "50000",
+      "maxEntriesTitle": "單一合併包的項目數上限; 留空不限制",
+      "viewPlan": "查看方案"
+    },
+    "plan": {
+      "title": "打包方案",
+      "close": "關閉",
+      "strategyLine": "目前策略: 合併≤{{merge}} · 分卷>{{split}} · 合併包≤{{bundle}} · 項目≤{{entries}}",
+      "filter": { "all": "全部", "direct": "直接", "split": "分卷", "bundle": "合併" },
+      "kind": {
+        "direct": "直接",
+        "split": "分卷",
+        "bundle": "合併",
+        "bundleN": "合併 #{{n}}",
+        "directOver": "直接 · 超限"
+      },
+      "reason": {
+        "split": "{{size}} > 分卷門檻 {{limit}}",
+        "merge": "{{size}} ≤ 合併門檻 {{limit}}",
+        "direct": "{{size}} 未進入合併池"
+      },
+      "summary": {
+        "idle": "選擇來源資料夾後產生打包方案",
+        "noSelection": "未選擇項目",
+        "planning": "正在計算打包方案…",
+        "error": "方案無效: {{error}}",
+        "text": "預計 {{total}} 個邏輯包（{{direct}} 直接 · {{split}} 分卷 · {{bundle}} 合併）· 最大 {{max}}",
+        "splitNote": "{{count}} 個分卷按 {{limit}} 切卷",
+        "warnings": "{{count}} 個提醒"
+      },
+      "packageMeta": "{{size}} · {{members}} 項 · {{entries}} 個項目",
+      "moreMembers": "還有 {{count}} 個成員",
+      "morePackages": "還有 {{count}} 個包未顯示, 請用篩選縮小範圍",
+      "empty": "沒有符合目前篩選的包",
+      "splitCardNote": "單一項目超過分卷門檻; 壓縮時按 {{limit}} 切卷, 實際卷數取決於壓縮後大小",
+      "note": "大小為原始大小; 壓縮後大小/實際卷數未知。",
+      "warning": {
+        "tooManyEntries": "{{name}} 項目數 {{count}} 超過上限 {{limit}}, 已改為直接壓縮"
+      }
+    },
     "table": {
       "caption": "項目列表",
       "selectAll": "全選",
       "name": "檔案名稱",
       "size": "大小",
+      "package": "打包",
       "status": "狀態",
       "empty": "點擊「來源資料夾」選擇目錄, 也可直接拖入資料夾"
     },
@@ -88,6 +141,7 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "dragUnavailable": "資料夾拖曳無法使用: {{error}}",
       "needSelection": "請先勾選要處理的項目",
       "needDst": "請先選擇目標資料夾",
+      "needPlan": "打包方案尚未就緒, 請稍候",
       "modeSwitched": "模式已切換, 請重新選擇來源資料夾",
       "cancelled": "已取消(完成 {{done}}/{{total}})",
       "compressDone_other": "壓縮完成: {{count}} 個壓縮檔 → {{dst}}",

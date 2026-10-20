@@ -3,6 +3,7 @@
 > 定位: 目标实现规格. 约定 Tauri 前端(`crates/tauri-app/ui/index.html`)与后端(`src/lib.rs` 命令层 → `crates/core`)之间的命令面、数据结构与事件协议、UI 状态机, 以及为支撑它们对 core 的最小扩展. 指导 tauri-app 与 core 的对接改造.
 > 与当前实现的差异在各节末尾以"**与现状差异**"标注, 汇总清单见第 12 节.
 > 本文是 compress.md / extract.md 的**消费端**(编排层): 执行语义(预检 / 停批 / 半成品清理 / 进度模型)以那两份为准, 本文不重复.
+> 打包方案审核(P4)新增 `plan_packages` 命令、`PlanResult` DTO 与 `planId` 校验, 见 [plan-preview.md](plan-preview.md); 实现时本文第 3 节命令面扩为 6 个.
 
 ## 1. 目标与非目标
 
@@ -49,15 +50,18 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 
 ## 3. 命令面
 
-收敛为 5 个命令(`invoke_handler` 注册面):
+收敛为 6 个命令(`invoke_handler` 注册面):
 
 | 命令 | 签名(前端视角) | 作用 |
 |---|---|---|
 | `scan` | `(mode, path, on_progress) → ScanResult` | 只扫描不执行, 选源后渲染表格 |
-| `compress` | `(src, dst, entries, options, on_progress) → CompressResult` | 批量压缩勾选项 |
+| `plan_packages` | `(src, entries, packaging) → PlanResult` | 纯内存计算可审核打包方案; 不扫描/不压缩/不占忙锁 |
+| `compress` | `(src, dst, entries, options, planId?, on_progress) → CompressResult` | 批量压缩勾选项; 有 packaging 时必须带 planId |
 | `extract_archive` | `(src, dst, entries, options, on_progress) → ExtractResult` | 批量解压勾选项 |
 | `validate_dir` | `(path) → Result<(), String>` | 拖拽/选择路径校验: 必须是已存在的文件夹 |
 | `cancel_current` | `()` | 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续) |
+
+`plan_packages` / `planId` / `packaging` DTO 的完整契约见 [plan-preview.md](plan-preview.md)。旧客户端不传 `packaging` 时 `compress` 走原逐条目路径, `planId` 可省略。
 
 ### 3.1 scan
 
@@ -71,8 +75,9 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 ### 3.2 compress / 3.3 extract_archive
 
 - `entries: string[]`: 勾选名单, 取值必须是 scan 返回的**原样 `name`**(compress = 条目名, extract = 入口卷名), 严格精确匹配
-- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean, excludes?: string[], verify: boolean }`(excludes 与本次 scan 传参比对保鲜, 见 5.4; verify 缺省 true); `options`(解压): `{ password: string | null, force: boolean }`
-- 壳层转换: `splitSize` 经 `parse_size`("2g" / "500m" / 字节数), 失败 → Err 提示; `password` 空串按 `None`(不加密)
+- `options`(压缩): `{ splitSize: string | null, password: string | null, randomName: boolean, excludes?: string[], verify: boolean, packaging?: PackagingOptions }`(excludes 与本次 scan 传参比对保鲜, 见 5.4; verify 缺省 true); `options`(解压): `{ password: string | null, force: boolean }`
+- `packaging` 存在时 `compress` 走包级策略路径, 必须带 `planId`; 壳层重算方案并比对, 不一致返回"打包方案已变化, 请重新审核". `splitSize` 保留为旧路径兼容字段, 包级路径以 `packaging.splitAbove` 为准
+- 壳层转换: `splitSize` / packaging 阈值经 `parse_size`("2g" / "500m" / 字节数), 失败 → Err 提示; `password` 空串按 `None`(不加密)
 - 执行路径见 5.3/5.4(壳层用 ScanContext 中缓存的扫描结果, 按名单筛选后调 core 分阶段 API; **不重扫**)
 - 返回值: 现有 `CompressResult` / `ExtractResult` 增加 `warnings: string[]` 透传(现状 DTO 丢弃了 Report.warnings)
 
@@ -117,7 +122,7 @@ struct ScanResult { mode: String, items: Vec<ScanItem>, warnings: Vec<String>, t
 
 事件(不变): `{ phase: "scanning"|"compressing"|"extracting", done, total, doneBytes, totalBytes, entry }`
 
-结果(扩展现有): `CompressResult { cancelled, entries: [{archive, original}], warnings }`; `ExtractResult { cancelled, groups: [{entry, original, files}], warnings }`.
+结果(扩展现有): `CompressResult { cancelled, entries: [{archive, original}], packages: [{id, kind, archive, members, inputBytes, entryCount}], warnings }`; 包级路径 `entries` 为空, 新 UI 用 `packages`。`ExtractResult { cancelled, groups: [{entry, original, files}], warnings }`.
 
 压缩选项 DTO(已实现)另含 `format: Option<String>`("zip"|"7z", 缺省 zip)、`level: Option<u8>`(0-9, 缺省不传级别)与 `verify: boolean`(缺省 true) —— 壳层 `to_core_options` 统一校验并映射到 core `Options`; UI 侧仅以预设/高级微调呈现, 见 _docs/compress-modes.md.
 
@@ -260,7 +265,7 @@ meta / warning 行:      恒定不变
 
 | 模式 | 控件 | 默认值 | 说明 |
 |---|---|---|---|
-| 压缩 | 分包大小(text, placeholder "不分包") | 空 = 不分包 | 确认时 `parse_size`, 失败提示并聚焦 |
+| 压缩 | 打包策略(独立行, 已实现) | 合并≤100m / 分包>2g / 合并包≤跟随 / 条目≤50000 | 阈值改动只重算 `plan_packages`, 不重扫; 摘要常驻, "查看方案"打开只读抽屉; 契约见 plan-preview.md |
 | 压缩 | 密码(password) | 空 = 不加密 | 空串按 None; 不持久化 |
 | 压缩 | 随机包名(checkbox) | 关 | 与 CLI `--random-name` 默认关闭一致 |
 | 压缩 | 压缩成功后校验(checkbox) | 开 | 压缩完成后只读包头/中央目录做结构检查; 关闭则跳过(性能敏感场景), 语义见 compress.md 6.8 |
