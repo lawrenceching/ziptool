@@ -38,7 +38,7 @@ pub struct PlannedPackage {
     /// 稳定包 id: `p0` / `p1` ...
     pub id: String,
     pub kind: PackageKind,
-    /// 顶层源条目(完整 `Entry`, 保留 attr_hidden 等信息)
+    /// 顶层源条目(完整 `Entry`, 保留名称/大小/排除标记等)
     pub members: Vec<Entry>,
     /// 压缩包基础名(不带扩展名)
     pub dst: String,
@@ -82,11 +82,10 @@ pub struct PackageReport {
     pub warnings: Vec<String>,
 }
 
-/// 多源压缩命令的成员。`attr_hidden` 是该条目自己的相对隐藏路径。
+/// 多源压缩命令的成员。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PackageSource<'a> {
     pub name: &'a str,
-    pub attr_hidden: &'a [String],
 }
 
 /// 包级后端抽象(测试可注入)。
@@ -347,7 +346,6 @@ pub(crate) fn compress_packages_with_backend<B: PackageBackend + ?Sized>(
             .iter()
             .map(|member| PackageSource {
                 name: member.name.as_str(),
-                attr_hidden: &member.attr_hidden,
             })
             .collect();
 
@@ -565,7 +563,6 @@ mod tests {
             dst: String::new(),
             format: String::new(),
             exclude: None,
-            attr_hidden: Vec::new(),
         }
     }
 

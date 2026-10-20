@@ -2,34 +2,33 @@
 //! 统一语法见 _docs/exclude-rules.md §3:
 //! - 不含 `/`:任意深度的文件/目录名(basename, 如 `Thumbs.db`、`*.tmp`)
 //! - 含 `/`:从条目根锚定匹配相对路径(`*`/`?` 不跨 `/`,`**` 只允许在结尾)
-//! - 隐藏判定**只用 OS 原生属性**(Windows 隐藏属性);Unix 没有可移植的
-//!   文件隐藏属性, `.` 前缀只是命名约定, 可能是用户文件, 不作为隐藏口径
-//! - 系统元数据(Thumbs.db / .DS_Store 等)由模式名单排除, 见 filter 模块
+//! - 系统隐藏**只认系统元数据名单**(Thumbs.db / .DS_Store / lost+found 等);
+//!   不按 OS 属性或 `.` 前缀排除用户自己设置的隐藏文件/文件夹
+//! - `include_hidden` 仅表示"不排除系统元数据默认集"; 不再按任何文件属性判定
 //! - 不变式:统计口径 ≡ 后端实压内容(任何护栏回退都以"加回统计"保持一致)
 
+use std::collections::HashSet;
+
 /// 排除规则:UI 由 `os-hidden` 策略决定 `include_hidden`;
-/// CLI 默认排除 Windows 隐藏属性 + 系统元数据,`--include-hidden-files` 关闭
+/// CLI `--include-hidden-files` 同样关闭系统元数据默认集
 #[derive(Debug, Default, Clone)]
 pub struct ExcludeRules {
-    /// true = 不排除 OS 隐藏属性(Windows);Unix 上没有可移植属性, 该开关不影响 `.` 前缀
+    /// true = 不排除系统元数据默认集; 用户设置的隐藏属性/`.git` 等从不参与判定
     pub include_hidden: bool,
-    /// 系统元数据 + 用户自定义模式, 多条叠加; 无否定语义
+    /// 用户 / 策略模式, 多条叠加; 无否定语义
     pub patterns: Vec<String>,
 }
 
 /// 顶层条目的排除标记(仅顶层;树内文件不逐个上报)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExcludeReason {
-    /// 内建隐藏判定命中
-    Hidden,
-    /// 用户模式命中(保留命中模式, 供 UI 展示)
+    /// 模式命中(保留命中模式, 供 UI 展示)
     Pattern(String),
 }
 
 impl std::fmt::Display for ExcludeReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExcludeReason::Hidden => write!(f, "hidden"),
             ExcludeReason::Pattern(p) => write!(f, "pattern {p:?}"),
         }
     }
@@ -42,10 +41,39 @@ pub struct ExcludedEntry {
     pub reason: ExcludeReason,
 }
 
-/// Windows 属性隐藏路径收集上限(条数):超限停止收集, 未收集项不计入排除
-/// (统计与后端一致地"不排除"), 并发 warning
-pub const EXCLUDE_PATH_LIMIT: usize = 1000;
-/// 排除开关字符预算(与 EXCLUDE_PATH_LIMIT 双护栏, 收集端同步执行)
+/// 系统元数据名单: 只列**系统自身生成**的元数据名称, 不按 `.` 前缀/属性
+/// 批量排除用户文件。UI 的 `os-hidden` 策略与 CLI 默认都使用这份名单。
+pub const OS_METADATA_PATTERNS: &[&str] = &[
+    // Windows
+    "Thumbs.db",
+    "ehthumbs.db",
+    "desktop.ini",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    // macOS
+    ".DS_Store",
+    "._*",
+    "__MACOSX",
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+    ".TemporaryItems",
+    ".apdisk",
+    ".VolumeIcon.icns",
+    ".com.apple.timemachine.donotpresent",
+    ".DocumentRevisions-V100",
+    ".PKInstallSandboxManager",
+    ".MobileBackups",
+    // Linux
+    "lost+found",
+    ".Trash",
+    ".Trash-*",
+    ".directory",
+    ".fuse_hidden*",
+    ".nfs*",
+];
+
+/// 排除开关字符预算; 超限即停止追加(护栏)
 pub const EXCLUDE_ARG_BUDGET: usize = 24_000;
 
 /// 校验用户模式(非法即报错, 宁停不错):
@@ -142,23 +170,17 @@ pub fn matches_patterns(patterns: &[String], rel: &str) -> Option<String> {
     patterns.iter().find(|p| matches_pattern(p, rel)).cloned()
 }
 
-/// Windows 文件系统隐藏属性(stable std API: `MetadataExt::file_attributes`);
-/// 非 Windows 恒 false
-///
-/// Unix 没有等价的可移植属性: `.` 前缀只是命名约定, 用户也可能创建
-/// `.env` / `.git` / `.config`, 因此**不**把 `.` 前缀当作隐藏。
-pub fn is_hidden_attr(md: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        md.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+/// 生效模式集 = 系统元数据默认集(include_hidden=false 时)+ 用户/策略模式。
+/// 去重保留首次出现; 统计层与后端层共用, 保证口径一致。
+pub(crate) fn effective_patterns(rules: &ExcludeRules) -> Vec<String> {
+    let mut patterns: Vec<String> = Vec::new();
+    if !rules.include_hidden {
+        patterns.extend(OS_METADATA_PATTERNS.iter().map(|p| (*p).to_string()));
     }
-    #[cfg(not(windows))]
-    {
-        let _ = md;
-        false
-    }
+    patterns.extend(rules.patterns.iter().cloned());
+    let mut seen: HashSet<String> = HashSet::new();
+    patterns.retain(|p| seen.insert(p.replace('\\', "/")));
+    patterns
 }
 
 /// 7z `-x!` 的包内路径分隔符(7z 按运行平台写入/匹配本地分隔符)
@@ -179,63 +201,20 @@ fn push_tokens(args: &mut Vec<String>, budget: &mut usize, toks: Vec<String>) ->
     true
 }
 
-/// Windows 属性隐藏路径收集器(§4):条数与字符双预算, 超限停止收集并计数;
-/// 未收集的项两端一致地"不排除"(统计照加、后端无开关), 不变式不破。
-pub(crate) struct AttrCollector {
-    entry_name: String,
-    paths: Vec<String>,
-    chars: usize,
-    overflow: usize,
-}
-
-impl AttrCollector {
-    pub(crate) fn new(entry_name: String) -> Self {
-        Self {
-            entry_name,
-            paths: Vec::new(),
-            chars: 0,
-            overflow: 0,
-        }
-    }
-
-    /// rel 已含条目名前缀(如 `Novel/sub/.hid`)
-    pub(crate) fn add(&mut self, rel: &str) {
-        if self.paths.len() >= EXCLUDE_PATH_LIMIT || self.chars >= EXCLUDE_ARG_BUDGET {
-            self.overflow += 1;
-            return;
-        }
-        self.chars += rel.chars().count() + 1;
-        self.paths.push(rel.to_string());
-    }
-
-    /// 取收集结果;有溢出时发 warning(N 项未排除但已计入统计)
-    pub(crate) fn finish(self, warnings: &mut Vec<String>) -> Vec<String> {
-        if self.overflow > 0 {
-            warnings.push(format!(
-                "隐藏项过多, {} 项未排除(已计入大小)",
-                self.overflow
-            ));
-        }
-        let _ = &self.entry_name;
-        self.paths
-    }
-}
-
 /// 把规则归一化为后端命令的排除开关 argv 片段(见 _docs/exclude-rules.md §3):
 /// - zip:开关在条目名**之后**;模式 → `-x <glob>` 双开关(`*/p` + `*/p/*`)
 /// - 7z:开关在 `--` 之前;basename → `-xr!p`,锚定 → `-x!<条目名><SEP>路径`,目录 `/**` → 一条
-/// - Windows 属性隐藏路径(模式不可表达)逐条追加
 pub(crate) fn exclusion_args(
     backend: crate::backend::Backend,
     entry_name: &str,
     rules: &ExcludeRules,
-    attr_hidden: &[String],
 ) -> Vec<String> {
     let mut args = Vec::new();
     let mut budget = EXCLUDE_ARG_BUDGET;
+    let patterns = effective_patterns(rules);
     match backend {
         crate::backend::Backend::Zip => {
-            for p in &rules.patterns {
+            for p in &patterns {
                 // `/**` 结尾 → 取前缀(目录 at-or-below 双开关);其余 `**` 已被校验排除
                 let base = p.strip_suffix("/**").unwrap_or(p);
                 if !push_tokens(
@@ -253,18 +232,9 @@ pub(crate) fn exclusion_args(
                     break;
                 }
             }
-            for rel in attr_hidden {
-                if !push_tokens(
-                    &mut args,
-                    &mut budget,
-                    vec!["-x".into(), rel.clone(), "-x".into(), format!("{rel}/*")],
-                ) {
-                    break;
-                }
-            }
         }
         crate::backend::Backend::SevenZip => {
-            for p in &rules.patterns {
+            for p in &patterns {
                 let tok = if !p.contains('/') {
                     format!("-xr!{p}")
                 } else if let Some(prefix) = p.strip_suffix("/**") {
@@ -275,12 +245,6 @@ pub(crate) fn exclusion_args(
                 } else {
                     format!("-x!{entry_name}{SEP}{}", p.replace('/', &SEP.to_string()))
                 };
-                if !push_tokens(&mut args, &mut budget, vec![tok]) {
-                    break;
-                }
-            }
-            for rel in attr_hidden {
-                let tok = format!("-x!{}", rel.replace('/', &SEP.to_string()));
                 if !push_tokens(&mut args, &mut budget, vec![tok]) {
                     break;
                 }
@@ -340,7 +304,6 @@ mod match_tests {
             crate::backend::Backend::SevenZip,
             "A",
             &ExcludeRules::default(),
-            &[],
         );
         assert!(!args.iter().any(|a| a.contains(".*")), "{args:?}");
     }

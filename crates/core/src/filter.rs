@@ -14,41 +14,8 @@ pub const POLICY_OS_HIDDEN: &str = "os-hidden";
 /// 编程语言临时文件策略 id
 pub const POLICY_LANG_TEMP: &str = "lang-temp";
 
-/// OS 元数据模式(与 `os-hidden` 一同启用)。
-///
-/// 只列**系统自身生成**的元数据名称, 不按 `.` 前缀批量排除:
-/// 用户可能创建 `.env` / `.git` / `.config`, 这些必须保留。
-/// Windows 的隐藏属性由 `ExcludeRules.include_hidden` 承载; Unix 没有可移植
-/// 的文件隐藏属性, 只靠这里的元数据名单。
-pub const OS_METADATA_PATTERNS: &[&str] = &[
-    // Windows
-    "Thumbs.db",
-    "ehthumbs.db",
-    "desktop.ini",
-    "$RECYCLE.BIN",
-    "System Volume Information",
-    // macOS
-    ".DS_Store",
-    "._*",
-    "__MACOSX",
-    ".Spotlight-V100",
-    ".Trashes",
-    ".fseventsd",
-    ".TemporaryItems",
-    ".apdisk",
-    ".VolumeIcon.icns",
-    ".com.apple.timemachine.donotpresent",
-    ".DocumentRevisions-V100",
-    ".PKInstallSandboxManager",
-    ".MobileBackups",
-    // Linux
-    "lost+found",
-    ".Trash",
-    ".Trash-*",
-    ".directory",
-    ".fuse_hidden*",
-    ".nfs*",
-];
+/// 系统元数据名单(定义在 `exclude`; UI 策略与 CLI 默认共用)。
+pub use crate::exclude::OS_METADATA_PATTERNS;
 
 /// 编程语言 / 构建工具临时物(`lang-temp`)。
 ///
@@ -142,9 +109,9 @@ pub fn normalize_enabled_policies(ids: &[String]) -> Vec<String> {
 
 /// 策略 + 自定义模式 → 既有 `ExcludeRules`。
 ///
-/// 顺序固定为 `OS_METADATA_PATTERNS` → `LANG_TEMP_PATTERNS` → 自定义模式,
-/// 保证 `ScanContext.rules_eq` 可比较; 去重键是斜杠归一后的精确值。
-/// `include_hidden` 只影响 Windows 隐藏属性; Unix 的 `.` 前缀不会被本策略排除。
+/// 系统元数据默认集由 `include_hidden` 在 core 的 `effective_patterns` 中统一
+/// 加入(UI/CLI 不重复拼接); 这里只产出 `lang-temp` 模式与自定义模式。
+/// 顺序保证 `ScanContext.rules_eq` 可比较; 去重键是斜杠归一后的精确值。
 pub fn effective_rules(
     settings: &FilterSettings,
     custom: &[String],
@@ -154,9 +121,6 @@ pub fn effective_rules(
     let lang_temp = enabled.iter().any(|id| id == POLICY_LANG_TEMP);
 
     let mut patterns: Vec<String> = Vec::new();
-    if os_hidden {
-        patterns.extend(OS_METADATA_PATTERNS.iter().map(|p| (*p).to_string()));
-    }
     if lang_temp {
         patterns.extend(LANG_TEMP_PATTERNS.iter().map(|p| (*p).to_string()));
     }
@@ -168,7 +132,7 @@ pub fn effective_rules(
 
     validate_patterns(&patterns)?;
     Ok(ExcludeRules {
-        // Windows 隐藏属性开关; Unix 没有可移植属性, 该值不产生 `.*` 模式
+        // false = core 在 effective_patterns 中加入系统元数据默认集
         include_hidden: !os_hidden,
         patterns,
     })
@@ -272,8 +236,8 @@ mod tests {
     #[test]
     fn builds_rules_for_each_policy_combination() {
         let both = effective_rules(&FilterSettings::default(), &[]).unwrap();
-        assert!(!both.include_hidden);
-        assert!(both.patterns.contains(&"Thumbs.db".to_string()));
+        assert!(!both.include_hidden, "os-hidden 开 = core 加系统元数据");
+        assert!(!both.patterns.contains(&"Thumbs.db".to_string()));
         assert!(both.patterns.contains(&"node_modules".to_string()));
 
         let only_os = effective_rules(
@@ -284,8 +248,7 @@ mod tests {
         )
         .unwrap();
         assert!(!only_os.include_hidden);
-        assert!(only_os.patterns.contains(&"Thumbs.db".to_string()));
-        assert!(!only_os.patterns.contains(&"node_modules".to_string()));
+        assert!(only_os.patterns.is_empty(), "os-hidden 只由 core 加元数据");
 
         let only_lang = effective_rules(
             &FilterSettings {
@@ -294,7 +257,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(only_lang.include_hidden, "os-hidden 关 = 不排隐藏");
+        assert!(only_lang.include_hidden, "os-hidden 关 = 不加系统元数据");
         assert!(!only_lang.patterns.contains(&"Thumbs.db".to_string()));
         assert!(only_lang.patterns.contains(&"node_modules".to_string()));
 

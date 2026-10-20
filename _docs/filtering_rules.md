@@ -1,7 +1,7 @@
 # 设置页面与文件排除策略技术方案
 
 > 状态: 已实现(2026-10-20, P0–P6); 决策 D-1 / D-2 / D-3 / D-4 / D-6 / D-11 / D-12 均已落地
-> 2026-10-20 修订: **移除 Unix `.` 前缀隐藏口径**——`.` 开头可能是用户文件; 系统隐藏改为 Windows 隐藏属性 + 系统元数据名单(见 §4)
+> 2026-10-20 修订: **移除所有隐藏属性口径**——Unix `.` 前缀与 Windows `attrib +H` 都不参与判定; 系统隐藏只认系统元数据名单(见 §4)
 > 范围: `crates/tauri-app`(UI + 壳层)与 `crates/core`(策略展开 + 隐藏口径); CLI 参数不变, 默认隐藏口径同步修订(不再排 `.` 前缀)
 > 相关: [exclude-rules.md](exclude-rules.md)(模式语法与后端归一化)、[ui-backend.md](ui-backend.md)(命令面 / DTO / 状态机)、[i18n.md](i18n.md)(词条规则)、[compress.md](compress.md)(压缩编排 / 取消)、[progress.md](progress.md)
 >
@@ -58,13 +58,13 @@
 |---|---|---|
 | UI | `ui/index.html` + `ui/app.js`, 纯静态无打包器 | 单视图; 选项行已有「高级 → 排除」文本框; 语言下拉在状态栏 |
 | 壳层 | `crates/tauri-app/src/lib.rs`, 8 个命令 | `scan` / `compress` 接收 `filters` + `excludes`; `ScanContext` 保鲜并比对展开后的规则; `load_settings` / `save_settings` 管理设置 |
-| core | `ExcludeRules { include_hidden, patterns }` | Windows 属性隐藏 + 系统元数据/用户模式; Unix 不按 `.` 前缀隐藏; 后端命令按 exclude-rules.md §3 归一化 |
+| core | `ExcludeRules { include_hidden, patterns }` | `include_hidden=false` 时由 `effective_patterns` 加入系统元数据; 不使用任何隐藏属性; 后端命令按 exclude-rules.md §3 归一化 |
 | 设置 | 无 | 只有 `localStorage["ziptool.locale"]`(语言偏好) |
 | 测试 | Rust 单测 + 壳层单测 + Node UI 单测 + CLI e2e | UI 测试「表面真实、传输造假」, 命令名与参数形状按真实链路校验 |
 
 ### 2.2 关键约束
 
-1. **单一排除管线**: 策略必须最终落成 `ExcludeRules`, 否则扫描统计、Windows 属性隐藏收集、后端 `-x` 开关、`ScanContext.rules_eq` 会出现两套语义。
+1. **单一排除管线**: 策略必须最终落成 `ExcludeRules`, 否则扫描统计、后端 `-x` 开关、`ScanContext.rules_eq` 会出现两套语义。
 2. **数据安全优先**: 误排除 = 压缩包里缺文件; 漏排除只是多占空间。内建名单必须保守, 且随时可关。
 3. **扫描可能很贵**: 大盘扫描分钟级, 策略切换不能在每次 toggle 时立即重扫; 只在离开设置页且确实影响当前压缩扫描时重扫一次。
 4. **core 无第三方依赖**(利于 devcontainer / CLI); 设置文件的 serde 结构留在壳层, core 只保留纯逻辑。
@@ -84,7 +84,7 @@
 | D7 | 关机范围 | **本期仅 UI 占位**: 控件置灰 + 「即将支持」, 不实现实际关机, 不接受修改; 字段保留, 后续 ticket 消费 | 与 D-4 / D-12 的确认一致; 避免发布一个「看起来能关机、实际不关」的开关 |
 | D8 | 与自定义模式的关系 | **保留高级区「排除」输入**, 与策略模式**并集** | 不破坏现有用法; 策略负责全局默认, 自定义负责单次特例 |
 | D9 | 内建名单尺度 | 只收**明确由工具生成、可再生**的缓存/临时物; 不收 `build` / `dist` / `target` / `vendor` 等通用名 | 通用名碰撞会误删用户数据; 宁可漏排, 用户可用自定义模式补 |
-| D10 | CLI | **参数不变, 默认口径同步** | CLI 不读 `settings.json`; 但移除 `.` 前缀隐藏后, CLI 默认改为 Windows 隐藏属性 + 系统元数据名单 |
+| D10 | CLI | **参数不变, 默认口径同步** | CLI 不读 `settings.json`; 默认排除改为系统元数据名单, 不再使用任何隐藏属性 |
 
 ## 4. 文件排除策略
 
@@ -92,11 +92,11 @@
 
 | id | 标题(zh-CN) | 默认 | 展开方式 |
 |---|---|---|---|
-| `os-hidden` | 操作系统隐藏文件 | **开**(已确认) | Windows `include_hidden=false` + OS 元数据模式; Unix 仅元数据模式(不排 `.` 前缀) |
+| `os-hidden` | 操作系统隐藏文件 | **开**(已确认) | `include_hidden=false` → core 加入系统元数据默认集(三平台一致) |
 | `lang-temp` | 编程语言的临时文件 | **开**(已确认) | 追加语言临时模式 |
 
 - 开关语义为**正向**: 「排除 …」= 开。core 的 `include_hidden` 是反向命名, 映射时取反, 见 §4.2。
-- `os-hidden` 默认开: Windows 排除隐藏属性; Unix/macOS **不按 `.` 前缀批量排除**, 只排除系统元数据名单(§4.3)。用户自建的 `.git`、`.env`、`.config` 默认保留。
+- `os-hidden` 默认开: 三平台都只排除系统元数据名单(§4.3); **不按隐藏属性或 `.` 前缀排除**。用户自建的 `.git`、`.env`、`.config` 以及 `attrib +H` 的普通文件默认保留。
 - `lang-temp` 默认开(D-1 已确认)会让 `node_modules`、`__pycache__` 等从默认压缩内容中消失, 是**有意的行为升级**; 扫描表仍会显示被排除的顶层条目(默认不勾选), 用户可手动勾选覆盖。若要改回默认关, 只改 core 默认函数与 UI 默认常量即可。
 
 ### 4.2 展开映射
@@ -107,19 +107,18 @@ os_hidden  = "os-hidden"  ∈ enabled
 lang_temp  = "lang-temp"  ∈ enabled
 
 patterns = []
-if os_hidden: patterns += OS_METADATA_PATTERNS
 if lang_temp: patterns += LANG_TEMP_PATTERNS
 patterns += customExcludes                     # 高级区, 按次传入
 patterns = dedupe(patterns)                    # 斜杠归一后精确去重, 保留首次出现
-validate_patterns(patterns)                    # 非法即报错, 不开工
 
 ExcludeRules {
-    include_hidden: !os_hidden,
+    include_hidden: !os_hidden,                 # false → core 加 OS_METADATA_PATTERNS
     patterns,
 }
+# core::effective_patterns: !include_hidden 时前置系统元数据名单; 再校验模式
 ```
 
-- `os-hidden` 关 = `include_hidden=true`: Windows 不再收集隐藏属性, 系统元数据模式也不加; Unix 本来就不排 `.` 前缀。若仍想排除 `Thumbs.db` 等元数据, 把对应名字填入高级区自定义模式。
+- `os-hidden` 关 = `include_hidden=true`: core 不再加入系统元数据默认集; 不涉及任何文件属性。若仍想排除 `Thumbs.db` 等元数据, 把对应名字填入高级区自定义模式。
 - `lang-temp` 关 = 不追加语言模式; 自定义模式照旧生效。
 - 策略模式与自定义模式**没有否定语义**, 并集生效; 用户要「只排除 A 不排除 B」时关掉策略、用自定义模式表达。
 - 展开只发生在扫描 / 压缩入口各一次, 之后仍走 `scan_dir` / `compress_entries` / 后端 `exclusion_args` 的既有路径。
@@ -177,7 +176,7 @@ ExcludeRules {
 | `.nfs*` | NFS 临时文件 |
 
 - 这些是**系统自身生成**的元数据, 跨平台按名字排除; 不按 `.` 前缀批量排除用户文件。
-- 上述模式与 Windows 属性隐藏**叠加**, 不替代。
+- 这是**唯一**的系统隐藏口径; 不使用任何文件属性。
 - 用户自建 `.git` / `.env` / `.ssh` / `.config` 等默认保留; 需要排除时用高级区自定义模式。
 
 #### 编程语言 / 构建工具临时物(`lang-temp`)
@@ -224,8 +223,8 @@ ExcludeRules {
 1. **`.yarn/cache` 只锚定条目根**: 受语法限制(`**` 只能结尾), 无法表达「任意深度的 `.yarn/cache`」。monorepo 子目录里的 `.yarn/cache` 不排除; 需要时用自定义模式, 或未来扩展语法。
 2. **`venv` 是通用词**: 确有极小概率误排普通目录; 换来的收益是常见 Python 虚拟环境。审核可决定删掉 `venv`, 保留 `.venv`。
 3. **`*.o` 与 `*.class` 按扩展名**: 其他领域若有同名文件类型会被误排; 这两类扩展名在数据目录中极少见, 暂保留。
-4. **Unix 点文件默认保留**: `.git` / `.env` / `.ssh` / `.config` 等用户文件不会因为 `.` 前缀被排除; 需要排除时由用户在高级区显式填 `.*` 或具体模式。
-5. **Unix 系统隐藏判定有限**: Linux/macOS 没有可移植的文件隐藏属性, 只按 §4.3 的系统元数据名单排除; 名单外的系统垃圾可能漏排, 用自定义模式补。
+4. **用户隐藏文件默认保留**: `.git` / `.env` / `.ssh` / `.config` 不会因为 `.` 前缀被排除; Windows `attrib +H` 的普通文件也不会因为属性被排除。需要排除时由用户在高级区显式填模式。
+5. **系统元数据判定是名单式的**: 三平台都不使用文件隐藏属性; 名单外的系统垃圾可能漏排, 用自定义模式补。用户设置的隐藏文件/文件夹一律保留。
 6. **语言名单不覆盖所有生态**: 未列出的工具(如 Rust `target`、Go `vendor`、PHP `vendor`)请用自定义模式; 见 §4.5。
 
 ### 4.5 刻意不收录的通用名
@@ -247,7 +246,7 @@ ExcludeRules {
 
 ### 4.6 顺序、去重与校验
 
-- 展开顺序固定: `OS_METADATA_PATTERNS` → `LANG_TEMP_PATTERNS` → 自定义模式。用户传入的 `enabledPolicies` 顺序不参与输出顺序, 保证规则可比较(`rules_eq`)。
+- 展开顺序固定: core `effective_patterns` 前置 `OS_METADATA_PATTERNS`(当 `include_hidden=false`), 之后是策略 `LANG_TEMP_PATTERNS` → 自定义模式。用户传入的 `enabledPolicies` 顺序不参与输出顺序, 保证规则可比较(`rules_eq`)。
 - 去重键 = 把 `\` 归一为 `/` 后的精确字符串; 保留首次出现的原始写法。`node_modules` 与 `node_modules/**` 语义不同, 不去重。
 - 所有模式在展开后统一走 `validate_patterns`; 任一非法(空串 / 空路径段 / `**` 位置错误)→ 返回错误, 扫描/压缩不开工(宁停不错)。
 - 内建模式在 core 单测中逐条校验; 运行期仍统一校验一次(约 40 条, 每次扫描一次, 成本可忽略)。
@@ -266,7 +265,7 @@ ExcludeRules {
 - 必做的小优化: `matches_pattern()` 在模式/路径不含 `\` 时**不做 `replace` 分配**(目前每条模式每个文件会分配两个 String)。路径由 `scan_dir` 用 `/` 构造, 内建模式也不含 `\`, 因此绝大多数调用变成纯比较。
 - 基准方法: 生成 10 万文件的目录, 分别以「策略全关」与「策略全开」跑 `scan_dir`, 记录耗时; 目标额外开销 **≤ 15%**。
 - 若超过阈值: 在 core 内引入一次性编译的 `PatternSet`(精确 basename 用 `HashSet`, 通配 basename 用小数组, 锚定模式单独走路径匹配), 由 `scan_dir` 每次扫描编译一次; 公共 API 不变。该优化不在本次必做范围, 但本方案的分层已为它留好位置。
-- 后端 argv 预算不受影响: 约 40 条模式在 zip 下最多约 80 个 `-x` token, 远低于 `EXCLUDE_ARG_BUDGET`(24k 字符); Windows 属性路径另有 `EXCLUDE_PATH_LIMIT`(1000 条)护栏, 两者都由现有 `exclusion_args` 统一执行。
+- 后端 argv 预算不受影响: 约 40 条模式在 zip 下最多约 80 个 `-x` token, 远低于 `EXCLUDE_ARG_BUDGET`(24k 字符), 由 `exclusion_args` 统一执行。
 
 ## 5. 设置数据模型与持久化
 
@@ -300,7 +299,7 @@ core(无 serde 依赖):
 pub const POLICY_OS_HIDDEN: &str = "os-hidden";
 pub const POLICY_LANG_TEMP: &str = "lang-temp";
 
-pub const OS_METADATA_PATTERNS: &[&str] = &[/* §4.3 */];
+pub const OS_METADATA_PATTERNS: &[&str] = &[/* §4.3; 定义在 core::exclude, filter 仅重导出 */];
 pub const LANG_TEMP_PATTERNS: &[&str] = &[/* §4.3 */];
 
 /// 策略开关集合; 只存 id, 不存展开后的模式(目录更新对已有设置自动生效)
@@ -550,9 +549,9 @@ scan(mode, path, filters?, excludes?, on_progress) -> ScanResult
 ### 6.5 CLI
 
 - `ziptool compress` 仍只有 `--exclude` / `--include-hidden-files`; 不读 `settings.json`。
-- 默认排除改为 **Windows 隐藏属性 + 系统元数据名单**; 不再按 `.` 前缀排除用户文件。
-- `--include-hidden-files` 同时关闭 Windows 属性与元数据名单。
-- `crates/core` 的 `Options::default()` 仍无默认模式; CLI 在构造 `Options` 时显式加入 `OS_METADATA_PATTERNS`, 库调用方按需自行加入。
+- 默认排除改为 **系统元数据名单**; 不再使用任何隐藏属性或 `.` 前缀。
+- `--include-hidden-files` 关闭系统元数据默认集(兼容旧参数名)。
+- `crates/core` 的 `Options::default()` 仍无默认模式; `scan_dir` / `exclusion_args` 通过 `effective_patterns` 在 `include_hidden=false` 时统一加入名单, 库/CLI/UI 共用。
 - 后续可加 `--filter-policy <id>`(复用 `effective_rules`), 不在本次范围。
 
 ## 7. UI 设计
@@ -785,7 +784,7 @@ boot ── load_settings ──▶ ready
 | `settings.filters.heading` | 文件排除 |
 | `settings.filters.intro` | 策略在压缩扫描时生效; 修改后会在关闭设置页时重新扫描当前源文件夹。被排除的条目仍会显示, 但默认不勾选。单次任务仍可在主界面的「高级」中添加自定义模式。 |
 | `settings.filters.osHidden.title` | 操作系统隐藏文件 |
-| `settings.filters.osHidden.desc` | 排除操作系统隐藏属性与系统元数据文件: Windows 为隐藏属性, 以及 Thumbs.db、desktop.ini、.DS_Store、.Spotlight-V100 等系统元数据。不会按 . 前缀批量排除用户自己创建的文件。 |
+| `settings.filters.osHidden.desc` | 排除系统元数据文件: Thumbs.db、desktop.ini、.DS_Store、.Spotlight-V100 等。不会按文件隐藏属性或 . 前缀排除用户自己创建的文件。 |
 | `settings.filters.langTemp.title` | 编程语言的临时文件 |
 | `settings.filters.langTemp.desc` | 排除编程语言与构建工具生成的缓存和临时文件, 例如 JavaScript 的 node_modules、Python 的 __pycache__、Java 的 .gradle 与 *.class。 |
 | `status.settingsLoadFailed` | 读取设置失败, 已使用默认值: {{error}} |
@@ -810,15 +809,15 @@ boot ── load_settings ──▶ ready
 - 目录: 恰好两个已知 id; `normalize_enabled_policies` 去未知、去重、按目录顺序; 空数组保持空。
 - 每条内建模式通过 `validate_patterns`; `effective_rules` 输出通过校验。
 - 展开矩阵:
-  - 两策略开 → `include_hidden=false` + OS 元数据 + 语言模式
-  - 仅 `os-hidden` → 只含 OS 元数据
-  - 仅 `lang-temp` → `include_hidden=true` + 语言模式(验证 `.venv` 等 dot 目录仍被排)
+  - 两策略开 → `include_hidden=false` + 语言模式; core `effective_patterns` 前置 OS 元数据
+  - 仅 `os-hidden` → `include_hidden=false` + 无策略模式; core 生效集只有 OS 元数据
+  - 仅 `lang-temp` → `include_hidden=true` + 语言模式(验证 `.venv` 等仍被 `lang-temp` 排)
   - 全关 → `include_hidden=true` + 仅自定义
-- 自定义模式追加、与内建重复时只保留一份、顺序为「OS → 语言 → 自定义」。
+- 自定义模式追加、与内建重复时只保留一份; core 生效顺序为「OS → 语言/自定义」。
 - 安全回归:
   - 内建语言模式不匹配 `.git`、`.git/config`、`data`、`src`、`target`、`build`、`dist`、`vendor`
   - OS 元数据名单不匹配 `.env`、`.git`、`.gitignore`、`.ssh`、`.config` 等用户点文件
-  - `.` 前缀文件在扫描中默认保留(不再产生 `.*` / `-xr!.*`)
+  - `.` 前缀文件与 Windows `attrib +H` 普通文件在扫描中保留(不再产生 `.*` / `-xr!.*`)
 - 非法自定义模式 → `Err`; 内建清单不会被误改成非法。
 - `matches_pattern` 无 `\` 时的零分配改造不改变现有匹配矩阵(现有测试全绿)。
 
@@ -881,7 +880,7 @@ boot ── load_settings ──▶ ready
 
 ### 10.5 实机验收
 
-- 准备夹具: 隐藏属性文件(Windows 用 `attrib +H`)、`.DS_Store`、`Thumbs.db`、`node_modules/`、`__pycache__/`、`.git/`、普通数据文件。
+- 准备夹具: 系统元数据(`.DS_Store`、`Thumbs.db`)、`node_modules/`、`__pycache__/`、`.git/`、`.env`、Windows `attrib +H` 的普通文件、普通数据文件。
 - 策略全开扫描: 顶层被排除项显示且默认不勾选; 目录大小扣除; `.git` / `.env` 等用户点文件在所有平台都保留; 系统元数据按名单排除。
 - 逐项关闭策略: 重新扫描后对应条目恢复可选; 压缩后用 `7z l` / `unzip -l` 确认包内容与扫描口径一致。
 - 设置持久化: 改开关 → 退出 → 重开, 状态保持; 手工写坏 `settings.json` → 启动默认值 + 警告。
@@ -921,7 +920,7 @@ boot ── load_settings ──▶ ready
 - [ ] 切换策略立即持久化; 写盘失败时开关回滚并提示, 不出现「显示开、实际关」
 - [ ] 策略变化后, 压缩模式已有扫描结果在关闭设置页时自动重扫; 解压模式不重扫
 - [ ] 修改策略后不重扫直接点压缩 → 壳层拒绝并提示扫描过期(兜底)
-- [ ] 关闭 `os-hidden` 后系统元数据/Windows 隐藏属性可被压缩; 关闭 `lang-temp` 后 `node_modules` 等恢复可选
+- [ ] 关闭 `os-hidden` 后系统元数据可被压缩; 隐藏属性文件始终保留; 关闭 `lang-temp` 后 `node_modules` 等恢复可选
 - [ ] `.env` / `.git` / `.gitignore` 等用户点文件默认保留, 不出现 `.*` / `-xr!.*` 批量排除
 - [ ] 关机控件不可切换; 即使 `settings.json` 中字段为 `true`, 执行压缩成功也不发生关机 / 无倒计时横幅 / 无电源命令与日志
 - [ ] 代码中不存在 `power_off` 命令、平台关机命令、`status.shutdown*`; 只有通用区 `settings.general.shutdown.*` 文案, 没有单独的 `settings.shutdown.*`

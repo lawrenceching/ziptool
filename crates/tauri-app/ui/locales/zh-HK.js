@@ -116,7 +116,7 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
         "intro": "策略在壓縮掃描時生效; 修改後會在關閉設定頁時重新掃描目前來源資料夾。被排除的項目仍會顯示, 但預設不勾選。單次任務仍可在主介面的「進階」中加入自訂模式。",
         "osHidden": {
           "title": "作業系統隱藏檔案",
-          "desc": "排除作業系統隱藏屬性與系統元資料檔案: Windows 為隱藏屬性, 以及 Thumbs.db、desktop.ini、.DS_Store、.Spotlight-V100 等系統元資料。不會按 . 前綴批量排除使用者自行建立的檔案。"
+          "desc": "排除系統元資料檔案: Thumbs.db、desktop.ini、.DS_Store、.Spotlight-V100 等。不會按檔案隱藏屬性或 . 前綴排除使用者自行建立的檔案。"
         },
         "langTemp": {
           "title": "程式語言的暫存檔案",

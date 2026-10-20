@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::exclude::{
-    AttrCollector, ExcludeReason, ExcludeRules, ExcludedEntry, is_hidden_attr, matches_patterns,
+    ExcludeReason, ExcludeRules, ExcludedEntry, effective_patterns, matches_patterns,
     validate_patterns,
 };
 use crate::progress::{Phase, Progress};
@@ -28,9 +28,6 @@ pub struct Entry {
     /// 排除标记(仅顶层打标;None = 正常条目)。扫描永远返回全部条目,
     /// CLI 丢弃被标条目, UI 渲染为不勾选
     pub exclude: Option<crate::exclude::ExcludeReason>,
-    /// Windows 属性隐藏的树内相对路径(条目名前缀, `/` 分隔, 见 _docs/exclude-rules.md §4);
-    /// 非 Windows 恒为空
-    pub attr_hidden: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,15 +51,16 @@ pub struct ScanReport {
 
 /// 扫描 input 的顶层条目并统计大小; 每完成一个顶层条目回调一次进度。
 /// 排除规则(rules)双轨生效: 顶层条目永远返回并打标(`Entry.exclude`,
-/// CLI 丢弃 / UI 显示不勾选), 树内被排除项不计尺寸; Windows 属性隐藏
-/// 收集为 `Entry.attr_hidden` 相对路径(§4, 预算护栏超限即回退并 warning)。
+/// CLI 丢弃 / UI 显示不勾选), 树内被排除项不计尺寸。
+/// 排除只认系统元数据名单 + 用户/策略模式; 用户设置的隐藏属性不参与判定。
 pub fn scan_dir(
     input: &Path,
     rules: &ExcludeRules,
     on_progress: &dyn Fn(&Progress),
 ) -> Result<ScanReport> {
-    // 宁停不错: 用户模式先校验(UI/CLI 入口已校验, 这里兜底库直调场景)
-    validate_patterns(&rules.patterns).map_err(CoreError::InvalidExclude)?;
+    // 宁停不错: 生效模式先校验(UI/CLI 入口已校验, 这里兜底库直调场景)
+    let patterns = effective_patterns(rules);
+    validate_patterns(&patterns).map_err(CoreError::InvalidExclude)?;
 
     // 顶层条目按名字字典序排序, 保证进度与后续产物顺序稳定、可复现
     let mut names: Vec<String> = fs::read_dir(input)?
@@ -74,25 +72,14 @@ pub fn scan_dir(
 
     let total = names.len();
     let mut report = ScanReport::default();
-    // Windows 属性枚举仅在"启用隐藏排除"时进行(§4); 其余平台 None
-    let collect_attrs = !rules.include_hidden && cfg!(windows);
 
     for (i, name) in names.into_iter().enumerate() {
         let path = input.join(&name);
-        let mut attr_hidden = Vec::new();
         let (kind, size, entry_count) = match fs::symlink_metadata(&path) {
             Ok(md) => {
                 if md.file_type().is_dir() {
-                    let mut collector = AttrCollector::new(name.clone());
                     // 目录: 只统计普通文件与链接自身, 不跟随目录链接(避免循环与重复计数)
-                    let (sz, count) = dir_size(
-                        &path,
-                        &name,
-                        rules,
-                        &mut report.warnings,
-                        collect_attrs.then_some(&mut collector),
-                    );
-                    attr_hidden = collector.finish(&mut report.warnings);
+                    let (sz, count) = dir_size(&path, &name, &patterns, &mut report.warnings);
                     (EntryKind::Dir, sz, count)
                 } else {
                     // 文件与符号链接都按自身大小计, 链接归为 File
@@ -104,18 +91,8 @@ pub fn scan_dir(
                 (EntryKind::File, 0, 0)
             }
         };
-        // 顶层打标: OS 隐藏属性(仅 Windows)优先, 其次模式命中。
-        // Unix 的 `.` 前缀不参与隐藏判定(可能是用户自建文件)。
-        let hidden = !rules.include_hidden
-            && collect_attrs
-            && fs::symlink_metadata(&path)
-                .map(|m| is_hidden_attr(&m))
-                .unwrap_or(false);
-        let exclude = if hidden {
-            Some(ExcludeReason::Hidden)
-        } else {
-            matches_patterns(&rules.patterns, &name).map(ExcludeReason::Pattern)
-        };
+        // 顶层打标: 只按生效模式命中; 不按任何文件属性/`.` 前缀判定。
+        let exclude = matches_patterns(&patterns, &name).map(ExcludeReason::Pattern);
         if let Some(reason) = &exclude {
             report.excluded.push(ExcludedEntry {
                 name: name.clone(),
@@ -130,7 +107,6 @@ pub fn scan_dir(
             dst: String::new(),
             format: String::new(),
             exclude,
-            attr_hidden,
         });
         // 被标条目不计入总量(统计口径 = 默认将压缩的内容; 条目 size 保留真实值供展示)
         if report.entries[i].exclude.is_none() {
@@ -153,15 +129,14 @@ pub fn scan_dir(
 /// 递归累加目录下所有普通文件/链接自身的大小与条目数(目录自身计 1);
 /// 栈式迭代避免深递归。
 /// 无权限等读不了的子树计 0 并记 warning, 不中断。
-/// 排除(树内): 模式(条目名前缀相对路径, 与后端开关同坐标系)+ Windows 隐藏属性;
-/// 命中文件不计尺寸, 命中目录整树不下钻。Windows 属性隐藏(attrs=Some 时)收集相对路径而非打标。
-/// Unix 的 `.` 前缀不参与排除(用户可能自建 .env/.git 等)。
+/// 排除(树内): 模式(条目名前缀相对路径, 与后端开关同坐标系);
+/// 命中文件不计尺寸, 命中目录整树不下钻。
+/// 不按任何文件属性 / `.` 前缀排除用户文件。
 fn dir_size(
     dir: &Path,
     entry_name: &str,
-    rules: &ExcludeRules,
+    patterns: &[String],
     warnings: &mut Vec<String>,
-    mut attrs: Option<&mut AttrCollector>,
 ) -> (u64, usize) {
     let mut total = 0u64;
     // 目录自身也计 1 个条目(空目录 = 1, 与 strategy::StrategyItem.entry_count 对齐)
@@ -197,20 +172,10 @@ fn dir_size(
             } else {
                 format!("{prefix}/{name}")
             };
-            let attr_hidden = attrs.is_some() && !rules.include_hidden && is_hidden_attr(&md);
-            // 模式坐标系 = 条目名前缀的相对路径(与 7z -x! 开关、属性路径一致:
+            // 模式坐标系 = 条目名前缀的相对路径(与 7z -x! 开关一致:
             // 用户按扫描表所见路径写模式, 如 `App/cache`、`Novel/sub/*.log`)
             let key = format!("{entry_name}/{rel}");
-            // 隐藏只走 Windows 属性; `.` 前缀不排除(用户可能自建 .env/.git 等)
-            let excluded = attr_hidden || matches_patterns(&rules.patterns, &key).is_some();
-            if excluded {
-                if attr_hidden {
-                    // 条目名前缀 + / 分隔, 供后端逐条开关(§4)
-                    attrs
-                        .as_mut()
-                        .expect("attr_hidden 只在 attrs=Some 时为真")
-                        .add(&key);
-                }
+            if matches_patterns(patterns, &key).is_some() {
                 continue; // 不计尺寸; 目录不入栈(整树剔除/不下钻)
             }
             entries += 1;
@@ -287,46 +252,51 @@ mod tests {
     }
 
     #[test]
-    fn scan_windows_attr_hidden_marks_and_collects_inner_paths() {
-        if !cfg!(windows) {
-            return; // attrib 仅 Windows
-        }
-        let root = unique_temp("scan-attr");
-        fs::create_dir_all(root.join("in/outer/inner")).unwrap();
-        fs::write(root.join("in/outer/inner/secret.txt"), "sss").unwrap(); // 3 字节
-        fs::write(root.join("in/Thumbs.db"), "tt").unwrap(); // 2 字节
-        fs::write(root.join("in/outer/plain.txt"), "pp").unwrap(); // 2 字节
-        for p in ["in/Thumbs.db", "in/outer/inner"] {
-            let st = std::process::Command::new("attrib")
-                .args(["+H", root.join(p).to_str().unwrap()])
-                .status()
-                .unwrap();
-            assert!(st.success(), "attrib +H 失败: {p}");
+    fn scan_does_not_exclude_user_hidden_attribute() {
+        let root = unique_temp("scan-user-hidden");
+        fs::create_dir_all(root.join("in")).unwrap();
+        fs::write(root.join("in/Thumbs.db"), "tt").unwrap(); // 2 字节(元数据)
+        fs::write(root.join("in/secret.txt"), "sss").unwrap(); // 3 字节(用户隐藏)
+        fs::write(root.join("in/keep.txt"), "k").unwrap(); // 1 字节
+        if cfg!(windows) {
+            // 用户手动隐藏的普通文件: 仅属性, 不是系统元数据
+            for p in ["in/secret.txt", "in/Thumbs.db"] {
+                let st = std::process::Command::new("attrib")
+                    .args(["+H", root.join(p).to_str().unwrap()])
+                    .status()
+                    .unwrap();
+                assert!(st.success(), "attrib +H 失败: {p}");
+            }
         }
 
         let report = scan_with(&root.join("in"), &ExcludeRules::default());
-        // 顶层属性隐藏打标(名字口径不生效: . 开头不算)
-        let t = report
+        let thumbs = report
             .entries
             .iter()
             .find(|e| e.name == "Thumbs.db")
             .unwrap();
-        assert_eq!(t.exclude, Some(ExcludeReason::Hidden));
-        // 内部隐藏目录: 整树剔除 + 收集为一条条目名前缀相对路径(/ 分隔)
-        let o = report.entries.iter().find(|e| e.name == "outer").unwrap();
-        assert_eq!(o.size, 2, "plain.txt 计入, inner 整树剔除");
-        assert_eq!(o.attr_hidden, vec!["outer/inner".to_string()]);
-        assert_eq!(report.total_bytes, 2, "隐藏的顶层与内部都不计入");
+        assert_eq!(
+            thumbs.exclude,
+            Some(ExcludeReason::Pattern("Thumbs.db".into())),
+            "系统元数据按名单排除"
+        );
+        let secret = report
+            .entries
+            .iter()
+            .find(|e| e.name == "secret.txt")
+            .unwrap();
+        assert!(secret.exclude.is_none(), "用户隐藏属性不参与判定");
+        assert_eq!(report.total_bytes, 4, "secret + keep 计入");
+        assert_eq!(report.excluded.len(), 1, "只有元数据被排除");
 
-        // include_hidden=true: 不收集不打标不剔除
+        // include_hidden=true: 连系统元数据也不排除
         let rules = ExcludeRules {
             include_hidden: true,
             patterns: vec![],
         };
         let report = scan_with(&root.join("in"), &rules);
         assert!(report.entries.iter().all(|e| e.exclude.is_none()));
-        assert!(report.entries.iter().all(|e| e.attr_hidden.is_empty()));
-        assert_eq!(report.total_bytes, 7);
+        assert_eq!(report.total_bytes, 6);
 
         fs::remove_dir_all(&root).unwrap();
     }

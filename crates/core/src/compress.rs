@@ -71,7 +71,7 @@ pub(crate) fn compress_with_backend<B: CommandBackend + ?Sized>(
     })?;
     // 顶层丢弃(单调用路径):被标条目不压缩。
     // 分阶段 API(UI)不走这里 —— 标记仅展示, 勾选名单决定内容。
-    // include_hidden=true 时不会产生 Hidden 标记, Pattern 标记一律丢弃。
+    // 顶层被标条目(系统元数据 / 策略 / 用户模式)一律丢弃。
     let excluded: Vec<crate::exclude::ExcludedEntry> = scan
         .entries
         .iter()
@@ -176,7 +176,7 @@ pub(crate) fn compress_entries_with_backend<B: CommandBackend + ?Sized>(
         let base_bytes = done_bytes;
         let entry_size = e.size;
         let result = backend
-            .compress_command(&input_abs, &e.name, &out_archive, opts, &e.attr_hidden)
+            .compress_command(&input_abs, &e.name, &out_archive, opts)
             .and_then(|mut cmd| {
                 backend.run_with_percent(&mut cmd, cancel, &mut |pct| {
                     // 条目内进度: 扫描期大小 × 百分比(7z 帧约 10Hz; 0 字节条目无帧, 跳过)。
@@ -401,7 +401,6 @@ mod dst_tests {
                 dst: String::new(),
                 format: String::new(),
                 exclude: None,
-                attr_hidden: Vec::new(),
             })
             .collect()
     }
@@ -672,7 +671,6 @@ mod fake_tests {
             name: &str,
             out_archive: &Path,
             _opts: &Options,
-            _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
             let stem = out_archive
@@ -742,10 +740,8 @@ mod fake_tests {
             name: &str,
             out_archive: &Path,
             opts: &Options,
-            attr_hidden: &[String],
         ) -> Result<Command> {
-            self.0
-                .compress_command(work, name, out_archive, opts, attr_hidden)
+            self.0.compress_command(work, name, out_archive, opts)
         }
 
         fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()> {
@@ -785,7 +781,6 @@ mod fake_tests {
                 dst: "A".into(),
                 format: String::new(),
                 exclude: None,
-                attr_hidden: Vec::new(),
             },
             Entry {
                 name: "B".into(),
@@ -795,7 +790,6 @@ mod fake_tests {
                 dst: "B".into(),
                 format: String::new(),
                 exclude: None,
-                attr_hidden: Vec::new(),
             },
         ];
         let events = RefCell::new(Vec::new());
@@ -854,7 +848,6 @@ mod fake_tests {
                 dst: "A".into(),
                 format: String::new(),
                 exclude: None,
-                attr_hidden: Vec::new(),
             },
             Entry {
                 name: "B".into(),
@@ -864,7 +857,6 @@ mod fake_tests {
                 dst: "B".into(),
                 format: String::new(),
                 exclude: None,
-                attr_hidden: Vec::new(),
             },
         ];
         let events = RefCell::new(Vec::new());
@@ -1150,7 +1142,6 @@ mod fake_tests {
             name: &str,
             out_archive: &Path,
             _opts: &Options,
-            _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
             let stem = out_archive
@@ -1350,7 +1341,6 @@ mod staged_tests {
             dst: String::new(),
             format: String::new(),
             exclude: None,
-            attr_hidden: Vec::new(),
         }
     }
 
@@ -1397,7 +1387,6 @@ mod staged_tests {
             name: &str,
             out_archive: &Path,
             _opts: &Options,
-            _attr_hidden: &[String],
         ) -> Result<Command> {
             self.attempted.borrow_mut().push(name.to_string());
             fs::write(out_archive, b"fake").unwrap();

@@ -1,17 +1,17 @@
 # 排除规则(系统隐藏 + 自定义排除模式)技术文档
 
-> 2026-10-20 修订: 不再把 Unix `.` 前缀当隐藏; 系统隐藏 = Windows 隐藏属性 + 系统元数据名单.
+> 2026-10-20 修订: 只排**系统元数据名单**; 不再使用 Unix `.` 前缀, 也不再使用 Windows 隐藏属性。用户设置的隐藏文件/文件夹一律保留。
 >
 > 定位: 目标实现规格. 在 _docs/compress.md 基础上引入**排除维度**: 扫描统计与后端命令两层同步生效.
 >
 > **核心决策(2026-10 修订)**:
 > - 底层(core/CLI)通过**排除模式**实现, 支持多个模式叠加生效
-> - 系统隐藏 = **OS 原生隐藏属性 + 系统元数据名单**, **不按 `.` 前缀批量排除**
-> - Unix(Linux/macOS)没有可移植的文件隐藏属性; `.` 前缀只是命名约定, 用户可能创建 `.git` / `.env` / `.config`, 因此默认保留
-> - Windows 使用文件系统隐藏属性; 系统元数据(`Thumbs.db` / `.DS_Store` 等)跨平台按名单排除
-> - CLI 默认排除 Windows 隐藏属性 + 系统元数据, `--include-hidden-files` 关闭
+> - 系统隐藏 = **系统元数据名单**(`Thumbs.db` / `.DS_Store` / `lost+found` 等), 三平台一致
+> - **不使用任何文件隐藏属性**: Windows `attrib +H`、macOS 隐藏位、Unix `.` 前缀都不参与判定
+> - 用户自己设置的隐藏文件/文件夹默认保留; 需要排除时用 `--exclude` / 高级区自定义模式
+> - CLI 默认排除系统元数据, `--include-hidden-files` 关闭(兼容旧参数名)
 > - UI 的 `os-hidden` 策略语义与 CLI 一致; 被标行显示但默认不勾选
-> - UI 设置页 `os-hidden` 默认开; 关闭后不再排除 Windows 隐藏属性与系统元数据
+> - UI 设置页 `os-hidden` 默认开; 关闭后不再排除系统元数据
 
 ## 1. 目标与非目标
 
@@ -39,8 +39,8 @@
 ```rust
 /// 排除规则: 系统元数据模式 + 用户自定义模式, 叠加(并集)生效
 pub struct ExcludeRules {
-    /// false(默认) = 排除 Windows 隐藏属性; true = 包含隐藏属性项。
-    /// Unix 没有可移植属性, 该值不会产生 `.` 前缀排除。
+    /// false(默认) = 加入系统元数据默认集; true = 不加入。
+    /// 不涉及任何文件隐藏属性/`.` 前缀。
     pub include_hidden: bool,
     /// 系统元数据 + 用户模式, 多条叠加; 无否定语义
     pub patterns: Vec<String>,
@@ -48,21 +48,19 @@ pub struct ExcludeRules {
 
 pub struct Options {
     // ...split_size / password / random_name / format / level 不变...
-    pub exclude: ExcludeRules,   // Default = 排除隐藏、无用户模式
+    pub exclude: ExcludeRules,   // Default = 加入系统元数据默认集、无用户模式
 }
 
 /// 顶层条目的排除标记(仅顶层; 内部文件不逐个上报)
 pub enum ExcludeReason {
-    /// 内建隐藏判定命中
-    Hidden,
-    /// 用户模式命中(保留命中模式, 供 UI 展示)
+    /// 模式命中(系统元数据默认集或用户/策略模式; 保留命中模式供 UI 展示)
     Pattern(String),
 }
 ```
 
-- `Entry` 增加 `exclude: Option<ExcludeReason>` 与 `attr_hidden: Vec<String>`(§4 属性路径); `ScanReport` 增加 `excluded: Vec<ExcludedEntry>`(name + reason, CLI 提示用)
+- `Entry` 增加 `exclude: Option<ExcludeReason>`; `ScanReport` 增加 `excluded: Vec<ExcludedEntry>`(name + reason, CLI 提示用)
 - 分层职责:
-  - **顶层**: `scan_dir` 永远返回全部条目并打标(Windows 属性 / 模式匹配); CLI 默认丢弃被标条目(`include_hidden=true` 时不会产生 Hidden 标记, Pattern 标记仍丢弃); UI 渲染为不勾选(既有勾选名单机制消化)
+  - **顶层**: `scan_dir` 永远返回全部条目并打标(生效模式匹配); CLI 默认丢弃被标条目(`include_hidden=true` 时无默认元数据模式), UI 渲染为不勾选(既有勾选名单机制消化)
   - **内部**: `dir_size` 遍历时跳过被排除文件/子树(不下钻被排除目录), 尺寸扣除
 - 模式命中目录 = 整棵子树排除(统计 + 后端一致)
 - 排除开关的位置**按后端可执行文件**(Info-ZIP 与 7z 语法不同):
@@ -87,25 +85,22 @@ pub enum ExcludeReason {
 
 - 注(zip 双开关): zip 对被排除目录是否继续下钻行为不确定, `*/p` 覆盖目录自身与树内文件、`*/p/*` 兜底树内路径, 两条一起保证目录排除; 空目录条目可能残留(接受, 见 §1 非目标)。
 
-- Windows 属性隐藏路径(非模式可表达)逐条: `zip` → `-x "<rel>"`; `7z` → `-x!<rel>`(目录一条即整树)
 - **已知语义缝隙**: zip 通配无目录段边界, `*/sub/*.log` 可能过度匹配更深层同名路径 —— 接受并文档标注(zip = 最大兼容模式, 排除精度次要); 7z 后端精确
 
 ## 4. 系统隐藏机制(2026-10 修订)
 
-| 平台 | 判定 | 机制 |
-|---|---|---|
-| Windows | 文件系统隐藏属性(`MetadataExt::file_attributes`, `FILE_ATTRIBUTE_HIDDEN`) | 属性无法通配表达 → `dir_size` 遍历时顺带收集属性隐藏条目的**相对路径**(隐藏目录不下钻、整树一条), 后端逐条开关 |
-| Linux | **没有可移植的文件隐藏属性** | 只按系统元数据名单(§4.1)排除; `.` 前缀不参与隐藏判定 |
-| macOS | 没有统一可移植属性(标准库未暴露 Finder 隐藏位) | 同 Linux, 只按系统元数据名单 |
+三平台统一: **只按系统元数据名单排除**。
 
-- **为什么不按 `.` 前缀**: `.` 只是 Unix 命名约定, 用户会创建 `.git`、`.env`、`.ssh`、`.config` 等; 按前缀排除会把用户数据静默丢出压缩包。系统隐藏应只认 OS 属性 / 明确的系统元数据。
-- **预算护栏**(Windows 枚举): 排除开关总量超上限(24000 字符或 1000 条)即停止追加, 把未排除项**加回尺寸统计**(保持不变式), 并 warning「隐藏项过多, N 项未排除」
-- `include_hidden = true`: 不排除 Windows 隐藏属性; Unix 无属性, 该开关不影响 `.` 前缀
-- `.` 前缀用户文件默认保留; 需要排除时由用户在高级区填 `.*` 或具体模式
+- 不使用 Windows 文件隐藏属性(`FILE_ATTRIBUTE_HIDDEN`), 因此用户 `attrib +H` 的普通文件仍会进包
+- 不使用 macOS Finder/UF_HIDDEN 位
+- 不使用 Unix `.` 前缀
+- 名单外的文件一律保留; 需要排除时用 `--exclude` / 高级区自定义模式
+- `include_hidden = true` 表示**不加入**系统元数据默认集; 不涉及任何文件属性判定
+- 删除属性枚举后, 不再有路径收集器/属性预算护栏; `EXCLUDE_ARG_BUDGET` 仅约束后端排除开关长度
 
 ### 4.1 系统元数据名单(跨平台)
 
-`filter::OS_METADATA_PATTERNS`(UI 策略)与 CLI 默认排除共用:
+`exclude::OS_METADATA_PATTERNS`(core 默认集; UI/CLI 共用):
 
 - Windows: `Thumbs.db`, `ehthumbs.db`, `desktop.ini`, `$RECYCLE.BIN`, `System Volume Information`
 - macOS: `.DS_Store`, `._*`, `__MACOSX`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`, `.apdisk`, `.VolumeIcon.icns`, `.com.apple.timemachine.donotpresent`, `.DocumentRevisions-V100`, `.PKInstallSandboxManager`, `.MobileBackups`
@@ -117,8 +112,8 @@ pub enum ExcludeReason {
 
 - `compress`:
   - `--exclude <模式>`, 可重复, 与系统元数据名单叠加
-  - `--include-hidden-files`, 关闭 Windows 隐藏属性与系统元数据名单
-- 扫描后被标条目打印提示(如 `excluded (pattern "Thumbs.db"): Thumbs.db` 或 `excluded (hidden): ...`), 默认不压缩
+  - `--include-hidden-files`, 关闭系统元数据默认集(兼容旧参数名; 不再涉及隐藏属性)
+- 扫描后被标条目打印提示(如 `excluded (pattern "Thumbs.db"): Thumbs.db`), 默认不压缩
 - `extract` 无新参数
 
 ## 6. UI(Tauri)
@@ -126,11 +121,11 @@ pub enum ExcludeReason {
 - `scan` 命令新增可选参数 `filters?: { enabledPolicies }`(设置页策略)与 `excludes?: string[]`(高级区输入, 多行/逗号分隔); 壳层经 `filter::effective_rules` 展开, ScanContext 连带缓存展开后的规则
 - `ScanItem` 新增 `excluded?: string`(原因文案:「隐藏文件」/「匹配排除模式: <p>」); 前端被标行**显示但默认不勾选**, detail 列标原因
 - `compress` DTO 同步加 `filters` / `excludes`; 与扫描缓存规则不一致 = 报"扫描已过期"(沿用 5.4 保鲜语义)
-- UI 的 `include_hidden` 由 `os-hidden` 策略决定(默认 false); Unix 上不会因此产生 `.*` 排除; 浏览器 mock 路径同步
+- UI 的 `include_hidden` 由 `os-hidden` 策略决定(默认 false); core `effective_patterns` 据此加入系统元数据默认集; 浏览器 mock 路径同步
 
 ## 7. 测试计划
 
-- **core 单测**: 统一语法解析(非法模式报错)与归一化矩阵(两后端 argv 断言); `.` 前缀文件不被排除; 系统元数据模式命中与尺寸扣除; 顶层标记(Hidden/Pattern)与 CLI 丢弃; Windows 属性枚举 + 预算护栏回退加回统计; `include_hidden=true` 全链路无属性排除
+- **core 单测**: 统一语法解析(非法模式报错)与归一化矩阵(两后端 argv 断言); `.` 前缀/`attrib +H` 文件不被排除; 系统元数据模式命中与尺寸扣除; 顶层标记(Pattern)与 CLI 丢弃; `include_hidden=true` 全链路无默认元数据排除
 - **e2e(实机)**: zip 与 7z 格式 roundtrip, 预埋 Thumbs.db/.DS_Store/用户 `.env`, 验证系统元数据不进包而 `.env` 进包; `--include-hidden-files` 后元数据也进包
 - **UI node test**: 元数据/模式命中行默认不勾选、模式输入 → scan/compress 契约、勾选被标行可压缩、规则不一致报过期
 - 全 workspace 回归

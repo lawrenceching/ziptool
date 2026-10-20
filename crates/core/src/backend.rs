@@ -284,7 +284,6 @@ impl Backend {
         name: &str,
         out_zip: &Path,
         opts: &Options,
-        attr_hidden: &[String],
     ) -> Result<Command> {
         let mut cmd = Command::new(self.program());
         match self {
@@ -308,7 +307,7 @@ impl Backend {
                 };
                 cmd.arg(out_zip).arg(src);
                 // Info-ZIP 语法: 排除开关必须在条目名之后
-                for tok in crate::exclude::exclusion_args(*self, name, &opts.exclude, attr_hidden) {
+                for tok in crate::exclude::exclusion_args(*self, name, &opts.exclude) {
                     cmd.arg(tok);
                 }
             }
@@ -332,7 +331,7 @@ impl Backend {
                 // 进度流: 关 stdout 文件清单/错误流, 开进度(实测协议见 _docs/progress.md)
                 cmd.args(["-bso0", "-bsp1", "-bse1"]);
                 // 排除开关在 -- 之前(既有 flags 之后)
-                for tok in crate::exclude::exclusion_args(*self, name, &opts.exclude, attr_hidden) {
+                for tok in crate::exclude::exclusion_args(*self, name, &opts.exclude) {
                     cmd.arg(tok);
                 }
                 cmd.arg("--").arg(out_zip).arg(name);
@@ -392,12 +391,7 @@ impl Backend {
                 }
                 // Info-ZIP 语法: 排除开关必须在条目名之后
                 for source in sources {
-                    for tok in crate::exclude::exclusion_args(
-                        *self,
-                        source.name,
-                        &opts.exclude,
-                        source.attr_hidden,
-                    ) {
+                    for tok in crate::exclude::exclusion_args(*self, source.name, &opts.exclude) {
                         if seen.insert(tok.clone()) {
                             cmd.arg(tok);
                         }
@@ -421,12 +415,7 @@ impl Backend {
                 }
                 cmd.args(["-bso0", "-bsp1", "-bse1"]);
                 for source in sources {
-                    for tok in crate::exclude::exclusion_args(
-                        *self,
-                        source.name,
-                        &opts.exclude,
-                        source.attr_hidden,
-                    ) {
+                    for tok in crate::exclude::exclusion_args(*self, source.name, &opts.exclude) {
                         if seen.insert(tok.clone()) {
                             cmd.arg(tok);
                         }
@@ -626,7 +615,6 @@ pub(crate) trait CommandBackend {
         name: &str,
         out_zip: &Path,
         opts: &Options,
-        attr_hidden: &[String],
     ) -> Result<Command>;
     fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()>;
     /// 执行压缩命令;7z 系后端把百分比进度帧(0-100, 已钳位单调)回调给 on_percent,
@@ -651,9 +639,8 @@ impl CommandBackend for Backend {
         name: &str,
         out_zip: &Path,
         opts: &Options,
-        attr_hidden: &[String],
     ) -> Result<Command> {
-        Backend::compress_command(self, work_dir, name, out_zip, opts, attr_hidden)
+        Backend::compress_command(self, work_dir, name, out_zip, opts)
     }
 
     fn run(&self, cmd: &mut Command, cancel: &crate::CancelFlag) -> Result<()> {
@@ -1219,7 +1206,7 @@ mod tests {
         o.exclude.include_hidden = true; // 用户模式形状与平台无关
         o.exclude.patterns = vec!["Thumbs.db".into(), "sub/*.log".into()];
         let cmd = Backend::Zip
-            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o)
             .unwrap();
         assert_eq!(
             args_of(&cmd),
@@ -1247,7 +1234,7 @@ mod tests {
         o.exclude.include_hidden = true;
         o.exclude.patterns = vec!["node_modules/**".into()];
         let cmd = Backend::Zip
-            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o)
             .unwrap();
         assert_eq!(
             args_of(&cmd),
@@ -1269,7 +1256,7 @@ mod tests {
         o.exclude.include_hidden = true; // 用户模式形状与平台无关
         o.exclude.patterns = vec!["Thumbs.db".into(), "sub/*.log".into()];
         let cmd = Backend::SevenZip
-            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o, &[])
+            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o)
             .unwrap();
         let s = sep();
         assert_eq!(
@@ -1297,32 +1284,21 @@ mod tests {
         o.exclude.include_hidden = true;
         o.exclude.patterns = vec!["node_modules/**".into()];
         let cmd = Backend::SevenZip
-            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o, &[])
+            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o)
             .unwrap();
         let s = sep();
         assert!(args_of(&cmd).contains(&format!("-x!A{s}node_modules")));
     }
 
     #[test]
-    fn hidden_attribute_paths_become_exact_switches() {
+    fn user_pattern_becomes_recursive_switch() {
         let mut o = opts_fmt(Format::SevenZ, None);
         o.exclude.include_hidden = true;
         o.exclude.patterns = vec!["*.tmp".into()];
         let cmd = Backend::SevenZip
-            .compress_command(
-                Path::new("D:/data"),
-                "A",
-                Path::new("E:/out/A.7z"),
-                &o,
-                &["A/old/secret.bin".to_string()],
-            )
+            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o)
             .unwrap();
-        let s = sep();
         let args = args_of(&cmd);
-        assert!(
-            args.contains(&format!("-x!A{s}old{s}secret.bin")),
-            "{args:?}"
-        );
         assert!(args.contains(&"-xr!*.tmp".to_string()), "{args:?}");
     }
 
@@ -1330,14 +1306,10 @@ mod tests {
     #[cfg(not(windows))]
     fn unix_default_has_no_name_based_hidden_switches() {
         // Unix 没有可移植的文件隐藏属性; `.` 前缀不是隐藏, 不生成 `.*` 开关。
+        let mut o = opts_fmt(Format::Zip, None);
+        o.exclude.include_hidden = true; // 只看名字口径: 不注入系统元数据
         let cmd = Backend::Zip
-            .compress_command(
-                Path::new("/in"),
-                "A",
-                Path::new("/out/A.zip"),
-                &opts_fmt(Format::Zip, None),
-                &[],
-            )
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o)
             .unwrap();
         assert_eq!(args_of(&cmd), ["-r", "/out/A.zip", "A"]);
     }
@@ -1345,15 +1317,11 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn windows_default_has_no_name_based_hidden_switches() {
-        // Windows 隐藏走属性枚举(attr_hidden), 名字模式集不含隐藏
+        // 不按属性/名字隐藏; 这里只看无用户模式时的命令形状
+        let mut o = opts_fmt(Format::Zip, None);
+        o.exclude.include_hidden = true;
         let cmd = Backend::SevenZip
-            .compress_command(
-                Path::new("D:/data"),
-                "A",
-                Path::new("E:/out/A.zip"),
-                &opts_fmt(Format::Zip, None),
-                &[],
-            )
+            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.zip"), &o)
             .unwrap();
         assert_eq!(
             args_of(&cmd),
@@ -1375,7 +1343,7 @@ mod tests {
         let mut o = opts_fmt(Format::SevenZ, None);
         o.exclude.include_hidden = true; // 命令形状测试不涉排除
         let cmd = Backend::SevenZip
-            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o, &[])
+            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.7z"), &o)
             .unwrap();
         assert_eq!(cmd.get_program(), "7z");
         assert_eq!(
@@ -1402,7 +1370,7 @@ mod tests {
         o.password = Some("pw".into());
         o.exclude.include_hidden = true; // 命令形状测试不涉排除
         let cmd = Backend::SevenZip
-            .compress_command(Path::new("D:/data"), "B", Path::new("E:/out/B.7z"), &o, &[])
+            .compress_command(Path::new("D:/data"), "B", Path::new("E:/out/B.7z"), &o)
             .unwrap();
         assert_eq!(
             args_of(&cmd),
@@ -1428,13 +1396,7 @@ mod tests {
         let mut o = opts_fmt(Format::Zip, Some(9));
         o.exclude.include_hidden = true;
         let cmd = Backend::SevenZip
-            .compress_command(
-                Path::new("D:/data"),
-                "A",
-                Path::new("E:/out/A.zip"),
-                &o,
-                &[],
-            )
+            .compress_command(Path::new("D:/data"), "A", Path::new("E:/out/A.zip"), &o)
             .unwrap();
         assert_eq!(
             args_of(&cmd),
@@ -1458,7 +1420,7 @@ mod tests {
         let mut o = opts_fmt(Format::Zip, Some(9));
         o.exclude.include_hidden = true;
         let cmd = Backend::Zip
-            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o)
             .unwrap();
         assert_eq!(args_of(&cmd), ["-r", "-9", "/out/A.zip", "A"]);
     }
@@ -1468,7 +1430,7 @@ mod tests {
         let mut o = opts_fmt(Format::Zip, Some(0));
         o.exclude.include_hidden = true;
         let cmd = Backend::Zip
-            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o, &[])
+            .compress_command(Path::new("/in"), "A", Path::new("/out/A.zip"), &o)
             .unwrap();
         assert_eq!(args_of(&cmd), ["-r", "-0", "/out/A.zip", "A"]);
     }
@@ -1481,7 +1443,6 @@ mod tests {
                 "A",
                 Path::new("E:/out/A.zip"),
                 &opts(None, None),
-                &[],
             )
             .unwrap();
         assert_eq!(cmd.get_program(), "7z");
@@ -1509,7 +1470,6 @@ mod tests {
                 "B",
                 Path::new("E:/out/B.zip"),
                 &opts(Some(2 * 1024 * 1024 * 1024), Some("pw")),
-                &[],
             )
             .unwrap();
         assert_eq!(
@@ -1537,7 +1497,6 @@ mod tests {
                 "A",
                 Path::new("/out/A.zip"),
                 &opts(None, None),
-                &[],
             )
             .unwrap();
         assert_eq!(cmd.get_program(), "zip");
@@ -1554,7 +1513,6 @@ mod tests {
                 "-weird",
                 Path::new("/out/w.zip"),
                 &opts(None, None),
-                &[],
             )
             .unwrap();
         assert_eq!(args_of(&cmd), ["-r", "/out/w.zip", "./-weird"]);
@@ -1599,7 +1557,6 @@ mod tests {
                 "B",
                 Path::new("/out/B.zip"),
                 &opts(Some(500 * 1024 * 1024), Some("pw")),
-                &[],
             )
             .unwrap();
         assert_eq!(
@@ -1625,22 +1582,21 @@ mod tests {
     fn sources<'a>(names: &'a [&'a str]) -> Vec<crate::packaging::PackageSource<'a>> {
         names
             .iter()
-            .map(|name| crate::packaging::PackageSource {
-                name,
-                attr_hidden: &[],
-            })
+            .map(|name| crate::packaging::PackageSource { name })
             .collect()
     }
 
     #[test]
     fn sevenzip_package_command_uses_multiple_sources_without_split() {
         let names = ["A", "B", "C"];
+        let mut o = opts_fmt(Format::Zip, None);
+        o.exclude.include_hidden = true; // 本用例只验证多源形状, 不涉系统元数据
         let cmd = Backend::SevenZip
             .compress_package_command(
                 Path::new("D:/data"),
                 &sources(&names),
                 Path::new("E:/out/_bundle_0001.zip"),
-                &opts_fmt(Format::Zip, None),
+                &o,
                 None,
             )
             .unwrap();

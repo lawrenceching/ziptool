@@ -581,7 +581,6 @@ fn rules_eq(a: &ExcludeRules, b: &ExcludeRules) -> bool {
 /// 排除原因的前端文案(ScanItem.excluded)
 fn excluded_text(r: &ExcludeReason) -> String {
     match r {
-        ExcludeReason::Hidden => "隐藏文件".into(),
         ExcludeReason::Pattern(p) => format!("匹配排除模式: {p}"),
     }
 }
@@ -1067,7 +1066,6 @@ mod tests {
             dst: String::new(),
             format: String::new(),
             exclude: None,
-            attr_hidden: Vec::new(),
         }
     }
 
@@ -1388,16 +1386,16 @@ mod tests {
 
         let os_only = to_core_options(base(&["os-hidden"])).unwrap();
         assert!(!os_only.exclude.include_hidden);
-        assert!(os_only.exclude.patterns.contains(&"Thumbs.db".to_string()));
         assert!(
-            !os_only
-                .exclude
-                .patterns
-                .contains(&"node_modules".to_string())
+            os_only.exclude.patterns.is_empty(),
+            "os-hidden 由 core 加系统元数据"
         );
 
         let lang_only = to_core_options(base(&["lang-temp"])).unwrap();
-        assert!(lang_only.exclude.include_hidden, "os-hidden 关 = 包含隐藏");
+        assert!(
+            lang_only.exclude.include_hidden,
+            "os-hidden 关 = 不加系统元数据"
+        );
         assert!(
             lang_only
                 .exclude
@@ -1571,7 +1569,7 @@ mod tests {
     #[test]
     fn compress_scan_dto_marks_excluded_items() {
         let mut a = entry("A", 1, EntryKind::Dir);
-        a.exclude = Some(ExcludeReason::Hidden);
+        a.exclude = Some(ExcludeReason::Pattern("node_modules".into()));
         let mut b = entry("b.txt", 2, EntryKind::File);
         b.exclude = Some(ExcludeReason::Pattern("*.log".into()));
         let report = ScanReport {
@@ -1581,7 +1579,10 @@ mod tests {
             excluded: Vec::new(),
         };
         let dto = compress_scan_dto(&report);
-        assert_eq!(dto.items[0].excluded.as_deref(), Some("隐藏文件"));
+        assert_eq!(
+            dto.items[0].excluded.as_deref(),
+            Some("匹配排除模式: node_modules")
+        );
         assert_eq!(
             dto.items[1].excluded.as_deref(),
             Some("匹配排除模式: *.log")

@@ -686,10 +686,19 @@ fn compress_exclusion_rules_matrix() {
             assert!(st.success());
         }
     }
-    // 用户自建点文件不是系统隐藏, 默认必须保留
+    // 用户自建点文件 / 用户手动隐藏的普通文件都不是系统元数据, 默认必须保留
     let user_dot = ".env".to_string();
     fill(&inp.join(&user_dot), 1_000, 9);
     fill(&inp.join("Novel/.gitignore"), 1_000, 11);
+    let user_hidden = "user-hidden.txt".to_string();
+    fill(&inp.join(&user_hidden), 1_000, 13);
+    if cfg!(windows) {
+        let st = Command::new("attrib")
+            .args(["+H", inp.join(&user_hidden).to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(st.success());
+    }
 
     // 1) 默认: 系统元数据被排除, 用户点文件照常 roundtrip
     let r = run_tool(&[
@@ -711,7 +720,7 @@ fn compress_exclusion_rules_matrix() {
         r.stderr
     );
     let restore1 = fx.root.join("restore1");
-    for name in ["Novel", "media", "photo.jpg", ".env"] {
+    for name in ["Novel", "media", "photo.jpg", ".env", "user-hidden.txt"] {
         extract_archive(&out1.join(format!("{name}.zip")), &restore1, None);
     }
     assert_file_eq(
@@ -723,6 +732,7 @@ fn compress_exclusion_rules_matrix() {
         "系统元数据不应进包(顶层与树内)"
     );
     assert_file_eq(&inp.join(&user_dot), &restore1.join(&user_dot));
+    assert_file_eq(&inp.join(&user_hidden), &restore1.join(&user_hidden));
     assert_file_eq(
         &inp.join("Novel/.gitignore"),
         &restore1.join("Novel/.gitignore"),
@@ -749,12 +759,20 @@ fn compress_exclusion_rules_matrix() {
     );
     let restore2 = fx.root.join("restore2");
     // .DS_Store 在 include 模式下是独立顶层条目(产出自己的包), 一并还原
-    for name in ["Novel", "media", "photo.jpg", ".DS_Store", ".env"] {
+    for name in [
+        "Novel",
+        "media",
+        "photo.jpg",
+        ".DS_Store",
+        ".env",
+        "user-hidden.txt",
+    ] {
         extract_archive(&out2.join(format!("{name}.zip")), &restore2, None);
     }
     assert_file_eq(&inp.join(&hidden_top), &restore2.join(&hidden_top));
     assert_file_eq(&inp.join(&hidden_inner), &restore2.join(&hidden_inner));
     assert_file_eq(&inp.join(&user_dot), &restore2.join(&user_dot));
+    assert_file_eq(&inp.join(&user_hidden), &restore2.join(&user_hidden));
 
     // 3) --exclude 与隐藏集叠加: 树内 *.tmp + 顶层 photo.jpg
     let r = run_tool(&[
