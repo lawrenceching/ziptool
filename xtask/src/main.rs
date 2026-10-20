@@ -4,7 +4,7 @@
 //! - 同步根 `Cargo.toml` 的 `[workspace.package] version`
 //! - 同步 `crates/tauri-app/tauri.conf.json` 的 `version`
 //! - 同步 `Cargo.lock` 中 workspace 成员的版本
-//! - 默认提交并创建 `v<x.y.z>` annotated tag; `--push` 再推送分支与 tag
+//! - 默认提交并创建 `v<x.y.z>` annotated tag; **不执行任何 git push**
 
 use std::env;
 use std::fs;
@@ -18,10 +18,11 @@ const USAGE: &str = "\
 
 选项:
   --dry-run     只打印将做的修改, 不写文件/不提交/不打 tag
-  --no-commit   只改文件, 不提交 (不能与 --no-tag/--push 组合)
+  --no-commit   只改文件, 不提交 (不能与 --no-tag 组合)
   --no-tag      提交但不创建 tag
-  --push        提交并推送当前分支与 tag
   -h, --help    显示帮助
+
+命令不会执行 git push; 推送由你手动完成。
 ";
 
 #[derive(Debug, Default)]
@@ -30,7 +31,6 @@ struct BumpArgs {
     dry_run: bool,
     no_commit: bool,
     no_tag: bool,
-    push: bool,
 }
 
 fn main() -> ExitCode {
@@ -73,11 +73,8 @@ fn run() -> Result<(), String> {
     if !args.dry_run && tag_exists(&root, &tag)? {
         return Err(format!("tag {tag} 已存在"));
     }
-    if args.no_commit && (!args.no_tag || args.push) {
-        return Err("--no-commit 不能与 --no-tag/--push 组合".into());
-    }
-    if args.push && args.no_tag {
-        return Err("--push 需要创建 tag".into());
+    if args.no_commit && !args.no_tag {
+        return Err("--no-commit 不能与 --no-tag 组合".into());
     }
 
     let cargo_path = root.join("Cargo.toml");
@@ -100,9 +97,6 @@ fn run() -> Result<(), String> {
         }
         if !args.no_tag {
             println!("will create tag: {tag}");
-        }
-        if args.push {
-            println!("will push branch and tag");
         }
         return Ok(());
     }
@@ -151,23 +145,11 @@ fn run() -> Result<(), String> {
         )?;
     }
 
-    if args.push {
-        run_git(
-            &root,
-            &["push".into(), "origin".into(), "HEAD".into()],
-            "git push",
-        )?;
-        run_git(
-            &root,
-            &["push".into(), "origin".into(), tag.clone()],
-            "git push tag",
-        )?;
-        println!("已提交并推送 {tag}");
-    } else if args.no_tag {
+    if args.no_tag {
         println!("已提交; 未创建 tag (--no-tag)");
     } else {
         println!("已提交并创建 tag {tag}");
-        println!("下一步: git push origin HEAD && git push origin {tag}");
+        println!("下一步 (手动): git push origin HEAD && git push origin {tag}");
     }
     Ok(())
 }
@@ -179,7 +161,6 @@ fn parse_args(args: Vec<String>) -> Result<BumpArgs, String> {
             "--dry-run" => parsed.dry_run = true,
             "--no-commit" => parsed.no_commit = true,
             "--no-tag" => parsed.no_tag = true,
-            "--push" => parsed.push = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);

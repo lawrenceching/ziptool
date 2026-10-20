@@ -102,10 +102,15 @@ verify job 需显式 `permissions: {contents: read, actions: read}`——顶层�
 
 1. 在 main 上确保工作区干净, 运行:
    ```bash
-   cargo bump-version 0.1.4 --push
+   cargo bump-version 0.1.4
    ```
-   命令会同步根 `Cargo.toml` / `Cargo.lock` / `crates/tauri-app/tauri.conf.json`, 提交 `chore(release): v0.1.4`, 创建 annotated tag `v0.1.4`, 并推送分支与 tag
-2. 等该 commit 的 CI 绿(推 tag 也会触发同一 SHA 的 CI)
+   命令会同步根 `Cargo.toml` / `Cargo.lock` / `crates/tauri-app/tauri.conf.json`, 提交 `chore(release): v0.1.4`, 创建 annotated tag `v0.1.4`; **不会自动 push**
+2. 手动推送分支与 tag:
+   ```bash
+   git push origin HEAD
+   git push origin v0.1.4
+   ```
+   然后等该 commit 的 CI 绿(推 tag 也会触发同一 SHA 的 CI)
 3. Actions → Release → Run workflow → 选 main, **不需要输入版本**
 4. verify 从 `Cargo.toml` 读取版本并校验 tag 指向 HEAD → 5 平台构建 → Release 挂出全部附件. 注意: verify 轮询取该 SHA 的**最新** run, 通常要完整等一轮(~10-15 分钟)
 
@@ -125,6 +130,6 @@ verify job 需显式 `permissions: {contents: read, actions: read}`——顶层�
 workflow 无法本地完整验证(依赖真实 runner), 沿用 CI 的分支迭代流程:
 
 1. yml 静态检查: actionlint(本机跑一次)
-2. 专用分支(如 `ci/release-bootstrap`)上: `cargo bump-version <临时版本> --push` 生成 commit + tag → dispatch(选分支, 无输入)→ verify 会等该 commit 的 CI(分支 push 已触发)→ 观察 5 平台构建与 Release 内容
+2. 专用分支(如 `ci/release-bootstrap`)上: `cargo bump-version <临时版本>` 生成 commit + tag, 手动 push 分支与 tag → dispatch(选分支, 无输入)→ verify 会等该 commit 的 CI(分支 push 已触发)→ 观察 5 平台构建与 Release 内容
 3. 每轮失败修完 push 重跑; 全链路绿后: 删测试 Release 与临时 tag → ff-only 合回 main → main 上再跑一次确认
 4. 改名部分(§2)本地全量测试绿后才进入 workflow 阶段
