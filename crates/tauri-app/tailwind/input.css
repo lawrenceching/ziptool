@@ -7,3 +7,140 @@
 html:not([data-i18n-ready]) body {
   visibility: hidden;
 }
+
+/*
+ * MenuBar: 应用内自绘菜单栏(App 结构 MenuBar / Content / StatusBar 的第一层, 见 _docs/menu.md)。
+ * 设计原则: 与 App 背景完全一致——MenuBar 区域透明、下拉面板纯白, 无边框/无浮层容器;
+ * 只在 hover / open 时使用应用既有的浅色反馈(slate-100 按钮 hover、slate-50 菜单项 hover),
+ * 下拉阴影与状态栏语言菜单一致。视觉规格参考 shadcn/ui Menubar(MIT)。
+ */
+@layer components {
+  .app-menu-bar {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    height: 2.5rem;
+    padding: 0 0.5rem;
+    background: transparent;
+  }
+
+  .app-menu {
+    display: flex;
+    align-items: center;
+    gap: 0.125rem;
+  }
+
+  .app-menu-group {
+    position: relative;
+  }
+
+  .app-menu-trigger {
+    display: inline-flex;
+    align-items: center;
+    height: 1.75rem;
+    padding: 0 0.5rem;
+    border: 0;
+    border-radius: 0.375rem;
+    background: transparent;
+    color: #475569;
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1;
+    cursor: default;
+    user-select: none;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease;
+  }
+
+  .app-menu-trigger:hover,
+  .app-menu-trigger[aria-expanded="true"] {
+    background: #f1f5f9;
+    color: #0f172a;
+  }
+
+  .app-menu-trigger:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 1px;
+  }
+
+  /* 下拉面板: 纯白(同 App 背景), 无边框, 阴影与状态栏语言菜单一致 */
+  .app-menu-panel {
+    position: absolute;
+    top: calc(100% + 0.25rem);
+    left: 0;
+    z-index: 50;
+    min-width: 12rem;
+    padding: 0.25rem;
+    background: #ffffff;
+    border-radius: 0.5rem;
+    box-shadow:
+      0 10px 15px -3px rgb(0 0 0 / 0.1),
+      0 4px 6px -4px rgb(0 0 0 / 0.1);
+    transform-origin: top left;
+  }
+
+  .app-menu-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.375rem 0.5rem;
+    border: 0;
+    border-radius: 0.375rem;
+    background: transparent;
+    color: #334155;
+    font: inherit;
+    font-size: 0.875rem;
+    text-align: left;
+    cursor: default;
+    user-select: none;
+    transition:
+      background-color 100ms ease,
+      color 100ms ease;
+  }
+
+  /* 菜单项 hover/focus: slate-50, 与状态栏语言菜单项一致 */
+  .app-menu-item:hover,
+  .app-menu-item:focus,
+  .app-menu-item:focus-visible {
+    background: #f8fafc;
+    color: #0f172a;
+    outline: none;
+  }
+
+  .app-menu-item:disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  /* 快捷键提示: 右对齐、弱化(shadcn MenubarShortcut) */
+  .app-menu-shortcut {
+    margin-left: auto;
+    color: #94a3b8;
+    font-family: inherit;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+
+  /* destructive variant(用于「退出」) */
+  .app-menu-item--destructive {
+    color: #dc2626;
+  }
+
+  .app-menu-item--destructive:hover,
+  .app-menu-item--destructive:focus,
+  .app-menu-item--destructive:focus-visible {
+    background: #fef2f2;
+    color: #dc2626;
+  }
+
+  .app-menu-separator {
+    height: 1px;
+    margin: 0.25rem -0.25rem;
+    background: #e2e8f0;
+  }
+}

@@ -48,9 +48,11 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 
 进度沿用现有回调模型(compress.md 第 7 节 / extract.md 第 8 节): core 回调 `Progress`, 壳层经 `Channel` 推 `ProgressEvent`, UI 消费. 该载荷**不需要改动**.
 
+菜单栏是应用内自绘的 HTML(见 [menu.md](menu.md)), 菜单文案/交互都在前端; 菜单动作通过 `menu_action` 命令交给壳层执行(「报告问题」打开浏览器 / 「退出」走 `app.exit(0)`), 壳层不再创建原生菜单.
+
 ## 3. 命令面
 
-收敛为 8 个命令(`invoke_handler` 注册面):
+收敛为 10 个命令(`invoke_handler` 注册面):
 
 | 命令 | 签名(前端视角) | 作用 |
 |---|---|---|
@@ -62,6 +64,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 | `cancel_current` | `()` | 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续) |
 | `load_settings` | `() → { settings, warnings }` | 读取 `app_config_dir()/settings.json`; 损坏/过新回退默认值并带警告 |
 | `save_settings` | `(settings) → Settings` | 归一化并落盘(未知策略 id 丢弃), 返回 canonical DTO |
+| `menu_action` | `(action) → Result<(), String>` | 应用内菜单栏动作: `report-issue` 打开浏览器, `quit` 退出应用(白名单校验) |
 
 `plan_packages` / `planId` / `packaging` DTO 的完整契约见 [plan-preview.md](plan-preview.md)。旧客户端不传 `packaging` 时 `compress` 走原逐条目路径, `planId` 可省略。
 
@@ -99,6 +102,14 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 - 拖拽路径落定前调用, 只读校验路径存在且为文件夹; 文件 / 失效路径 / 无权限都返回可读 `Err(String)`
 - 用 `spawn_blocking` 执行 `std::fs::metadata`, 避免网络盘 stat 阻塞 UI; 不做 canonicalize
 - 只服务于 UI 的拖拽入口; `scan` / `compress` / `extract_archive` 的 core 预检(InputNotFound / OutInsideInput 等)保持原样, 壳层仍不信任前端
+
+### 3.7 menu_action(应用内菜单栏)
+
+- 菜单栏 UI 在前端(`#app-menu`), 壳层只执行动作并校验白名单(见 [menu.md](menu.md))
+- `action = "report-issue"`: 调 `desktop::open_external_url`(Windows `cmd /C start`、macOS `open`、Linux `xdg-open`), 用系统默认浏览器打开仓库地址; 失败返回可读错误
+- `action = "quit"`: `app.exit(0)` → `RunEvent::ExitRequested` → 取消在跑任务并等待收尾(上限 5s)后退出; 与关闭窗口同一条路径
+- 未知 action → `Err("未知菜单动作: …")`, 前端状态栏提示
+- 前端点击「设置…」不经过壳层, 直接调用 `openSettings()` 切视图; 菜单文案是静态 `data-i18n`, 与 Rust 无同步
 
 **与现状差异(第 3 节)**: 现状无 scan 命令(扫描内嵌在 compress_dir 里, UI 无法"先看后做"); 命令直接重扫输入; 无忙闲守卫; warnings 未透传; `current` 用完不清.
 
@@ -277,7 +288,7 @@ meta / warning 行:      恒定不变
 | 压缩 | 排除模式输入(text, 高级区) | 空 = 不排除 | 多行/逗号分隔; scan 与 compress 都透传 `excludes`, 与设置页策略并集; 被标行默认不勾选, 可手动勾选 |
 | 解压 | 密码(password) | 空 = 不加密 | 整批一个密码, 与 compress 对称 |
 | 解压 | 覆盖已有文件(checkbox) | 关 | 宁停不错, 与 CLI `--force` 默认一致 |
-| 设置页 | 边栏(通用 / 文件排除) | 通用 | 齿轮打开, 与主界面同文档视图切换; 运行/扫描中入口禁用 |
+| 设置页 | 边栏(通用 / 文件排除) | 通用 | 菜单栏「设置 > 设置…」打开, 与主界面同文档视图切换; 运行/扫描中该项禁用 |
 | 设置页 | 文件排除策略(Switch) | 两项都开 | `os-hidden` / `lang-temp`; 即时保存, 失败回滚; 修改后关闭设置页自动重扫压缩源 |
 | 设置页 | 压缩完成后关机(checkbox) | 关 | 本期仅占位: `disabled` + 「即将支持」; 字段保留, 实际行为后续 ticket |
 

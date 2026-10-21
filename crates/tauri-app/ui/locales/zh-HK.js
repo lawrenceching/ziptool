@@ -11,6 +11,14 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
     "lang": {
       "system": "跟隨系統"
     },
+    "menu": {
+      "label": "應用程式選單",
+      "app": "應用",
+      "reportIssue": "回報問題",
+      "quit": "結束",
+      "settings": "設定",
+      "openSettings": "設定…"
+    },
     "path": {
       "src": "來源資料夾",
       "srcPlaceholder": "點擊選擇, 或拖入要壓縮 / 解壓的資料夾",
@@ -97,7 +105,6 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
     },
     "settings": {
       "title": "設定",
-      "open": "設定",
       "back": "返回",
       "nav": {
         "label": "設定導覽",
@@ -160,6 +167,7 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "scanDone_other": "已掃描 {{path}}: {{count}} 個項目, 共 {{bytes}}",
       "previewScan_other": "已掃描 {{path}}: {{count}} 個項目(瀏覽器預覽假資料)",
       "scanFailed": "掃描失敗: {{error}}",
+      "reportIssueFailed": "無法開啟瀏覽器: {{error}}",
       "dialogUnavailable": "資料夾選擇外掛無法使用, 請檢查 tauri-plugin-dialog",
       "dialogFailed": "無法開啟資料夾選擇對話框: {{error}}",
       "dstPicked": "目標資料夾: {{path}}",

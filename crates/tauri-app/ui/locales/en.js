@@ -11,6 +11,14 @@ window.__ZIPTOOL_LOCALES__["en"] = {
     "lang": {
       "system": "Follow system"
     },
+    "menu": {
+      "label": "Application menu",
+      "app": "App",
+      "reportIssue": "Report Issue",
+      "quit": "Quit",
+      "settings": "Settings",
+      "openSettings": "Settings…"
+    },
     "path": {
       "src": "Source folder",
       "srcPlaceholder": "Click to select, or drop the folder to compress / extract",
@@ -97,7 +105,6 @@ window.__ZIPTOOL_LOCALES__["en"] = {
     },
     "settings": {
       "title": "Settings",
-      "open": "Settings",
       "back": "Back",
       "nav": {
         "label": "Settings navigation",
@@ -162,6 +169,7 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "previewScan_one": "Scanned {{path}}: {{count}} item (browser preview mock data)",
       "previewScan_other": "Scanned {{path}}: {{count}} items (browser preview mock data)",
       "scanFailed": "Scan failed: {{error}}",
+      "reportIssueFailed": "Could not open browser: {{error}}",
       "dialogUnavailable": "Folder picker plugin unavailable; check tauri-plugin-dialog",
       "dialogFailed": "Could not open folder picker: {{error}}",
       "dstPicked": "Destination folder: {{path}}",

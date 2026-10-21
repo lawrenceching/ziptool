@@ -116,6 +116,12 @@ function makeHarness(withTauri, invokeImpl, options = {}) {
       configurable: true,
     });
   }
+  if (options.userAgent) {
+    Object.defineProperty(window.navigator, "userAgent", {
+      value: options.userAgent,
+      configurable: true,
+    });
+  }
   const calls = []; // { cmd, args }
   const callbacks = new Map(); // channel id → Rust 侧回调
   const eventListeners = new Map(); // event name → [listener callback id]
@@ -978,6 +984,13 @@ test("i18n: 语言菜单点击外部/Esc 关闭", async () => {
   assert.equal(h.doc.activeElement, toggle);
 });
 
+test("浏览器预览: 菜单栏可用, 设置页可从菜单打开", async () => {
+  const h = makeHarness(false, () => null);
+  await h.flush();
+  await openSettingsPage(h);
+  assert.ok(!h.doc.getElementById("view-settings").classList.contains("hidden"));
+});
+
 test("契约: 扫描后自动算方案; 阈值改动只重算方案, 不重扫", async () => {
   let planCalls = 0;
   const h = makeHarness(true, ({ cmd, args }) => {
@@ -1182,6 +1195,281 @@ test("行为: 包级进度失败时, 合并包所有成员一起标失败", asyn
   assert.ok(h.doc.getElementById("msg").textContent.includes("压缩失败"));
 });
 
+// ———— 应用内菜单栏 ————
+const menuVisible = (h, id) => !h.doc.getElementById(id).classList.contains("hidden");
+const menuActionCalls = (h) => h.calls.filter((c) => c.cmd === "menu_action");
+
+test("菜单栏: 应用内自绘, 默认收起; 应用 > 报告问题 / 退出 走壳层命令", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await h.flush();
+  await h.flush();
+
+  assert.ok(h.doc.getElementById("app-menu"), "应有应用内菜单栏");
+  assert.equal(h.doc.getElementById("settings-open"), null, "header 齿轮应移除");
+  assert.ok(!menuVisible(h, "menu-app"), "菜单默认收起");
+  assert.ok(!menuVisible(h, "menu-settings"), "设置菜单默认收起");
+
+  h.doc.getElementById("menu-app-trigger").click();
+  assert.ok(menuVisible(h, "menu-app"), "点击「应用」展开");
+  assert.equal(h.doc.getElementById("menu-app-trigger").getAttribute("aria-expanded"), "true");
+
+  h.doc.getElementById("menu-report-issue").click();
+  await h.flush();
+  assert.ok(!menuVisible(h, "menu-app"), "选中动作后收起");
+  jsonEq(menuActionCalls(h).at(-1).args, { action: "report-issue" });
+
+  h.doc.getElementById("menu-app-trigger").click();
+  h.doc.getElementById("menu-quit").click();
+  await h.flush();
+  jsonEq(menuActionCalls(h).at(-1).args, { action: "quit" });
+});
+
+test("菜单栏: 设置 > 设置… 打开设置页; 切换语言更新菜单文案", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await openSettingsPage(h);
+  assert.ok(!h.doc.getElementById("view-settings").classList.contains("hidden"));
+
+  // 设置页已打开时「设置…」禁用
+  assert.ok(h.doc.getElementById("menu-settings-open").disabled);
+
+  await switchLang(h, "en");
+  assert.equal(h.doc.querySelector("#menu-app-trigger span").textContent, "App");
+  assert.equal(h.doc.querySelector("#menu-report-issue span").textContent, "Report Issue");
+  assert.equal(h.doc.querySelector("#menu-quit span").textContent, "Quit");
+  assert.equal(h.doc.querySelector("#menu-settings-trigger span").textContent, "Settings");
+  assert.equal(h.doc.querySelector("#menu-settings-open span").textContent, "Settings…");
+});
+
+test("菜单栏: 点击外部 / Escape 关闭, Escape 后焦点回到触发按钮", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await h.flush();
+  await h.flush();
+  const trigger = h.doc.getElementById("menu-app-trigger");
+
+  trigger.click();
+  h.doc.body.dispatchEvent(new h.window.Event("mousedown", { bubbles: true }));
+  assert.ok(!menuVisible(h, "menu-app"), "点击菜单外应收起");
+
+  trigger.click();
+  h.doc
+    .getElementById("menu-quit")
+    .dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.ok(!menuVisible(h, "menu-app"), "Escape 应收起");
+  assert.equal(h.doc.activeElement, trigger, "Escape 后焦点回到触发按钮");
+});
+
+test("结构: App = MenuBar / Content / StatusBar; 菜单栏语义、快捷键、destructive 退出项", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await h.flush();
+
+  // App = MenuBar / Content / StatusBar 三段式结构
+  const body = h.doc.body;
+  assert.equal(body.id, "app");
+  const menuBar = h.doc.getElementById("app-menu-bar");
+  const content = h.doc.getElementById("app-content");
+  const statusBar = h.doc.getElementById("app-status-bar");
+  assert.equal(menuBar.tagName, "HEADER");
+  assert.equal(content.tagName, "MAIN");
+  assert.equal(statusBar.tagName, "FOOTER");
+  const order = [menuBar, content, statusBar].map((el, i) => ({ el, i }));
+  for (let i = 1; i < order.length; i += 1) {
+    assert.ok(
+      order[i - 1].el.compareDocumentPosition(order[i].el) &
+        h.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      "MenuBar / Content / StatusBar 顺序正确"
+    );
+  }
+  assert.ok(content.contains(h.doc.getElementById("view-main")));
+  assert.ok(content.contains(h.doc.getElementById("view-settings")));
+
+  const nav = h.doc.getElementById("app-menu");
+  assert.ok(menuBar.contains(nav));
+  assert.equal(nav.getAttribute("role"), "menubar");
+  const triggers = [...nav.querySelectorAll(".app-menu-group > .app-menu-trigger")];
+  assert.equal(triggers.length, 2);
+  for (const trigger of triggers) {
+    assert.equal(trigger.getAttribute("role"), "menuitem");
+    assert.equal(trigger.getAttribute("aria-haspopup"), "menu");
+  }
+  // roving tabindex: 菜单栏整体只占一个 Tab 位
+  assert.deepEqual(triggers.map((t) => t.tabIndex), [0, -1]);
+  // 菜单项不显示图标(顶层入口同样是纯文字)
+  assert.equal(nav.querySelectorAll("svg").length, 0, "菜单栏不应有图标");
+  // 菜单项右侧显示平台快捷键
+  assert.equal(h.doc.getElementById("menu-quit-shortcut").textContent, "Ctrl+Q");
+  assert.equal(h.doc.getElementById("menu-settings-shortcut").textContent, "Ctrl+S");
+  assert.ok(h.doc.getElementById("menu-quit").classList.contains("app-menu-item--destructive"));
+  assert.ok(h.doc.querySelector("#menu-app .app-menu-separator"));
+});
+
+test("菜单栏: ←/→ 移动顶层焦点; 菜单打开时 ←/→ 切换菜单", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await h.flush();
+  const app = h.doc.getElementById("menu-app-trigger");
+  const settings = h.doc.getElementById("menu-settings-trigger");
+  const key = (target, value) =>
+    target.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: value, bubbles: true }));
+
+  app.focus();
+  key(app, "ArrowRight");
+  assert.equal(h.doc.activeElement, settings, "→ 移到下一个顶层项");
+  key(settings, "ArrowLeft");
+  assert.equal(h.doc.activeElement, app, "← 回到上一个顶层项");
+
+  app.click();
+  assert.equal(h.doc.activeElement, h.doc.getElementById("menu-report-issue"));
+  key(h.doc.getElementById("menu-report-issue"), "ArrowRight");
+  assert.ok(menuVisible(h, "menu-settings"), "菜单打开时 → 切换到下一个菜单");
+  assert.ok(!menuVisible(h, "menu-app"));
+  assert.equal(h.doc.activeElement, h.doc.getElementById("menu-settings-open"));
+});
+
+test("菜单栏: 打开菜单后 hover 另一个顶层项直接切换", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await h.flush();
+  h.doc.getElementById("menu-app-trigger").click();
+  assert.ok(menuVisible(h, "menu-app"));
+
+  h.doc
+    .getElementById("menu-settings-trigger")
+    .dispatchEvent(new h.window.MouseEvent("mouseenter"));
+  assert.ok(menuVisible(h, "menu-settings"), "hover 切换到设置菜单");
+  assert.ok(!menuVisible(h, "menu-app"), "旧菜单收起");
+});
+
+test("菜单栏: 菜单项支持首字 typeahead; Tab 收起菜单", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await h.flush();
+  h.doc.getElementById("menu-app-trigger").click();
+  const key = (target, value) =>
+    target.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: value, bubbles: true }));
+
+  key(h.doc.getElementById("menu-report-issue"), "退");
+  assert.equal(h.doc.activeElement, h.doc.getElementById("menu-quit"), "首字匹配到「退出」");
+
+  key(h.doc.getElementById("menu-quit"), "Tab");
+  assert.ok(!menuVisible(h, "menu-app"), "Tab 收起菜单");
+});
+
+test("菜单栏: 快捷键 Ctrl+Q 退出 / Ctrl+S 打开设置", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    return null;
+  });
+  await h.flush();
+  await h.flush();
+  const press = (key) =>
+    h.doc.dispatchEvent(
+      new h.window.KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true })
+    );
+
+  press("s");
+  await h.flush();
+  assert.ok(
+    !h.doc.getElementById("view-settings").classList.contains("hidden"),
+    "Ctrl+S 打开设置页"
+  );
+
+  press("q");
+  await h.flush();
+  jsonEq(menuActionCalls(h).at(-1).args, { action: "quit" });
+});
+
+test("菜单栏: macOS 显示 ⌘ 快捷键并响应 Cmd+Q / Cmd+S", async () => {
+  const h = makeHarness(
+    true,
+    ({ cmd }) => {
+      if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+      return null;
+    },
+    { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15" }
+  );
+  await h.flush();
+  await h.flush();
+  assert.equal(h.doc.getElementById("menu-quit-shortcut").textContent, "⌘Q");
+  assert.equal(h.doc.getElementById("menu-settings-shortcut").textContent, "⌘S");
+
+  const press = (key, extra = {}) =>
+    h.doc.dispatchEvent(new h.window.KeyboardEvent("keydown", { key, bubbles: true, ...extra }));
+  press("q", { ctrlKey: true });
+  await h.flush();
+  assert.equal(menuActionCalls(h).length, 0, "macOS 下 Ctrl+Q 不触发");
+
+  press("q", { metaKey: true });
+  await h.flush();
+  jsonEq(menuActionCalls(h).at(-1).args, { action: "quit" });
+
+  press("s", { metaKey: true });
+  await h.flush();
+  assert.ok(
+    !h.doc.getElementById("view-settings").classList.contains("hidden"),
+    "Cmd+S 打开设置页"
+  );
+});
+
+test("菜单栏: 扫描期间「设置…」禁用, 结束后恢复", async () => {
+  let finishScan;
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return new Promise((resolve) => (finishScan = resolve));
+    return null;
+  });
+  await h.flush();
+  assert.ok(!h.doc.getElementById("menu-settings-open").disabled, "设置加载完成后启用");
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  assert.ok(h.doc.getElementById("menu-settings-open").disabled, "扫描期间禁用");
+
+  h.doc.getElementById("menu-settings-trigger").click();
+  h.doc.getElementById("menu-settings-open").click(); // disabled: 不触发动作
+  await h.flush();
+  assert.ok(
+    h.doc.getElementById("view-settings").classList.contains("hidden"),
+    "扫描中「设置…」不应打开设置页"
+  );
+
+  finishScan(SCAN_COMPRESS);
+  for (let i = 0; i < 5; i += 1) await h.flush();
+  assert.ok(!h.doc.getElementById("menu-settings-open").disabled, "扫描结束后恢复启用");
+});
+
+test("菜单栏: 报告问题失败时状态栏提示", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "menu_action") return Promise.reject("no browser");
+    return null;
+  });
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("menu-app-trigger").click();
+  h.doc.getElementById("menu-report-issue").click();
+  await h.flush();
+  assert.match(h.doc.getElementById("msg").textContent, /无法打开浏览器/);
+});
+
 // ———— 设置页 ————
 const SETTINGS_DEFAULTS = {
   general: { shutdownAfterCompress: false },
@@ -1190,7 +1478,9 @@ const SETTINGS_DEFAULTS = {
 
 async function openSettingsPage(h) {
   await h.flush();
-  h.doc.getElementById("settings-open").click();
+  // 设置入口在菜单栏「设置」里: 展开菜单 → 点「设置…」
+  h.doc.getElementById("menu-settings-trigger").click();
+  h.doc.getElementById("menu-settings-open").click();
   await h.flush();
 }
 

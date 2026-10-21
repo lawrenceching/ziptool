@@ -11,6 +11,14 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
     "lang": {
       "system": "Как в системе"
     },
+    "menu": {
+      "label": "Меню приложения",
+      "app": "Приложение",
+      "reportIssue": "Сообщить о проблеме",
+      "quit": "Выход",
+      "settings": "Настройки",
+      "openSettings": "Настройки…"
+    },
     "path": {
       "src": "Исходная папка",
       "srcPlaceholder": "Нажмите, чтобы выбрать, или перетащите папку для сжатия / извлечения",
@@ -97,7 +105,6 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
     },
     "settings": {
       "title": "Настройки",
-      "open": "Настройки",
       "back": "Назад",
       "nav": {
         "label": "Навигация по настройкам",
@@ -166,6 +173,7 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
       "previewScan_many": "Просканировано {{path}}: {{count}} элементов (тестовые данные предпросмотра в браузере)",
       "previewScan_other": "Просканировано {{path}}: {{count}} элемента (тестовые данные предпросмотра в браузере)",
       "scanFailed": "Ошибка сканирования: {{error}}",
+      "reportIssueFailed": "Не удалось открыть браузер: {{error}}",
       "dialogUnavailable": "Плагин выбора папки недоступен; проверьте tauri-plugin-dialog",
       "dialogFailed": "Не удалось открыть окно выбора папки: {{error}}",
       "dstPicked": "Папка назначения: {{path}}",

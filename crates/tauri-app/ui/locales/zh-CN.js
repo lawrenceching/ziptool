@@ -11,6 +11,14 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
     lang: {
       system: "跟随系统",
     },
+    menu: {
+      label: "应用菜单",
+      app: "应用",
+      reportIssue: "报告问题",
+      quit: "退出",
+      settings: "设置",
+      openSettings: "设置…",
+    },
     path: {
       src: "源文件夹",
       srcPlaceholder: "点击选择, 或拖入要压缩 / 解压的文件夹",
@@ -97,7 +105,6 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
     },
     settings: {
       title: "设置",
-      open: "设置",
       back: "返回",
       nav: {
         label: "设置导航",
@@ -161,6 +168,7 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
       scanDone_other: "已扫描 {{path}}: {{count}} 个条目, 共 {{bytes}}",
       previewScan_other: "已扫描 {{path}}: {{count}} 个条目(浏览器预览假数据)",
       scanFailed: "扫描失败: {{error}}",
+      reportIssueFailed: "无法打开浏览器: {{error}}",
       dialogUnavailable: "文件夹选择插件不可用, 请检查 tauri-plugin-dialog",
       dialogFailed: "无法打开文件夹选择框: {{error}}",
       dstPicked: "目标文件夹: {{path}}",

@@ -5,9 +5,101 @@
     <title>Zip Tool</title>
     <link rel="stylesheet" href="app.css" />
   </head>
-  <body class="h-screen flex flex-col bg-white text-slate-800 text-sm">
+  <body id="app" class="h-screen flex flex-col bg-white text-slate-800 text-sm">
+    <!--
+      MenuBar: 应用内自绘, 视觉/交互规格参考 shadcn/ui Menubar(见 _docs/menu.md)。
+      与应用背景一致: 无边框/无浮层容器, 只在 hover/open 时给触发按钮浅色反馈;
+      菜单项为纯文字 + 右侧快捷键提示, 不显示图标。
+    -->
+    <header id="app-menu-bar" class="app-menu-bar">
+      <nav
+        id="app-menu"
+        class="app-menu"
+        role="menubar"
+        aria-orientation="horizontal"
+        aria-label="应用菜单"
+        data-i18n-aria-label="menu.label"
+      >
+        <div class="app-menu-group" role="none">
+          <button
+            id="menu-app-trigger"
+            type="button"
+            role="menuitem"
+            tabindex="0"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-controls="menu-app"
+            class="app-menu-trigger"
+          >
+            <span data-i18n="menu.app">应用</span>
+          </button>
+          <div
+            id="menu-app"
+            role="menu"
+            aria-labelledby="menu-app-trigger"
+            class="app-menu-panel hidden"
+          >
+            <button
+              id="menu-report-issue"
+              type="button"
+              role="menuitem"
+              data-menu-action="report-issue"
+              class="app-menu-item"
+            >
+              <span data-i18n="menu.reportIssue">报告问题</span>
+            </button>
+            <div class="app-menu-separator" role="separator" aria-hidden="true"></div>
+            <button
+              id="menu-quit"
+              type="button"
+              role="menuitem"
+              data-menu-action="quit"
+              class="app-menu-item app-menu-item--destructive"
+            >
+              <span data-i18n="menu.quit">退出</span>
+              <kbd id="menu-quit-shortcut" class="app-menu-shortcut">Ctrl+Q</kbd>
+            </button>
+          </div>
+        </div>
+        <div class="app-menu-group" role="none">
+          <button
+            id="menu-settings-trigger"
+            type="button"
+            role="menuitem"
+            tabindex="-1"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-controls="menu-settings"
+            class="app-menu-trigger"
+          >
+            <span data-i18n="menu.settings">设置</span>
+          </button>
+          <div
+            id="menu-settings"
+            role="menu"
+            aria-labelledby="menu-settings-trigger"
+            class="app-menu-panel hidden"
+          >
+            <button
+              id="menu-settings-open"
+              type="button"
+              role="menuitem"
+              data-menu-action="settings"
+              disabled
+              class="app-menu-item"
+            >
+              <span data-i18n="menu.openSettings">设置…</span>
+              <kbd id="menu-settings-shortcut" class="app-menu-shortcut">Ctrl+S</kbd>
+            </button>
+          </div>
+        </div>
+      </nav>
+    </header>
+
+    <!-- Content: 主界面 + 设置页; 同一文档切换, 不销毁主界面状态 -->
+    <main id="app-content" class="flex flex-col flex-1 min-h-0">
     <div id="view-main" class="flex flex-col flex-1 min-h-0">
-    <!-- 顶栏: 压缩/解压模式切换 + 设置 + 确认(运行中变取消) -->
+    <!-- 顶栏: 压缩/解压模式切换 + 确认(运行中变取消); 设置入口在菜单栏「设置」里 -->
     <header class="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200">
       <div class="flex rounded-lg border border-slate-300 overflow-hidden">
         <button
@@ -26,28 +118,6 @@
         </button>
       </div>
       <div class="flex items-center gap-2">
-        <button
-          id="settings-open"
-          type="button"
-          disabled
-          aria-label="设置"
-          data-i18n-aria-label="settings.open"
-          title="设置"
-          data-i18n-title="settings.open"
-          class="p-1.5 rounded-md text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            class="w-4 h-4"
-            aria-hidden="true"
-          >
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
-          </svg>
-        </button>
         <button
           id="confirm"
           data-i18n="header.confirm"
@@ -246,7 +316,7 @@
     </div>
 
     <!-- 条目表格: 通栏铺满剩余空间 -->
-    <main class="flex-1 min-h-0 overflow-auto">
+    <div class="flex-1 min-h-0 overflow-auto">
       <table class="w-full">
         <caption class="sr-only" data-i18n="table.caption">条目列表</caption>
         <thead class="sticky top-0 bg-slate-50 text-slate-500 text-xs">
@@ -272,7 +342,7 @@
       <div id="empty" data-i18n="table.empty" class="py-16 text-center text-slate-400">
         点击「源文件夹」选择目录, 也可直接拖入文件夹
       </div>
-    </main>
+    </div>
 
     <!-- 打包方案抽屉: 只读审核; 包卡片与源表双向高亮 -->
     <div id="plan-backdrop" class="hidden fixed inset-0 z-40 bg-slate-900/40 p-4">
@@ -444,9 +514,10 @@
       </div>
     </div>
     <!-- /view-settings -->
+    </main>
 
-    <!-- 状态栏 -->
-    <footer class="flex items-center justify-between px-4 py-1.5 bg-white border-t border-slate-200 text-xs text-slate-500">
+    <!-- StatusBar -->
+    <footer id="app-status-bar" class="flex items-center justify-between px-4 py-1.5 bg-white border-t border-slate-200 text-xs text-slate-500">
       <span id="msg" data-i18n="status.ready" class="truncate min-w-0" title="">就绪</span>
       <div class="flex items-center gap-2 shrink-0 pl-4">
         <div class="relative">

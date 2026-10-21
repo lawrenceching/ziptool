@@ -5,6 +5,7 @@
 //! - `validate_dir`: 拖拽/选择路径校验(必须是已存在的文件夹, 不改变 core 预检职责)
 //! - `cancel_current`: 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续)
 //! - `load_settings` / `save_settings`: `settings.json` 读写(见 _docs/filtering_rules.md)
+//! - `menu_action`: 应用内菜单栏动作分发(报告问题 / 退出, 见 _docs/menu.md)
 //!
 //! 命令在 `spawn_blocking` 中调 core, 进度经 `tauri::ipc::Channel` 推给前端;
 //! scan/compress/extract 单任务互斥, 任务结束释放忙闲标志并清空取消旗标。
@@ -21,6 +22,8 @@ use tauri::Manager;
 use tauri::State;
 use tauri::ipc::Channel;
 
+mod desktop;
+mod menu;
 mod settings;
 
 use tauri::AppHandle;
@@ -1014,6 +1017,15 @@ async fn save_settings(
     .map_err(|e| e.to_string())?
 }
 
+/// 应用内菜单栏动作: 「报告问题」打开浏览器, 「退出」走 `app.exit(0)`。
+///
+/// 菜单栏 UI 在前端(见 _docs/menu.md), 壳层只执行动作并校验白名单;
+/// 未知动作返回可读错误, 由前端状态栏提示。
+#[tauri::command]
+fn menu_action(app: AppHandle, action: String) -> Result<(), String> {
+    menu::dispatch(&app, &action)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1028,7 +1040,8 @@ pub fn run() {
             validate_dir,
             cancel_current,
             load_settings,
-            save_settings
+            save_settings,
+            menu_action
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

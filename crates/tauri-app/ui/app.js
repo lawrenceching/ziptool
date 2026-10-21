@@ -19,6 +19,7 @@ const state = {
   planOpen: false,
   planFilter: "all",
   view: "main", // "main" | "settings"
+  locked: false, // 任务/扫描互斥锁(setLocked 维护; 原生菜单「设置…」可用性依赖它)
   section: "general", // 设置页当前侧栏项
   settings: null, // { general: { shutdownAfterCompress }, filters: { enabledPolicies } }
   settingsReady: false,
@@ -38,7 +39,6 @@ const DEFAULT_PACKAGING = {
 const FILTER_POLICY_IDS = ["os-hidden", "lang-temp"];
 const SETTINGS_STORAGE_KEY = "ziptool.settings";
 let savePromise = null;
-let settingsReturnFocus = null;
 let settingsReady = Promise.resolve();
 
 // 原生拖拽: 两个投放区 + 最近命中行 + 校验竞态 token
@@ -228,6 +228,232 @@ function makeChannel() {
   return new window.__TAURI__.core.Channel(onProgress);
 }
 
+// —— 应用内菜单栏: shadcn/ui Menubar 视觉与交互移植(见 _docs/menu.md) ——
+// 菜单栏是 HTML 自绘(样式在 app.css 的 components 层), 文案是静态 data-i18n, 切换语言自动更新。
+// 交互: 点击 / ↓↑ 打开, ←→ 在顶层菜单间切换, 打开后 hover 切换, 首字母 typeahead,
+//       Esc 关闭并归还焦点, 点击外部 / Tab / 窗口失焦关闭。
+const MENU_BAR = [
+  { trigger: "menu-app-trigger", menu: "menu-app" },
+  { trigger: "menu-settings-trigger", menu: "menu-settings" },
+];
+let openMenuTrigger = null;
+let typeahead = { text: "", at: 0 };
+
+const triggerIds = () => MENU_BAR.map((m) => m.trigger);
+const menuOf = (triggerId) => MENU_BAR.find((m) => m.trigger === triggerId)?.menu;
+const menuItems = (menuId) => [
+  ...$(menuId).querySelectorAll('[role="menuitem"]:not([disabled])'),
+];
+
+// roving tabindex: 菜单栏整体只占一个 Tab 位(与 shadcn/Radix Menubar 一致)
+function setActiveTrigger(triggerId) {
+  for (const { trigger } of MENU_BAR) {
+    $(trigger).tabIndex = trigger === triggerId ? 0 : -1;
+  }
+}
+
+// shadcn 的 data-[state=open]:animate-in fade-in-0 zoom-in-95 + slide-in-from-top-2;
+// 用 WAAPI 实现, 免动画 CSS
+function animateMenuIn(menuEl) {
+  if (typeof menuEl.animate !== "function") return;
+  menuEl.animate(
+    [
+      { opacity: 0, transform: "translateY(-2px) scale(0.95)" },
+      { opacity: 1, transform: "translateY(0) scale(1)" },
+    ],
+    { duration: 120, easing: "cubic-bezier(0.16, 1, 0.3, 1)" }
+  );
+}
+
+function setMenuOpen(triggerId, open, focusFirst = false) {
+  for (const { trigger, menu } of MENU_BAR) {
+    const isOpen = open && trigger === triggerId;
+    const menuEl = $(menu);
+    if (isOpen && menuEl.classList.contains("hidden")) animateMenuIn(menuEl);
+    menuEl.classList.toggle("hidden", !isOpen);
+    $(trigger).setAttribute("aria-expanded", String(isOpen));
+  }
+  openMenuTrigger = open ? triggerId : null;
+  if (open) {
+    setActiveTrigger(triggerId);
+    if (focusFirst) menuItems(menuOf(triggerId))[0]?.focus();
+  }
+}
+
+function closeMenus(restoreFocus = false) {
+  if (!openMenuTrigger) return;
+  const triggerId = openMenuTrigger;
+  setMenuOpen(triggerId, false);
+  if (restoreFocus) $(triggerId).focus();
+}
+
+function openMenu(triggerId, focusFirst = true) {
+  setMenuOpen(triggerId, true, focusFirst);
+}
+
+// ←/→: 移动顶层焦点; 有菜单打开时同步打开邻居菜单(Radix Menubar 行为)
+function moveTriggerFocus(fromId, delta) {
+  const ids = triggerIds();
+  const index = ids.indexOf(fromId);
+  const next = ids[(index + delta + ids.length) % ids.length];
+  $(next).focus();
+  if (openMenuTrigger) openMenu(next, true);
+}
+
+// 首字母/首字 typeahead: 600ms 内的连续输入拼成前缀, 匹配菜单项文本
+function focusMenuItem(key, items) {
+  if (!/^[\p{L}\p{N}]$/u.test(key)) return false;
+  const now = Date.now();
+  const text = now - typeahead.at > 600 ? key.toLowerCase() : typeahead.text + key.toLowerCase();
+  typeahead = { text, at: now };
+  const match =
+    items.find((item) => item.textContent.trim().toLowerCase().startsWith(text)) ??
+    items.find((item) => item.textContent.trim().toLowerCase().startsWith(text.slice(0, 1)));
+  if (!match) return false;
+  match.focus();
+  return true;
+}
+
+// 「设置…」可用性: 设置加载完成前 / 任务与扫描期间 / 方案抽屉打开时 / 已在设置页时禁用
+function menuSettingsEnabled() {
+  return state.settingsReady && !state.locked && !state.planOpen && state.view !== "settings";
+}
+
+function syncMenuState() {
+  $("menu-settings-open").disabled = !menuSettingsEnabled();
+}
+
+// 菜单动作交给壳层: report-issue = 浏览器打开仓库, quit = app.exit(0)(会取消任务并收尾)
+function runMenuAction(action) {
+  if (!hasTauri()) return; // 浏览器预览没有壳层动作
+  invoke("menu_action", { action }).catch((e) => {
+    if (action === "report-issue") setStatus("status.reportIssueFailed", { error: String(e) });
+    else console.error("菜单动作失败", e);
+  });
+}
+
+// 平台快捷键: Windows / Linux 用 Ctrl, macOS 用 Cmd(显示为 ⌘)
+const IS_MAC = /Mac/i.test(navigator.userAgent || navigator.platform || "");
+const SHORTCUT_MOD = IS_MAC ? "⌘" : "Ctrl+";
+
+// 菜单项右侧的快捷键提示 + 全局快捷键
+function initMenuShortcuts() {
+  $("menu-quit-shortcut").textContent = `${SHORTCUT_MOD}Q`;
+  $("menu-settings-shortcut").textContent = `${SHORTCUT_MOD}S`;
+  $("menu-quit").setAttribute("aria-keyshortcuts", IS_MAC ? "Meta+Q" : "Control+Q");
+  $("menu-settings-open").setAttribute("aria-keyshortcuts", IS_MAC ? "Meta+S" : "Control+S");
+
+  document.addEventListener("keydown", (e) => {
+    if (e.altKey || e.shiftKey) return;
+    if (!(IS_MAC ? e.metaKey : e.ctrlKey)) return;
+    const key = e.key.toLowerCase();
+    if (key === "q") {
+      e.preventDefault();
+      closeMenus();
+      runMenuAction("quit");
+    } else if (key === "s") {
+      // 即使设置不可用也拦下, 避免 WebView 弹出「保存网页」对话框
+      e.preventDefault();
+      closeMenus();
+      if (menuSettingsEnabled()) openSettings();
+    }
+  });
+}
+
+function initMenuBar() {
+  for (const { trigger } of MENU_BAR) {
+    const triggerEl = $(trigger);
+    triggerEl.addEventListener("focus", () => setActiveTrigger(trigger));
+    triggerEl.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (openMenuTrigger === trigger) closeMenus(true);
+      else openMenu(trigger, true);
+    });
+    triggerEl.addEventListener("keydown", (e) => {
+      const items = menuItems(menuOf(trigger));
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu(trigger, true);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu(trigger, false);
+        items.at(-1)?.focus();
+      } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        e.preventDefault();
+        e.stopPropagation();
+        moveTriggerFocus(trigger, e.key === "ArrowRight" ? 1 : -1);
+      } else if (e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        e.stopPropagation();
+        $(e.key === "Home" ? triggerIds()[0] : triggerIds().at(-1)).focus();
+      }
+    });
+    // 已有菜单打开时, 鼠标移到另一个顶层项直接切换(shadcn/Radix Menubar 行为)
+    triggerEl.addEventListener("mouseenter", () => {
+      if (openMenuTrigger && openMenuTrigger !== trigger) openMenu(trigger, true);
+    });
+  }
+
+  $("app-menu").addEventListener("click", (e) => {
+    const item = e.target.closest?.("[data-menu-action]");
+    if (!item || item.disabled) return;
+    const action = item.dataset.menuAction;
+    if (action === "settings") {
+      closeMenus();
+      openSettings();
+    } else {
+      closeMenus(true);
+      runMenuAction(action);
+    }
+  });
+
+  // 菜单内键盘: ↑/↓/Home/End 循环, ←/→ 切换顶层菜单, Esc 关闭并归还焦点
+  $("app-menu").addEventListener("keydown", (e) => {
+    if (!openMenuTrigger) return;
+    const items = menuItems(menuOf(openMenuTrigger));
+    if (e.key === "Escape") {
+      e.preventDefault(); // 同一 Escape 不再关设置页
+      closeMenus(true);
+      return;
+    }
+    if (e.key === "Tab") {
+      closeMenus();
+      return;
+    }
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      moveTriggerFocus(openMenuTrigger, e.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+      if (items.length === 0) return;
+      const index = items.indexOf(document.activeElement);
+      let next;
+      if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = items.length - 1;
+      else if (e.key === "ArrowDown") next = index < 0 ? 0 : (index + 1) % items.length;
+      else next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
+      items[next].focus();
+      return;
+    }
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && focusMenuItem(e.key, items)) {
+      e.preventDefault();
+    }
+  });
+
+  // 点击菜单外 / 窗口失焦关闭(语言菜单有自己的监听, 互不影响)
+  document.addEventListener("mousedown", (e) => {
+    if (!openMenuTrigger) return;
+    if ($("app-menu").contains(e.target)) return;
+    closeMenus();
+  });
+  window.addEventListener("blur", () => closeMenus());
+  syncMenuState();
+}
+
 // —— 清空扫描结果(模式切换/重选源时旧表格必须失效) ——
 function clearTable() {
   state.rows = [];
@@ -242,7 +468,7 @@ function clearTable() {
 
 // —— 任务互斥的 UI 侧: 任务期间锁控件(确认钮另行切换成取消) ——
 const LOCK_IDS = [
-  "mode-compress", "mode-extract", "src", "dst", "settings-open",
+  "mode-compress", "mode-extract", "src", "dst",
   "opt-split", "opt-merge-below", "opt-bundle-max", "opt-max-entries",
   "opt-password", "opt-random", "opt-force",
   "preset-compat", "preset-balanced", "opt-advanced", "opt-format", "opt-level",
@@ -254,9 +480,10 @@ const BTN_CONFIRM =
 const BTN_CANCEL =
   "px-6 py-1.5 rounded-lg bg-red-600 text-white font-medium enabled:hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors";
 function setLocked(locked) {
+  state.locked = locked;
   for (const id of LOCK_IDS) $(id).disabled = locked;
-  // 设置加载完成前也不能打开设置页(避免用默认值展示/保存)
-  $("settings-open").disabled = locked || !state.settingsReady;
+  // 设置加载完成前 / 任务与扫描期间菜单「设置…」也禁用(与原齿轮按钮规则一致)
+  syncMenuState();
   if (locked) setDropHover(null); // 任务期不允许拖拽更换路径
 }
 
@@ -427,6 +654,7 @@ function showView(view) {
   state.view = view;
   $("view-main").classList.toggle("hidden", view !== "main");
   $("view-settings").classList.toggle("hidden", view !== "settings");
+  syncMenuState(); // 设置页打开时「设置…」禁用
 }
 
 function showSection(section) {
@@ -447,8 +675,8 @@ function showSection(section) {
 }
 
 function openSettings() {
-  if (!state.settingsReady || state.run || state.planOpen) return;
-  settingsReturnFocus = document.activeElement;
+  if (!state.settingsReady || state.locked || state.planOpen || state.view === "settings")
+    return;
   setDropHover(null);
   showView("settings");
   showSection("general");
@@ -467,11 +695,8 @@ async function closeSettings() {
     state.rows.length > 0 &&
     $("src").value.trim() !== "";
   state.filtersDirty = false;
-  if (settingsReturnFocus && document.contains(settingsReturnFocus)) {
-    settingsReturnFocus.focus?.();
-  } else {
-    $("settings-open").focus();
-  }
+  // 设置入口是菜单栏「设置」: 关闭后把焦点还给菜单触发按钮
+  $("menu-settings-trigger").focus();
   if (needRescan) {
     setStatus("status.settingsRescan");
     doScan($("src").value);
@@ -479,7 +704,7 @@ async function closeSettings() {
 }
 
 function initSettings() {
-  $("settings-open").disabled = true;
+  syncMenuState(); // 「设置…」在设置加载完成前保持禁用
   settingsReady = (async () => {
     try {
       if (!hasTauri()) {
@@ -503,11 +728,10 @@ function initSettings() {
     }
     state.settingsReady = true;
     applySettingsToDom();
-    $("settings-open").disabled = !!state.run;
+    syncMenuState(); // 就绪后启用「设置…」
   })();
 }
 
-$("settings-open").addEventListener("click", openSettings);
 $("settings-back").addEventListener("click", () => closeSettings());
 $("settings-nav").addEventListener("click", (event) => {
   const button = event.target.closest?.("[data-section]");
@@ -990,6 +1214,7 @@ function renderPlanDialog() {
 function setPlanOpen(open) {
   state.planOpen = open;
   renderPlanDialog();
+  syncMenuState(); // 方案抽屉打开时不允许从菜单进入设置页
   if (open) $("plan-close")?.focus();
   else $("plan-open")?.focus();
 }
@@ -1528,6 +1753,8 @@ renderStatus();
 renderPlanSummary();
 syncActionButton();
 syncLanguageMenu();
+initMenuBar();
+initMenuShortcuts();
 initSettings();
 
 // ———— 浏览器预览 mock(无 Tauri 环境): 假扫描 + 定时器推进度 ————

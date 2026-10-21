@@ -556,6 +556,10 @@ scan(mode, path, filters?, excludes?, on_progress) -> ScanResult
 
 ## 7. UI 设计
 
+> **2026-10 变更**: 设置入口从主界面 header 齿轮移到**应用内自绘菜单栏「设置 > 设置…」**
+> (实现见 [_docs/menu.md](menu.md)); 本节与入口、焦点、锁定相关的描述已按菜单入口更新。
+> 菜单栏与应用同一套 Tailwind 视觉, 文案为静态 `data-i18n`, 跟随界面语言。
+
 ### 7.1 结构线框
 
 ```text
@@ -580,7 +584,7 @@ scan(mode, path, filters?, excludes?, on_progress) -> ScanResult
 └────────────────────────────────────────────────────────────┘
 ```
 
-- 主界面 header 右侧新增齿轮按钮(`#settings-open`), 位于「确认」左边
+- 设置入口在**应用内菜单栏**: `应用 > 报告问题 / 退出` + `设置 > 设置…`; 主界面 header 不再放齿轮按钮
 - 设置页有自己的 header(返回 + 标题); 主界面 header 隐藏
 - **footer 共用**: 状态消息、语言菜单、版本号在设置页仍可用
 - 本期**没有**关机倒计时横幅 / 全局电源提示条; 「压缩完成后关机」只是通用区里的一个勾选框(§8)
@@ -598,9 +602,9 @@ scan(mode, path, filters?, excludes?, on_progress) -> ScanResult
   ```
 
 - `showView("main" | "settings")`: 切换两个容器的 `hidden` 类; 主界面 DOM 不销毁, 扫描表 / 勾选 / 滚动位置自然保留
-- 打开: 默认「通用」; 记录上一次焦点, 关闭时还给齿轮按钮
+- 打开: 默认「通用」; 关闭时把焦点还给菜单栏的「设置」触发按钮
 - 关闭: 返回按钮 / `Escape`; 若策略确实变化且当前是压缩模式并已有扫描结果 → 自动重扫(§7.6)
-- 运行 / 扫描中齿轮禁用(加入 `LOCK_IDS`), 与现有锁定规则一致; 因此设置页不会遮住「取消」按钮
+- 运行 / 扫描中「设置…」禁用(由前端 `syncMenuState()` 控制), 与现有锁定规则一致; 因此设置页不会遮住「取消」按钮
 - 拖拽仅在主视图生效: `zoneAt()` / `handleDrop()` 在 `state.view !== "main"` 时直接忽略, 打开设置时清掉拖拽高亮
 
 ### 7.3 边栏
@@ -681,7 +685,7 @@ boot ── load_settings ──▶ ready
 ```
 
 - **启动即加载**: 主界面不显示策略, 但压缩扫描需要它; `doScan()` / 压缩确认前 `await settingsReady`, 避免「先用默认值扫了再加载」的竞态
-- 加载中齿轮禁用; 加载失败仍进入 ready(默认值), 状态栏提示
+- 加载中「设置…」禁用; 加载失败仍进入 ready(默认值), 状态栏提示
 - 即时保存: 每次 change 立即 `save_settings`; 成功不弹提示(开关状态即反馈), 失败回滚并提示
 - 保存串行: 保存中禁用全部设置控件, 天然避免并发写; **关闭设置页时若保存仍在飞行, 先 `await` 保存完成再决定是否重扫**(失败则回滚, 不重扫), 避免「用未落盘的策略扫了表」
 - 保存失败回滚后重新计算 `filtersDirty`(相对 `scanFilters`), 不让失败的回滚触发多余重扫
@@ -703,8 +707,8 @@ boot ── load_settings ──▶ ready
 
 ### 7.7 锁定、键盘与可访问性
 
-- `LOCK_IDS` 增加 `settings-open`: 扫描 / 压缩 / 解压期间禁用; 设置页内的控件不在 `LOCK_IDS`(页面打开时不可能有任务)
-- 打开设置: 焦点到当前侧栏项; 关闭: 焦点回 `#settings-open`
+- 任务 / 扫描期间「设置…」禁用(`syncMenuState()`), 设置页内控件因此只可能在空闲态被操作
+- 打开设置: 焦点到当前侧栏项; 关闭: 焦点回菜单栏「设置」触发按钮
 - `Escape` 优先级: 语言菜单 > 设置页; 语言菜单打开时先关菜单, 否则关闭设置页
 - 侧栏按钮 `aria-current="page"`; 内容 section `role="region"` + `aria-labelledby` 指向标题
 - 开关 `aria-labelledby` 指标题、`aria-describedby` 指描述; 描述是真实 DOM 文本, 读屏可读
@@ -773,7 +777,7 @@ boot ── load_settings ──▶ ready
 | Key | 简体中文 |
 |---|---|
 | `settings.title` | 设置 |
-| `settings.open` | 设置(齿轮按钮 aria-label / title) |
+| `settings.title` | 设置 |
 | `settings.back` | 返回 |
 | `settings.nav.label` | 设置导航 |
 | `settings.nav.general` | 通用 |
@@ -839,11 +843,11 @@ boot ── load_settings ──▶ ready
 
 ### 10.3 UI 单测(`test/ui.test.mjs` 末尾新增「设置页」用例)
 
-- 启动: `load_settings` 调用一次; 齿轮在加载完成前禁用; 加载失败 → 默认值 + 状态栏。
+- 启动: `load_settings` 调用一次; 菜单「设置…」在加载完成前禁用; 加载失败 → 默认值 + 状态栏。
 - 打开 / 关闭:
-  - 齿轮 → `#view-settings` 显示、`#view-main` 隐藏
+  - 菜单 `设置 > 设置…` → `#view-settings` 显示、`#view-main` 隐藏
   - 侧栏两项; 默认「通用」; 点击「文件排除」切 panel; `aria-current` 同步
-  - 返回 / Escape 关闭; 焦点回齿轮
+  - 返回 / Escape 关闭; 焦点回菜单栏「设置」触发按钮
 - 通用:
   - 勾选 → `save_settings` 参数正确; 取消勾选同理
   - 保存失败 → 勾选回滚 + `status.settingsSaveFailed`
@@ -873,7 +877,7 @@ boot ── load_settings ──▶ ready
   - `scan` 参数断言补 `filters` 形状
   - `compress.options` 的 `jsonEq` 补 `filters`
   - `makeHarness` 的默认 invoke 处理 `load_settings` / `save_settings`(返回默认设置 / echo), 否则启动时的设置加载会拿到 `null`
-  - 新增 `settings-open` 进入 `LOCK_IDS` 后, 检查现有「任务期锁控件」用例是否仍只断言 `src`(不枚举 LOCK_IDS 就不受影响)
+  - `settings-open` 已不在 header / `LOCK_IDS`: 菜单「设置…」的启停由 `syncMenuState()` 控制; 现有「任务期锁控件」用例不枚举 LOCK_IDS, 不受影响
 - `test/i18n.test.mjs`: 五份词条补齐 §9.1 的 base key; 与现有复数 / 占位符规则一致。
 - `package.json` 的 `test` 脚本无需新增文件: 设置页用例并入现有 `test/ui.test.mjs`。
 - 壳层 Rust 测试: 所有 `CompressOptions { … }` 构造点补 `filters: None`(已同步)。
@@ -914,7 +918,7 @@ boot ── load_settings ──▶ ready
 
 ## 12. 验收标准
 
-- [ ] 主界面右上角有设置入口; 打开后为「边栏 + 内容区」, 边栏含「通用」「文件排除」
+- [ ] 菜单栏有「设置」菜单, 含「设置…」入口; 打开后为「边栏 + 内容区」, 边栏含「通用」「文件排除」
 - [ ] 通用区有「压缩完成后关机」勾选框, **置灰不可交互**, 描述含「即将支持」, 且不产生任何实际关机副作用
 - [ ] 文件排除区以列表展示两项策略: 标题 + 描述 + Switch; 默认状态见 §4.1
 - [ ] 切换策略立即持久化; 写盘失败时开关回滚并提示, 不出现「显示开、实际关」
@@ -975,7 +979,7 @@ boot ── load_settings ──▶ ready
 |---|---|---|---|
 | D-5 | 策略变更后是否自动重扫 | **是(仅压缩模式)** | 只标记 = 少一次扫描, 但用户点压缩才发现过期 |
 | D-7 | 是否保留高级区自定义模式 | **保留, 并集** | 移入设置页 = 更大的 UI 与持久化改造, 非本次需求 |
-| D-8 | 设置入口位置 | **主界面 header 齿轮** | 状态栏 = 不够显眼; 菜单 = 多一层交互 |
+| D-8 | 设置入口位置 | **应用内菜单栏「设置 > 设置…」** | 2026-10 按新需求从 header 齿轮改为菜单入口(见 [menu.md](menu.md)); 菜单栏为应用内自绘, 与应用视觉一致 |
 | D-9 | 未知策略 id | **忽略并丢弃** | 报错 = 降级时无法启动; 保留 = 旧应用无法理解 |
 
 > D-10(关机是否受告警影响)不再属于本期: 实际关机行为由后续 ticket 定义, 见 §8.3。

@@ -159,6 +159,11 @@ test("index.html 静态文案与语言下拉结构完整", () => {
     "header.compress",
     "header.extract",
     "header.confirm",
+    "menu.app",
+    "menu.reportIssue",
+    "menu.quit",
+    "menu.settings",
+    "menu.openSettings",
     "path.src",
     "path.dst",
     "options.split",
@@ -191,6 +196,7 @@ test("index.html 静态文案与语言下拉结构完整", () => {
   assert.ok(w.document.querySelector('[data-i18n-title="options.presetBalancedTitle"]'));
   assert.ok(w.document.querySelector('[data-i18n-title="options.levelTitle"]'));
   assert.ok(w.document.querySelector('[data-i18n-aria-label="header.language"]'));
+  assert.ok(w.document.querySelector('[data-i18n-aria-label="menu.label"]'));
   assert.ok(w.document.querySelector('[data-i18n-aria-label="table.selectAll"]'));
   assert.deepEqual(
     [...w.document.querySelectorAll("#lang-menu [data-lang]")].map(
@@ -342,6 +348,14 @@ test("五种语言启动时关键文案与词条一致", () => {
     );
     assert.equal(w.document.getElementById("empty").textContent, copy.table.empty);
     assert.equal(w.document.getElementById("msg").textContent, copy.status.ready);
+    assert.equal(
+      w.document.querySelector("#menu-app-trigger span").textContent,
+      copy.menu.app
+    );
+    assert.equal(
+      w.document.querySelector("#menu-settings-open span").textContent,
+      copy.menu.openSettings
+    );
     assert.equal(
       w.document.querySelector('[data-i18n="table.name"]').textContent,
       copy.table.name
