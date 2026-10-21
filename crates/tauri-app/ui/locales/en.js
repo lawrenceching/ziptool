@@ -6,7 +6,8 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "extract": "Extract",
       "confirm": "Confirm",
       "cancel": "Cancel",
-      "language": "Language"
+      "language": "Language",
+      "scanning": "Scanning…"
     },
     "lang": {
       "system": "Follow system"
@@ -48,6 +49,8 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "exclude": "Exclude",
       "excludePlaceholder": "Comma-separated, e.g. Thumbs.db, *.tmp",
       "force": "Overwrite existing files",
+      "smartPackaging": "Smart packaging",
+      "smartPackagingTitle": "When checked, small files are merged and split into packages according to the packaging strategy; when unchecked, each top-level item is compressed separately",
       "pwHintZip": "zip format: ZipCrypto encryption (best compatibility, less secure)",
       "pwHint7z": "7z format: AES-256 encryption"
     },

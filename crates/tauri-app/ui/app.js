@@ -19,7 +19,10 @@ const state = {
   planOpen: false,
   planFilter: "all",
   view: "main", // "main" | "settings"
-  locked: false, // 任务/扫描互斥锁(setLocked 维护; 原生菜单「设置…」可用性依赖它)
+  locked: false, // 任务互斥锁(setLocked 维护; 原生菜单「设置…」可用性依赖它)
+  smartPackaging: false, // 智能打包开关(仅内存; 关闭时逐条目压缩, 不计算/不传方案)
+  scanning: false, // 扫描进行中(只锁确认钮, 其余控件可用)
+  scanSeq: 0, // 丢弃过期的扫描(channel 事件 / await 结果 / catch)
   section: "general", // 设置页当前侧栏项
   settings: null, // { general: { shutdownAfterCompress }, filters: { enabledPolicies } }
   settingsReady: false,
@@ -118,8 +121,25 @@ function renderStatus() {
   el.title = text; // 长消息截断时悬停看全文
 }
 
+// 确认钮内容: 扫描中 = spinner + 「扫描中…」(只锁确认钮); 运行中 = 取消; 其余 = 确认
+// 注: 按钮带 data-i18n, 切换语言时 i18n 会先写回文案, localechange 再调本函数恢复 spinner
 function syncActionButton() {
-  $("confirm").textContent = state.run ? t("header.cancel") : t("header.confirm");
+  const button = $("confirm");
+  if (state.scanning) {
+    button.setAttribute("aria-busy", "true");
+    const spinner = document.createElement("span");
+    spinner.className =
+      "inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white align-middle";
+    spinner.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "ml-1.5";
+    label.textContent = t("header.scanning");
+    button.textContent = "";
+    button.append(spinner, label);
+    return;
+  }
+  button.removeAttribute("aria-busy");
+  button.textContent = state.run ? t("header.cancel") : t("header.confirm");
 }
 
 const LANG_ITEMS = () => [...$("lang-menu").querySelectorAll("[data-lang]")];
@@ -222,10 +242,14 @@ function fmtBytes(n) {
 // —— 后端调用封装(浏览器预览无 Tauri 时走 mock) ——
 const hasTauri = () => !!window.__TAURI__;
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
-// 进度经 Channel 推送(onProgress 参数); 回调见 onProgress()
+// 运行进度经 Channel 推送(onProgress 参数); 回调见 onProgress()
 // 注意: Tauri 2 的 Channel 在 core 命名空间(@tauri-apps/api/core), v1 的 ipc 命名空间已不存在
 function makeChannel() {
   return new window.__TAURI__.core.Channel(onProgress);
+}
+// 扫描流式事件走独立 Channel(onScan 参数): rows 骨架 + 逐条 row 大小
+function makeScanChannel(seq) {
+  return new window.__TAURI__.core.Channel((ev) => onScanEvent(seq, ev));
 }
 
 // —— 应用内菜单栏: shadcn/ui Menubar 视觉与交互移植(见 _docs/menu.md) ——
@@ -314,7 +338,8 @@ function focusMenuItem(key, items) {
   return true;
 }
 
-// 「设置…」可用性: 设置加载完成前 / 任务与扫描期间 / 方案抽屉打开时 / 已在设置页时禁用
+// 「设置…」可用性: 设置加载完成前 / 任务期间 / 方案抽屉打开时 / 已在设置页时禁用
+// (扫描期间不锁 UI, 因此不禁用)
 function menuSettingsEnabled() {
   return state.settingsReady && !state.locked && !state.planOpen && state.view !== "settings";
 }
@@ -470,6 +495,7 @@ function clearTable() {
 const LOCK_IDS = [
   "mode-compress", "mode-extract", "src", "dst",
   "opt-split", "opt-merge-below", "opt-bundle-max", "opt-max-entries",
+  "opt-smart",
   "opt-password", "opt-random", "opt-force",
   "preset-compat", "preset-balanced", "opt-advanced", "opt-format", "opt-level",
   "opt-exclude", "opt-verify",
@@ -482,12 +508,48 @@ const BTN_CANCEL =
 function setLocked(locked) {
   state.locked = locked;
   for (const id of LOCK_IDS) $(id).disabled = locked;
-  // 设置加载完成前 / 任务与扫描期间菜单「设置…」也禁用(与原齿轮按钮规则一致)
+  // 设置加载完成前 / 任务期间菜单「设置…」也禁用(与原齿轮按钮规则一致)
   syncMenuState();
   if (locked) setDropHover(null); // 任务期不允许拖拽更换路径
 }
 
-// —— 模式切换: 切换高亮 + 选项显隐; 已有扫描结果则作废待重扫 ——
+// —— 选项显隐: 模式 + 智能打包开关共同决定(策略行/打包列只在"压缩 + 智能打包"时可见) ——
+function syncOptionVisibility() {
+  const compress = state.mode === "compress";
+  const smart = compress && state.smartPackaging;
+  for (const id of ["opt-preset-wrap", "opt-advanced-wrap"]) {
+    $(id).classList.toggle("hidden", !compress);
+    $(id).classList.toggle("flex", compress);
+  }
+  // 策略行/打包列: 解压模式永远隐藏, 压缩模式随智能打包开关显隐
+  $("strategy-row").classList.toggle("hidden", !smart);
+  $("strategy-row").classList.toggle("flex", smart);
+  $("th-package").classList.toggle("hidden", !smart);
+  $("opt-smart-wrap").classList.toggle("hidden", !compress);
+  $("opt-smart-wrap").classList.toggle("flex", compress);
+  $("opt-random-wrap").classList.toggle("hidden", !compress);
+  $("opt-verify-wrap").classList.toggle("hidden", !compress);
+  $("opt-force-wrap").classList.toggle("hidden", !(state.mode === "extract"));
+  $("opt-force-wrap").classList.toggle("flex", state.mode === "extract");
+  // 行内打包列: 由下一次 renderTable 按同样条件重绘
+}
+
+// —— 智能打包开关: 关闭 = 逐条目压缩(不请求方案, 打包参数/方案 id 传 null) ——
+function setSmartPackaging(on) {
+  const next = !!on;
+  state.smartPackaging = next;
+  $("opt-smart").checked = next;
+  syncOptionVisibility();
+  if (next) {
+    schedulePlan();
+  } else {
+    clearPlan();
+    renderTable(state.rows);
+  }
+  syncConfirm();
+}
+
+// —— 模式切换: 切换高亮 + 选项显隐; 已有扫描结果 / 进行中的扫描则作废 ——
 function setMode(mode) {
   const switched = state.mode !== mode;
   state.mode = mode;
@@ -499,32 +561,27 @@ function setMode(mode) {
     "px-5 py-1.5 font-medium bg-white text-slate-600 hover:bg-slate-50 transition-colors";
   $("mode-compress").className = mode === "compress" ? on : off;
   $("mode-extract").className = mode === "extract" ? on : off + " border-l border-slate-300";
-  // 选项显隐: 压缩=策略/随机名, 解压=覆盖; 密码两模式共用
-  $("strategy-row").classList.toggle("hidden", mode !== "compress");
-  $("strategy-row").classList.toggle("flex", mode === "compress");
-  $("th-package").classList.toggle("hidden", mode !== "compress");
-  $("opt-random-wrap").classList.toggle("hidden", mode !== "compress");
-  $("opt-verify-wrap").classList.toggle("hidden", mode !== "compress");
-  $("opt-force-wrap").classList.toggle("hidden", mode !== "extract");
-  $("opt-force-wrap").classList.toggle("flex", mode === "extract");
-  $("opt-preset-wrap").classList.toggle("hidden", mode !== "compress");
-  $("opt-preset-wrap").classList.toggle("flex", mode === "compress");
-  $("opt-advanced-wrap").classList.toggle("hidden", mode !== "compress");
-  $("opt-advanced-wrap").classList.toggle("flex", mode === "compress");
-  if (switched) clearPlan();
-  if (switched && state.rows.length > 0) {
-    $("src").value = "";
-    clearTable();
-    setStatus("status.modeSwitched");
+  syncOptionVisibility();
+  if (switched) {
+    clearPlan();
+    // 扫描期间切模式: 作废当前扫描(旧 channel/await 结果按 scanSeq 丢弃), 清表清源
+    if (state.scanning) {
+      state.scanSeq++;
+      state.scanning = false;
+      $("src").value = "";
+      clearTable();
+      setStatus("status.modeSwitched");
+      syncActionButton();
+    } else if (state.rows.length > 0) {
+      $("src").value = "";
+      clearTable();
+      setStatus("status.modeSwitched");
+    }
   }
 }
 
-// —— 进度事件(扫描/压缩/解压共用一条 Channel 协议) ——
+// —— 进度事件(压缩/解压经 onProgress Channel; 扫描改用 onScan 流式事件) ——
 function onProgress(ev) {
-  if (ev.phase === "scanning") {
-    setStatus("status.scanning", { done: ev.done, total: ev.total, entry: ev.entry });
-    return;
-  }
   if (!state.run) return;
   state.run.done = ev.done;
   state.run.total = ev.total;
@@ -862,6 +919,8 @@ function mockPlan(indexes) {
 let planTimer = null;
 
 function invalidatePlan() {
+  // 智能打包关闭 = 逐条目压缩: 没有"方案"概念, 不进入 planning 态, 也不请求方案
+  if (!state.smartPackaging) return;
   state.planSeq++;
   state.plan = null;
   state.planError = null;
@@ -874,7 +933,9 @@ function invalidatePlan() {
 }
 
 function schedulePlan() {
-  if (state.mode !== "compress") return;
+  if (state.mode !== "compress" || !state.smartPackaging) return;
+  // 扫描尚未拿到全部大小时不计算方案(否则会拿 null 大小装箱)
+  if (state.scanning) return;
   invalidatePlan();
   if (planTimer) clearTimeout(planTimer);
   planTimer = setTimeout(() => {
@@ -967,7 +1028,7 @@ function packageBadgeClass(row) {
 }
 
 function planSummaryText() {
-  if (state.mode !== "compress") return "";
+  if (state.mode !== "compress" || !state.smartPackaging) return "";
   if (!state.rows.length) return t("plan.summary.idle");
   if (!selectedRowIndexes().length) return t("plan.summary.noSelection");
   if (state.planError) return t("plan.summary.error", { error: state.planError });
@@ -1005,10 +1066,15 @@ function renderPlanSummary() {
   el.className = "text-xs " +
     (state.planError ? "text-red-600" : state.planning ? "text-slate-400" : "text-slate-600");
   button.disabled =
-    state.mode !== "compress" || !state.plan || state.planning || !!state.planError;
+    state.mode !== "compress" ||
+    !state.smartPackaging ||
+    !state.plan ||
+    state.planning ||
+    !!state.planError;
 }
 
 async function refreshPlan() {
+  if (!state.smartPackaging || state.scanning) return;
   if (state.mode !== "compress" || !$("src").value || !state.rows.length) {
     clearPlan();
     return;
@@ -1253,28 +1319,69 @@ $("plan-list").addEventListener("click", (event) => {
   if (target) highlightRow(Number(target.dataset.rowIndex));
 });
 
-// —— 扫描: invoke("scan"), 结果渲染表格并缓存在外壳 ——
+// —— 扫描: invoke("scan"), onScan Channel 流式推送(rows 骨架 → 逐条 row 大小) ——
+// 扫描不锁 UI: 只锁确认钮(spinner + 扫描中…); 换源/切模式会自增 scanSeq 丢弃旧扫描。
+const SCAN_SIZE_SPINNER =
+  "inline-block h-3 w-3 animate-spin rounded-full border-2 border-slate-200 border-t-slate-400 align-middle";
+
+function onScanEvent(seq, ev) {
+  if (seq !== state.scanSeq || !state.scanning) return; // 过期/已结束的扫描事件
+  if (ev?.event === "rows") {
+    const items = Array.isArray(ev.items) ? ev.items : [];
+    renderTable(items); // 骨架行: size 为 null → 大小列 spinner; 默认勾选 pending 且未排除
+    setStatus("status.scanning", { done: 0, total: items.length, entry: "" });
+    return;
+  }
+  if (ev?.event === "row") {
+    const index = Number(ev.index);
+    const row = state.rows[index];
+    if (!row) return;
+    row.size = ev.size;
+    const cell = $("rows").querySelector(
+      `tr[data-row-index="${index}"] [data-cell="size"]`
+    );
+    if (cell) cell.textContent = fmtBytes(ev.size);
+    setStatus("status.scanning", {
+      done: index + 1,
+      total: state.rows.length,
+      entry: row.name,
+    });
+  }
+}
+
 async function doScan(path) {
   await settingsReady;
+  const seq = ++state.scanSeq;
+  if (planTimer) {
+    // 扫描开始: 取消上一轮待执行的方案计算(大小即将变化)
+    clearTimeout(planTimer);
+    planTimer = null;
+  }
+  state.scanning = true;
   clearTable();
-  setLocked(true);
   setStatus("status.scanningStart");
+  syncActionButton();
+  syncConfirm();
+  const scanPolicies = currentEnabledPolicies();
   try {
-    const scanPolicies = currentEnabledPolicies();
     if (!hasTauri()) {
       const items = mockScan(path);
+      if (seq !== state.scanSeq) return;
+      state.scanning = false;
       renderTable(items);
       setStatus("status.previewScan", { path, count: items.length });
       if (state.mode === "compress") state.scanFilters = scanPolicies;
       await refreshPlan();
       return;
     }
-    const args = { mode: state.mode, path, onProgress: makeChannel() };
+    const args = { mode: state.mode, path, onScan: makeScanChannel(seq) };
     if (state.mode === "compress") {
       args.filters = { enabledPolicies: scanPolicies };
       args.excludes = parseExcludes();
     }
     const res = await invoke("scan", args);
+    if (seq !== state.scanSeq) return; // 过期扫描(切模式 / 换源)结果丢弃
+    state.scanning = false;
     renderTable(res.items);
     if (state.mode === "compress") state.scanFilters = scanPolicies;
     setStatus("status.scanDone", {
@@ -1285,10 +1392,11 @@ async function doScan(path) {
     });
     await refreshPlan();
   } catch (e) {
-    clearPlan();
+    if (seq !== state.scanSeq) return; // 过期扫描的失败也不得改状态
+    state.scanning = false;
+    clearTable();
     setStatus("status.scanFailed", { error: String(e) });
-  } finally {
-    setLocked(false);
+    syncActionButton();
     syncConfirm();
   }
 }
@@ -1488,11 +1596,23 @@ function renderTable(items) {
 
     const td2 = document.createElement("td");
     td2.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
-    td2.textContent = fmtBytes(r.size);
+    td2.dataset.cell = "size";
+    if (r.size == null) {
+      // 扫描流式骨架: 大小未知, 先显示小 spinner(收到 row 事件后原地替换)
+      const spinner = document.createElement("span");
+      spinner.className = SCAN_SIZE_SPINNER;
+      spinner.setAttribute("aria-hidden", "true");
+      td2.appendChild(spinner);
+    } else {
+      td2.textContent = fmtBytes(r.size);
+    }
 
     const tdPkg = document.createElement("td");
     tdPkg.className = "py-2 pr-2 text-xs";
-    tdPkg.classList.toggle("hidden", state.mode !== "compress");
+    tdPkg.classList.toggle(
+      "hidden",
+      !(state.mode === "compress" && state.smartPackaging)
+    );
     const pkgBadge = document.createElement("span");
     pkgBadge.className =
       "inline-block rounded-full px-2 py-0.5 text-xs " + packageBadgeClass(r);
@@ -1537,10 +1657,16 @@ function syncConfirm() {
   const selectable = state.rows.filter((r) => r.status === "pending");
   const n = selectable.filter((r) => r.checked).length;
   const all = selectable.length > 0 && n === selectable.length;
+  // 只有开了智能打包才要求"方案就绪"(计算中/出错/无方案都禁用); 关闭时走逐条目压缩
   const needPlan =
     state.mode === "compress" &&
-    (!!state.planError || (!state.plan && !state.planning));
-  $("confirm").disabled = !!state.run ? false : n === 0 || needPlan;
+    state.smartPackaging &&
+    (!!state.planError || state.planning || !state.plan);
+  // 扫描期间只禁用确认钮(loading), 其余控件不受影响
+  $("confirm").disabled = state.run
+    ? false
+    : state.scanning || n === 0 || needPlan;
+  syncActionButton(); // 扫描中 spinner / 运行中取消 / 常规确认
   const allBox = $("check-all");
   allBox.checked = all;
   allBox.indeterminate = n > 0 && !all;
@@ -1563,12 +1689,13 @@ $("confirm").addEventListener("click", async () => {
     else mockCancel?.();
     return;
   }
+  if (state.scanning) return; // 扫描中确认钮本就是禁用+loading, 防御性兜底
   const sel = selectedRowIndexes();
   if (sel.length === 0) {
     setStatus("status.needSelection");
     return;
   }
-  if (state.mode === "compress" && (!state.plan || state.planning)) {
+  if (state.mode === "compress" && state.smartPackaging && (!state.plan || state.planning)) {
     // 用户刚改勾选/阈值就点确认: 等最新方案算完, 不拿旧方案开工
     if (planTimer) {
       clearTimeout(planTimer);
@@ -1582,7 +1709,7 @@ $("confirm").addEventListener("click", async () => {
     return;
   }
   const isCompress = state.mode === "compress";
-  if (isCompress && !state.plan) {
+  if (isCompress && state.smartPackaging && !state.plan) {
     setStatus("status.needPlan");
     return;
   }
@@ -1599,13 +1726,17 @@ $("confirm").addEventListener("click", async () => {
         filters: { enabledPolicies: currentEnabledPolicies() },
         excludes: parseExcludes(),
         verify: $("opt-verify").checked,
-        packaging: readPackaging(),
+        // 智能打包关闭 = 逐条目压缩: 不传打包策略
+        packaging: state.smartPackaging ? readPackaging() : null,
       }
     : {
         password: $("opt-password").value || null,
         force: $("opt-force").checked,
       };
-  const total = isCompress && state.plan ? state.plan.packages.length : sel.length;
+  const total =
+    isCompress && state.smartPackaging && state.plan
+      ? state.plan.packages.length
+      : sel.length;
   state.run = { sel, done: 0, total, failed: false, finished: false };
   setLocked(true);
   $("confirm").className = BTN_CANCEL;
@@ -1623,7 +1754,7 @@ $("confirm").addEventListener("click", async () => {
         dst: $("dst").value,
         entries: names,
         options,
-        planId: state.plan?.planId ?? null,
+        planId: state.smartPackaging ? state.plan?.planId ?? null : null,
         onProgress: makeChannel(),
       });
     } else {
@@ -1729,6 +1860,8 @@ for (const id of ["opt-format", "opt-level"]) {
 for (const id of ["opt-merge-below", "opt-split", "opt-bundle-max", "opt-max-entries"]) {
   $(id).addEventListener("input", schedulePlan);
 }
+// 智能打包开关: 关闭时隐藏策略行/打包列并清方案(逐条目压缩), 开启时恢复方案计算
+$("opt-smart").addEventListener("change", (e) => setSmartPackaging(e.target.checked));
 // 密码语义随格式: zip=ZipCrypto(兼容优先, 强度弱), 7z=AES-256
 function updatePwHint() {
   const hint = $("pw-hint");
@@ -1825,6 +1958,16 @@ function mockRun(names) {
               members: pkg.memberIndexes.map((idx) => state.rows[idx]?.name),
               inputBytes: pkg.inputBytes,
               entryCount: pkg.entryCount,
+            })),
+            warnings: [],
+          });
+        } else if (state.mode === "compress") {
+          // 智能打包关闭: 逐条目压缩, 结果按 entries 汇报
+          resolve({
+            cancelled: false,
+            entries: names.map((name) => ({
+              archive: `C:\\out\\${name}.zip`,
+              original: name,
             })),
             warnings: [],
           });

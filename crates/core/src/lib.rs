@@ -53,7 +53,7 @@ pub use packaging::{
     plan_packages,
 };
 pub use progress::{Phase, Progress};
-pub use scan::{Entry, EntryKind, ScanReport, scan_dir};
+pub use scan::{Entry, EntryKind, ScanReport, scan_dir, scan_dir_stream};
 
 #[cfg(test)]
 mod testutil;

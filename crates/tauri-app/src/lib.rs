@@ -1,6 +1,7 @@
 //! Tauri 外壳:把 `zip-tool-core` 的能力通过 `#[tauri::command]` 暴露给前端。
 //! 交互规格见 _docs/ui-backend.md, 命令面:
-//! - `scan`: 只扫描不执行, 结果缓存在外壳([`ScanContext`] 保鲜)
+//! - `scan`: 只扫描不执行, 顶层条目骨架与逐条大小经 [`ScanEvent`] 流式推送,
+//!   结果缓存在外壳([`ScanContext`] 保鲜); 扫描可取消, 新的 scan 会自动取消上一次
 //! - `plan_packages` / `compress` / `extract_archive`: 打包方案与按名单执行
 //! - `validate_dir`: 拖拽/选择路径校验(必须是已存在的文件夹, 不改变 core 预检职责)
 //! - `cancel_current`: 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续)
@@ -42,7 +43,7 @@ const EXPIRED: &str = "扫描结果已过期, 请重新选择源文件夹";
 /// 全局状态:当前任务取消旗标 + 任务互斥 + 扫描结果缓存
 #[derive(Default)]
 struct AppState {
-    /// 运行中任务(压缩/解压)的取消旗标; 任务结束清空
+    /// 运行中任务(扫描/压缩/解压)的取消旗标; 任务结束清空
     current: Mutex<Option<CancelFlag>>,
     /// 任务互斥(scan/compress/extract 互斥): Some(kind) = 忙
     busy: Mutex<Option<&'static str>>,
@@ -122,6 +123,44 @@ struct ScanResult {
     /// compress 子树级告警(状态栏汇总); extract 的告警走 items(warning 行)
     warnings: Vec<String>,
     total_bytes: u64,
+}
+
+/// scan 的流式事件(compress 模式): 先 `Rows` 给表格骨架, 再逐条 `Row` 给大小。
+/// UI 先渲染行(大小列 spinner, 确认按钮 loading), 收到 row 后填该行大小。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase", tag = "event")]
+enum ScanEvent {
+    /// 顶层条目已列出(排序完成), 目录大小待统计
+    Rows {
+        /// 扫描模式("compress"; 当前 extract 不流式)
+        mode: String,
+        items: Vec<ScanSkeletonItem>,
+    },
+    /// 单个顶层条目大小统计完成; index 对应 Rows.items 的下标
+    Row { index: usize, size: u64 },
+}
+
+/// 骨架行: 除 size 外的字段与最终 [`ScanItem`] 一致(大小列由 UI 显示 spinner)
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ScanSkeletonItem {
+    name: String,
+    kind: String,
+    status: String,
+    original: Option<String>,
+    detail: Option<String>,
+    excluded: Option<String>,
+}
+
+fn scan_skeleton_item(entry: &Entry) -> ScanSkeletonItem {
+    ScanSkeletonItem {
+        name: entry.name.clone(),
+        kind: kind_str(entry.kind).into(),
+        status: "pending".into(),
+        original: None,
+        detail: None,
+        excluded: entry.exclude.as_ref().map(excluded_text),
+    }
 }
 
 #[derive(Deserialize)]
@@ -283,12 +322,14 @@ fn release_busy(busy: &Mutex<Option<&'static str>>) {
     }
 }
 
-/// 任务收尾: 释放忙闲标志并清空取消旗标(成功/失败/取消都要走)
+/// 任务收尾: 清空取消旗标并释放忙闲标志(成功/失败/取消都要走)。
+/// 顺序固定为「先清旗标、后放忙锁」: 新 scan 在忙锁释放后才会登记自己的旗标,
+/// 倒序会存在旧任务清掉新任务旗标的竞态窗口。
 fn finish_job(state: &AppState) {
-    release_busy(&state.busy);
     if let Ok(mut c) = state.current.lock() {
         *c = None;
     }
+    release_busy(&state.busy);
 }
 
 /// 空串(或纯空白)按 None 处理
@@ -653,15 +694,17 @@ fn extract_scan_dto(s: &ExtractScan) -> ScanResult {
     }
 }
 
-/// 只扫描不执行(3.1): 选源后渲染表格。compress 递归统计大小(Scanning 进度),
-/// extract 顶层分组(量小, 无进度)。结果缓存在外壳, 供确认命令筛选使用。
+/// 只扫描不执行(3.1): 选源后渲染表格。compress 分两阶段流式上报 —— 先给顶层
+/// 条目骨架([`ScanEvent::Rows`]), 再逐条给递归大小([`ScanEvent::Row`]) —— 前端据此
+/// 先渲染行、只锁确认按钮; extract 顶层分组(量小, 不流式)。
+/// 扫描结果缓存在外壳, 供确认命令筛选使用; 扫描期间允许改选源(新 scan 取消旧 scan)。
 #[tauri::command]
 async fn scan(
     mode: String,
     path: String,
     filters: Option<settings::FilterSettingsDto>,
     excludes: Option<Vec<String>>,
-    on_progress: Channel<ProgressEvent>,
+    on_scan: Channel<ScanEvent>,
     state: State<'_, AppState>,
 ) -> Result<ScanResult, String> {
     let mode: &'static str = match mode.as_str() {
@@ -675,29 +718,54 @@ async fn scan(
         .map_err(|e| format!("排除模式无效: {e}"))?;
     let p = PathBuf::from(&path);
     let src_for_ctx = p.clone();
-    acquire_busy(&state.busy, "scan")?;
 
+    // UI 扫描期间不锁死: 用户可能已改选源/切模式。连点扫描时后到的 scan 胜出,
+    // 先到的 scan 被取消并快速释放忙锁。
+    acquire_scan_slot(&state).await?;
+
+    let flag = CancelFlag::new();
+    if let Ok(mut current) = state.current.lock() {
+        *current = Some(flag.clone());
+    }
     // rules 既要进 move 闭包又要进缓存, 先克隆一份给闭包
     let rules_for_scan = rules.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || match mode {
-        "compress" => zip_tool_core::scan_dir(&p, &rules_for_scan, &|prog| {
-            let _ = on_progress.send(ProgressEvent::from(prog));
+    let result =
+        tauri::async_runtime::spawn_blocking(move || -> zip_tool_core::Result<ScanData> {
+            match mode {
+                "compress" => {
+                    let report = zip_tool_core::scan_dir_stream(
+                        &p,
+                        &rules_for_scan,
+                        &flag,
+                        &|entries: &[Entry]| {
+                            let _ = on_scan.send(ScanEvent::Rows {
+                                mode: "compress".into(),
+                                items: entries.iter().map(scan_skeleton_item).collect(),
+                            });
+                        },
+                        &|index, entry| {
+                            let _ = on_scan.send(ScanEvent::Row {
+                                index,
+                                size: entry.size,
+                            });
+                        },
+                    )?;
+                    Ok(ScanData::Compress(report))
+                }
+                _ => zip_tool_core::scan_groups(&p).map(ScanData::Extract),
+            }
         })
-        .map(ScanData::Compress),
-        _ => zip_tool_core::scan_groups(&p).map(ScanData::Extract),
-    })
-    .await
-    .map_err(|e| e.to_string());
+        .await;
 
     let data = match result {
-        Ok(Ok(d)) => d,
+        Ok(Ok(data)) => data,
         Ok(Err(e)) => {
-            release_busy(&state.busy);
-            return Err(e.to_string());
+            finish_job(&state);
+            return Err(scan_error_text(e));
         }
         Err(e) => {
-            release_busy(&state.busy);
-            return Err(e);
+            finish_job(&state);
+            return Err(e.to_string());
         }
     };
 
@@ -707,15 +775,62 @@ async fn scan(
     };
     // 扫描成功才覆盖缓存(失败保留旧值, 但确认命令会因 src/mode 校验拒绝误用)
     let generation = state.scan_generation.fetch_add(1, Ordering::Relaxed) + 1;
-    *state.scan.lock().map_err(|_| POISONED.to_string())? = Some(ScanContext {
-        mode,
-        src: src_for_ctx,
-        rules,
-        generation,
-        data,
-    });
-    release_busy(&state.busy);
+    let poisoned = match state.scan.lock() {
+        Ok(mut guard) => {
+            *guard = Some(ScanContext {
+                mode,
+                src: src_for_ctx,
+                rules,
+                generation,
+                data,
+            });
+            false
+        }
+        Err(_) => true,
+    };
+    finish_job(&state);
+    if poisoned {
+        return Err(POISONED.into());
+    }
     Ok(dto)
+}
+
+/// 扫描取消等待上限: 扫描取消点最迟在若干条目后到达, 正常远小于此值
+const SCAN_CANCEL_WAIT: Duration = Duration::from_secs(5);
+
+/// 抢占 scan 忙锁。已有 scan 在跑(用户在扫描期间改选源/连点)时: 取消它、等它释放忙锁
+/// 后由后到的 scan 胜出; 压缩/解压运行中则保持原互斥错误(不做抢占)。
+async fn acquire_scan_slot(state: &AppState) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + SCAN_CANCEL_WAIT;
+    loop {
+        match acquire_busy(&state.busy, "scan") {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let scanning = state
+                    .busy
+                    .lock()
+                    .map(|busy| *busy == Some("scan"))
+                    .unwrap_or(false);
+                if !scanning || std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+                if let Ok(current) = state.current.lock()
+                    && let Some(flag) = current.as_ref()
+                {
+                    flag.cancel();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+/// scan 错误文案: 取消是正常路径(新扫描取代旧扫描 / 退出), 给前端可读中文
+fn scan_error_text(e: zip_tool_core::CoreError) -> String {
+    match e {
+        zip_tool_core::CoreError::Cancelled => "扫描已取消".into(),
+        other => other.to_string(),
+    }
 }
 
 /// 计算可审核的打包方案(纯内存, 不读盘/不压缩/不占忙锁)。
@@ -1048,7 +1163,7 @@ pub fn run() {
         .run(|app, event| {
             // 窗口全部关闭(或 app.exit)时: 取消在跑的任务 —— core 会 kill 在跑的
             // 后端进程并清理半成品 —— 等其收尾后再退出, 避免孤儿进程占用压缩包。
-            // scan 在跑时 current 为 None(扫描无外部进程, 随进程退出自然终止)。
+            // 扫描也在 current 里登记取消旗标: 取消后扫描在下一个检查点提前返回并释放忙锁。
             if let tauri::RunEvent::ExitRequested { .. } = event
                 && let Some(state) = app.try_state::<AppState>()
             {
@@ -1118,6 +1233,96 @@ mod tests {
         assert_eq!(e.phase, "compressing");
         assert_eq!(e.done_bytes, 30);
         assert_eq!(e.total_bytes, 100);
+    }
+
+    #[test]
+    fn scan_skeleton_item_maps_fields_and_excluded_text() {
+        let mut dir_entry = entry("Novel", 0, EntryKind::Dir);
+        dir_entry.exclude = Some(ExcludeReason::Pattern("*.log".into()));
+        let skeleton = scan_skeleton_item(&dir_entry);
+        assert_eq!(skeleton.name, "Novel");
+        assert_eq!(skeleton.kind, "dir");
+        assert_eq!(skeleton.status, "pending", "骨架行默认待处理");
+        assert_eq!(skeleton.excluded.as_deref(), Some("匹配排除模式: *.log"));
+        assert!(skeleton.original.is_none() && skeleton.detail.is_none());
+
+        let file_entry = entry("a.txt", 7, EntryKind::File);
+        let skeleton = scan_skeleton_item(&file_entry);
+        assert_eq!(skeleton.kind, "file");
+        assert!(skeleton.excluded.is_none());
+    }
+
+    #[test]
+    fn scan_event_serializes_tagged_protocol_shape() {
+        let rows = ScanEvent::Rows {
+            mode: "compress".into(),
+            items: vec![scan_skeleton_item(&entry("A", 1, EntryKind::Dir))],
+        };
+        let value = serde_json::to_value(&rows).unwrap();
+        assert_eq!(value["event"], "rows");
+        assert_eq!(value["mode"], "compress");
+        assert_eq!(value["items"][0]["name"], "A");
+        assert!(
+            value["items"][0].get("size").is_none(),
+            "骨架行不带 size(大小列由 UI 显示 spinner)"
+        );
+
+        let row = ScanEvent::Row { index: 0, size: 5 };
+        let value = serde_json::to_value(&row).unwrap();
+        assert_eq!(value["event"], "row");
+        assert_eq!(value["index"], 0);
+        assert_eq!(value["size"], 5);
+    }
+
+    #[test]
+    fn cancelled_scan_maps_to_readable_text() {
+        assert_eq!(
+            scan_error_text(zip_tool_core::CoreError::Cancelled),
+            "扫描已取消"
+        );
+        let io = scan_error_text(zip_tool_core::CoreError::Io(std::io::Error::other("boom")));
+        assert!(io.contains("boom"));
+    }
+
+    #[test]
+    fn acquire_scan_slot_rejects_when_other_job_kind_runs() {
+        let state = AppState::default();
+        *state.busy.lock().unwrap() = Some("compress");
+        let err = tauri::async_runtime::block_on(acquire_scan_slot(&state)).unwrap_err();
+        assert_eq!(err, "已有任务在运行");
+        assert_eq!(
+            *state.busy.lock().unwrap(),
+            Some("compress"),
+            "不抢占压缩/解压任务"
+        );
+    }
+
+    #[test]
+    fn acquire_scan_slot_cancels_previous_scan_and_takes_over() {
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::default());
+        *state.busy.lock().unwrap() = Some("scan");
+        let old_flag = CancelFlag::new();
+        *state.current.lock().unwrap() = Some(old_flag.clone());
+
+        // 模拟上一次扫描: 观察到取消后按正常收尾释放忙锁
+        let worker = state.clone();
+        let handle = std::thread::spawn(move || {
+            while !old_flag.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            finish_job(&worker);
+        });
+
+        tauri::async_runtime::block_on(acquire_scan_slot(&state)).unwrap();
+        handle.join().unwrap();
+        assert_eq!(
+            *state.busy.lock().unwrap(),
+            Some("scan"),
+            "后到的扫描应取消旧的并占住忙锁"
+        );
+        assert!(state.current.lock().unwrap().is_none(), "旧旗标已清空");
     }
 
     #[test]

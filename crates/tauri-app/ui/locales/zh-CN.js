@@ -7,6 +7,7 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
       confirm: "确认",
       cancel: "取消",
       language: "语言",
+      scanning: "扫描中…",
     },
     lang: {
       system: "跟随系统",
@@ -48,6 +49,9 @@ window.__ZIPTOOL_LOCALES__["zh-CN"] = {
       exclude: "排除",
       excludePlaceholder: "逗号分隔, 如 Thumbs.db, *.tmp",
       force: "覆盖已有文件",
+      smartPackaging: "智能打包",
+      smartPackagingTitle:
+        "勾选后按打包策略自动合并小文件并分包; 不勾选则每个顶层条目单独压缩",
       pwHintZip: "zip 格式: ZipCrypto 加密(兼容性最好, 强度弱)",
       pwHint7z: "7z 格式: AES-256 加密",
     },

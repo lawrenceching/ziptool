@@ -197,6 +197,14 @@ async function pickSource(h, path = "C:\\demo\\data") {
   assert.equal(h.doc.getElementById("src").value, path);
 }
 
+/** 勾选「智能打包」并等 180ms 防抖的方案计算完成(默认关闭) */
+async function enableSmart(h) {
+  h.doc.getElementById("opt-smart").click();
+  await sleep(260);
+  await h.flush();
+  await h.flush();
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** 通过语言菜单切换语言并等 changeLanguage/重渲染完成 */
@@ -241,12 +249,13 @@ test("契约: 有 Tauri 时扫描走真实表面, scan 命令参数与 Channel �
   assert.equal(dlg.args.options.directory, true);
   assert.equal(dlg.args.options.multiple, false);
 
-  // scan 契约: 命令名 + mode/path + onProgress 是真实 core.Channel 且序列化为 __CHANNEL__:<id>
+  // scan 契约: 命令名 + mode/path + onScan 是真实 core.Channel 且序列化为 __CHANNEL__:<id>
   const scan = h.calls.find((c) => c.cmd === "scan");
   assert.ok(scan, "应调用 scan 命令");
   assert.equal(scan.args.mode, "compress");
   assert.equal(scan.args.path, "C:\\demo\\data");
-  assert.ok(scan.args.onProgress instanceof coreApi.Channel, "onProgress 必须是 core.Channel 实例");
+  assert.ok(scan.args.onScan instanceof coreApi.Channel, "onScan 必须是 core.Channel 实例");
+  assert.ok(!("onProgress" in scan.args), "scan 不再有 onProgress 参数");
   assert.match(JSON.stringify(scan.args), /__CHANNEL__:\d+/);
 
   // 渲染契约: 表格 3 行, 状态栏带总数, 版本号来自真实 app 表面
@@ -278,11 +287,14 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
   });
 
   await pickSource(h);
+  await enableSmart(h); // 智能打包 = 方案路径
   h.doc.getElementById("dst").click();
   await h.flush();
   await h.flush();
-  // 取消第二行勾选(media)
+  // 取消第二行勾选(media) → 勾选变化会重算方案(确认在方案就绪前禁用)
   h.rows()[1].querySelector("input").click();
+  await sleep(260);
+  await h.flush();
   // 选项: 分包 2g + 密码(壳层负责解析, UI 只透传非空值)
   h.doc.getElementById("opt-split").value = " 2g ";
   h.doc.getElementById("opt-password").value = "pw";
@@ -457,6 +469,331 @@ test("行为: 模式切换作废旧扫描(源清空、表格清空、提示重�
   assert.ok(h.doc.getElementById("msg").textContent.includes("模式已切换"));
 });
 
+// ———— 智能打包开关 ————
+test("智能打包: 默认关闭 — 策略/打包列隐藏, 不算方案, compress 传 null 打包参数", async () => {
+  let planCalls = 0;
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open")
+      return args.options.title?.includes("目标") ? "C:\\out" : "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "plan_packages") {
+      planCalls += 1;
+      return defaultPlan(args);
+    }
+    if (cmd === "compress") return { cancelled: false, entries: [], warnings: [] };
+    return null;
+  });
+  const el = (id) => h.doc.getElementById(id);
+  assert.equal(el("opt-smart").checked, false, "默认不勾选");
+  assert.ok(el("strategy-row").classList.contains("hidden"), "策略行隐藏");
+  assert.ok(el("th-package").classList.contains("hidden"), "打包列表头隐藏");
+
+  // 阈值改动也不得触发方案计算(未勾选时没有方案概念)
+  const merge = el("opt-merge-below");
+  merge.value = "50m";
+  merge.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await sleep(260);
+  assert.equal(planCalls, 0, "未勾选时阈值变化不得调用 plan_packages");
+
+  await pickSource(h);
+  assert.equal(planCalls, 0, "未勾选时扫描后不得调用 plan_packages");
+  assert.equal(h.rows().length, 3);
+  assert.ok(
+    h.rows().every((tr) => tr.children[3].classList.contains("hidden")),
+    "行内打包列隐藏"
+  );
+  assert.equal(el("plan-summary").textContent, "");
+  assert.ok(el("plan-open").disabled);
+
+  el("dst").click();
+  await h.flush();
+  await h.flush();
+  el("confirm").click();
+  await h.flush();
+  await h.flush();
+  const comp = h.calls.find((c) => c.cmd === "compress");
+  assert.ok(comp, "应调用 compress");
+  assert.equal(comp.args.options.packaging, null, "未勾选时 packaging=null");
+  assert.equal(comp.args.planId, null, "未勾选时 planId=null");
+  assert.equal(comp.args.options.splitSize, null, "仍走逐条目压缩路径");
+  jsonEq(comp.args.entries, ["Novel", "media", "photo.jpg"]);
+});
+
+test("智能打包: 勾选后恢复方案(摘要/抽屉/确认校验), 取消勾选清方案", async () => {
+  let planCalls = 0;
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "plan_packages") {
+      planCalls += 1;
+      return defaultPlan(args);
+    }
+    return null;
+  });
+  const el = (id) => h.doc.getElementById(id);
+  await pickSource(h);
+  assert.equal(planCalls, 0, "默认关闭时扫描后不算方案");
+
+  // 勾选: 立即显示策略行/打包列, 方案计算中禁用确认
+  el("opt-smart").click();
+  assert.ok(!el("strategy-row").classList.contains("hidden"), "策略行显示");
+  assert.ok(!el("th-package").classList.contains("hidden"), "打包列显示");
+  assert.equal(el("confirm").disabled, true, "方案计算中确认禁用");
+  await sleep(260);
+  await h.flush();
+  assert.equal(planCalls, 1, "勾选后计算一次方案");
+  assert.equal(el("confirm").disabled, false, "方案就绪后可确认");
+  assert.match(el("plan-summary").textContent, /预计/);
+  assert.equal(el("plan-open").disabled, false);
+  assert.deepEqual(
+    h.rows().map((tr) => tr.children[3].textContent),
+    ["分包", "直接", "直接"]
+  );
+
+  el("plan-open").click();
+  assert.ok(!el("plan-backdrop").classList.contains("hidden"), "可打开方案抽屉");
+  el("plan-close").click();
+  assert.ok(el("plan-backdrop").classList.contains("hidden"));
+
+  // 再取消勾选: 清方案/隐藏策略行与打包列, 不再请求方案, 确认恢复可用
+  el("opt-smart").click();
+  await sleep(260);
+  assert.equal(planCalls, 1, "取消勾选不得再调用 plan_packages");
+  assert.ok(el("strategy-row").classList.contains("hidden"));
+  assert.ok(el("th-package").classList.contains("hidden"));
+  assert.ok(h.rows().every((tr) => tr.children[3].classList.contains("hidden")));
+  assert.equal(el("plan-summary").textContent, "");
+  assert.equal(el("confirm").disabled, false, "无方案也可确认");
+});
+
+// ———— 扫描不锁 UI: 只锁确认钮 + 流式表格 ————
+test("扫描中: 只锁确认钮(spinner/aria-busy/文案), 骨架行 + 大小列 spinner, row 事件填大小", async () => {
+  const ITEMS = [
+    { name: "Novel", kind: "dir", status: "pending", original: null, detail: null, excluded: null },
+    { name: "media", kind: "dir", status: "pending", original: null, detail: null, excluded: null },
+    { name: "photo.jpg", kind: "file", status: "pending", original: null, detail: null, excluded: null },
+  ];
+  let finishScan;
+  let scanArgs;
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") {
+      scanArgs = args;
+      sendProgress(callbacks, args.onScan, 0, { event: "rows", mode: "compress", items: ITEMS });
+      return new Promise((resolve) => (finishScan = resolve));
+    }
+    return null;
+  });
+  await h.flush();
+  await h.flush();
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+
+  const confirm = h.doc.getElementById("confirm");
+  assert.ok(confirm.disabled, "扫描中确认钮禁用");
+  assert.equal(confirm.getAttribute("aria-busy"), "true");
+  assert.ok(confirm.querySelector("span.animate-spin"), "确认钮内 spinner");
+  assert.ok(confirm.textContent.includes("扫描中…"), confirm.textContent);
+  // 其它控件全部可用(只锁确认钮)
+  assert.equal(h.doc.getElementById("src").disabled, false);
+  assert.equal(h.doc.getElementById("dst").disabled, false);
+  assert.equal(h.doc.getElementById("mode-extract").disabled, false);
+  assert.equal(h.doc.getElementById("opt-smart").disabled, false);
+  assert.equal(h.doc.getElementById("opt-password").disabled, false);
+  assert.equal(h.doc.getElementById("menu-settings-open").disabled, false);
+
+  // rows 事件: 骨架表格 + 大小列 spinner + 默认勾选 pending 行
+  assert.equal(h.rows().length, 3);
+  assert.ok(
+    h.rows()[0].querySelector('[data-cell="size"] span.animate-spin'),
+    "大小列 spinner"
+  );
+  assert.ok(h.rows().every((tr) => tr.querySelector("input").checked));
+  assert.ok(h.doc.getElementById("msg").textContent.includes("扫描中 0/3"));
+  // 扫描期间允许勾选行(最终渲染按行下标保留)
+  h.rows()[1].querySelector("input").click();
+  assert.equal(h.rows()[1].querySelector("input").checked, false);
+  assert.ok(confirm.disabled);
+
+  // row 事件: 原地替换大小(按当前语言格式化) + 进度推进
+  sendProgress(h.callbacks, scanArgs.onScan, 1, { event: "row", index: 0, size: 2_600_000_000 });
+  assert.equal(h.rows()[0].children[2].textContent, "2.42 GB");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("扫描中 1/3 Novel"));
+  sendProgress(h.callbacks, scanArgs.onScan, 2, { event: "row", index: 2, size: 4096 });
+  assert.equal(h.rows()[2].children[2].textContent, "4.0 KB");
+  assert.ok(confirm.disabled, "大小填完也仍在扫描中");
+
+  finishScan(SCAN_COMPRESS);
+  for (let i = 0; i < 4; i += 1) await h.flush();
+  assert.equal(confirm.textContent, "确认");
+  assert.equal(confirm.hasAttribute("aria-busy"), false);
+  assert.equal(confirm.disabled, false, "扫描结束后恢复确认");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("3 个条目"));
+  assert.equal(h.rows()[1].querySelector("input").checked, false, "扫描期间的勾选按行下标保留");
+});
+
+test("扫描流式: 重新选择源文件夹 → 旧扫描结果/事件丢弃, 新扫描生效", async () => {
+  const OLD_ITEMS = [
+    { name: "old", kind: "file", status: "pending", original: null, detail: null, excluded: null },
+  ];
+  const scans = [];
+  const pending = [];
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") {
+      scans.push(args);
+      if (scans.length === 1) {
+        sendProgress(callbacks, args.onScan, 0, { event: "rows", mode: "compress", items: OLD_ITEMS });
+      }
+      return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+    }
+    return null;
+  });
+
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(h.rows().length, 1, "第一轮扫描骨架");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("扫描中 0/1"));
+  const confirm = h.doc.getElementById("confirm");
+  assert.equal(confirm.getAttribute("aria-busy"), "true");
+
+  // 扫描中再选源 → 壳层自动取消旧扫描, 前端直接发起新扫描
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(scans.length, 2, "应发起第二次 scan");
+  assert.equal(h.rows().length, 0, "新扫描清空旧骨架");
+  assert.ok(confirm.disabled);
+
+  // 旧扫描 reject(被壳层取消)不得改状态
+  pending[0].reject("cancelled by shell");
+  await h.flush();
+  await h.flush();
+  assert.equal(h.rows().length, 0, "旧扫描失败不得回填/清空新扫描");
+  assert.ok(!h.doc.getElementById("msg").textContent.includes("扫描失败"));
+  assert.ok(confirm.disabled, "仍处于新扫描中");
+
+  // 旧扫描晚到的 rows 事件也按 scanSeq 丢弃
+  sendProgress(h.callbacks, scans[0].onScan, 1, {
+    event: "rows",
+    mode: "compress",
+    items: OLD_ITEMS,
+  });
+  assert.equal(h.rows().length, 0, "旧 channel 事件不得渲染");
+
+  pending[1].resolve(SCAN_COMPRESS);
+  for (let i = 0; i < 4; i += 1) await h.flush();
+  assert.equal(h.rows().length, 3, "新扫描结果生效");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("3 个条目"));
+  assert.equal(confirm.textContent, "确认");
+});
+
+test("扫描中切换模式: 作废当前扫描并恢复确认钮", async () => {
+  const ITEMS = [
+    { name: "Novel", kind: "dir", status: "pending", original: null, detail: null, excluded: null },
+    { name: "media", kind: "dir", status: "pending", original: null, detail: null, excluded: null },
+  ];
+  let finishScan;
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") {
+      sendProgress(callbacks, args.onScan, 0, { event: "rows", mode: "compress", items: ITEMS });
+      return new Promise((resolve) => (finishScan = resolve));
+    }
+    return null;
+  });
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(h.rows().length, 2);
+  const confirm = h.doc.getElementById("confirm");
+  assert.equal(confirm.getAttribute("aria-busy"), "true");
+
+  h.doc.getElementById("mode-extract").click();
+  await h.flush();
+  assert.equal(h.doc.getElementById("src").value, "");
+  assert.equal(h.rows().length, 0);
+  assert.ok(h.doc.getElementById("msg").textContent.includes("模式已切换"));
+  assert.equal(confirm.textContent, "确认", "确认钮恢复常规文案");
+  assert.equal(confirm.hasAttribute("aria-busy"), false);
+  assert.equal(confirm.disabled, true, "无勾选行");
+
+  finishScan(SCAN_COMPRESS);
+  for (let i = 0; i < 4; i += 1) await h.flush();
+  assert.equal(h.rows().length, 0, "旧扫描结果不得回填");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("模式已切换"), "旧扫描不得改状态");
+});
+
+test("扫描失败: 清表、恢复确认钮、状态栏报错, 不锁 UI", async () => {
+  let rejectScan;
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return new Promise((_resolve, reject) => (rejectScan = reject));
+    return null;
+  });
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  const confirm = h.doc.getElementById("confirm");
+  assert.equal(confirm.getAttribute("aria-busy"), "true");
+
+  rejectScan("permission denied");
+  for (let i = 0; i < 4; i += 1) await h.flush();
+  assert.equal(h.rows().length, 0, "失败后清空表格");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("扫描失败"));
+  assert.equal(confirm.textContent, "确认");
+  assert.equal(confirm.hasAttribute("aria-busy"), false);
+  assert.equal(h.doc.getElementById("src").disabled, false, "扫描失败也不锁 UI");
+  assert.equal(h.doc.getElementById("mode-extract").disabled, false);
+  assert.equal(h.doc.getElementById("menu-settings-open").disabled, false);
+});
+
+test("扫描中: 勾选行不会用未完成大小算方案, 扫描结束后再算", async () => {
+  let planCalls = 0;
+  let finishScan;
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "plan_packages") {
+      planCalls += 1;
+      return defaultPlan(args);
+    }
+    if (cmd === "scan") {
+      sendProgress(callbacks, args.onScan, 0, {
+        event: "rows",
+        mode: "compress",
+        items: [
+          { name: "Novel", kind: "dir", status: "pending", original: null, detail: null, excluded: null },
+          { name: "media", kind: "dir", status: "pending", original: null, detail: null, excluded: null },
+          { name: "photo.jpg", kind: "file", status: "pending", original: null, detail: null, excluded: null },
+        ],
+      });
+      return new Promise((resolve) => (finishScan = resolve));
+    }
+    return null;
+  });
+  h.doc.getElementById("opt-smart").click(); // 扫描前开启智能打包
+  await sleep(260);
+  await h.flush();
+  h.doc.getElementById("src").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(planCalls, 0, "扫描中不算方案");
+
+  h.rows()[1].querySelector("input").click(); // 扫描中改勾选
+  await sleep(260);
+  await h.flush();
+  assert.equal(planCalls, 0, "扫描中勾选变化不得调用 plan_packages");
+
+  finishScan(SCAN_COMPRESS);
+  for (let i = 0; i < 5; i += 1) await h.flush();
+  assert.equal(planCalls, 1, "扫描结束后算一次方案");
+  assert.equal(h.doc.getElementById("confirm").disabled, false);
+});
+
 test("浏览器预览(无 Tauri): mock 扫描与 mock 运行仍可用", async () => {
   const h = makeHarness(false, () => {
     throw new Error("无 Tauri 环境不应触碰 IPC");
@@ -490,7 +827,12 @@ test("行为: 首次打开(未点过模式)— 压缩模式控件初始可见, �
   const h = makeHarness(false, () => null);
   assert.ok(!h.doc.getElementById("opt-preset-wrap").classList.contains("hidden"), "「模式」预设开关初始可见");
   assert.ok(!h.doc.getElementById("opt-advanced-wrap").classList.contains("hidden"), "「高级」checkbox 初始可见");
-  assert.ok(h.doc.getElementById("strategy-row").classList.contains("hidden") === false);
+  // 智能打包默认关闭: 策略行/打包列初始隐藏, 开关本身在压缩模式常显
+  const smart = h.doc.getElementById("opt-smart");
+  assert.ok(!smart.checked, "智能打包默认不勾选");
+  assert.ok(!h.doc.getElementById("opt-smart-wrap").classList.contains("hidden"), "智能打包开关压缩模式可见");
+  assert.ok(h.doc.getElementById("strategy-row").classList.contains("hidden"), "策略行默认隐藏");
+  assert.ok(h.doc.getElementById("th-package").classList.contains("hidden"), "打包列表头默认隐藏");
   assert.ok(h.doc.getElementById("opt-force-wrap").classList.contains("hidden"), "解压专属「覆盖」初始隐藏");
   assert.ok(h.doc.getElementById("opt-format-wrap").classList.contains("hidden"), "高级子项仍等勾选展开");
 });
@@ -539,6 +881,7 @@ test("契约: 平衡预设的参数透传到 compress 调用", async () => {
     return null;
   });
   await pickSource(h);
+  await enableSmart(h); // 打包参数只在智能打包开启时透传
   h.doc.getElementById("dst").click();
   await h.flush();
   await h.flush();
@@ -548,6 +891,7 @@ test("契约: 平衡预设的参数透传到 compress 调用", async () => {
   await h.flush();
   const comp = h.calls.find((c) => c.cmd === "compress");
   assert.ok(comp, "应调用 compress");
+  assert.equal(comp.args.planId, "test-plan");
   jsonEq(comp.args.options, {
     splitSize: null,
     password: null,
@@ -1004,7 +1348,10 @@ test("契约: 扫描后自动算方案; 阈值改动只重算方案, 不重扫",
     return null;
   });
 
+  // 智能打包默认关闭 → 先勾选, 扫描完成后才会自动算方案
+  h.doc.getElementById("opt-smart").click();
   await pickSource(h);
+  await h.flush();
   assert.equal(planCalls, 1, "扫描完成后应自动算一次方案");
   assert.match(h.doc.getElementById("plan-summary").textContent, /预计/);
   assert.equal(h.doc.getElementById("plan-open").disabled, false);
@@ -1070,6 +1417,7 @@ test("行为: 摘要/打包列/方案抽屉展示只读方案", async () => {
     return null;
   });
 
+  h.doc.getElementById("opt-smart").click(); // 智能打包: 展示策略/打包列/抽屉
   await pickSource(h);
   assert.match(h.doc.getElementById("plan-summary").textContent, /2 个逻辑包/);
   assert.deepEqual(
@@ -1126,6 +1474,7 @@ test("行为: 条目超限 warning 显示在摘要/行/抽屉", async () => {
     return null;
   });
 
+  h.doc.getElementById("opt-smart").click(); // 智能打包: 方案提醒需展示在摘要/行/抽屉
   await pickSource(h);
   assert.match(h.doc.getElementById("plan-summary").textContent, /1 条提醒/);
   assert.deepEqual(
@@ -1184,6 +1533,7 @@ test("行为: 包级进度失败时, 合并包所有成员一起标失败", asyn
   });
 
   await pickSource(h);
+  await enableSmart(h); // 包级进度按方案映射
   h.doc.getElementById("dst").click();
   await h.flush();
   await h.flush();
@@ -1428,7 +1778,7 @@ test("菜单栏: macOS 显示 ⌘ 快捷键并响应 Cmd+Q / Cmd+S", async () =>
   );
 });
 
-test("菜单栏: 扫描期间「设置…」禁用, 结束后恢复", async () => {
+test("菜单栏: 扫描期间设置可用(不锁 UI), 结束后仍可用", async () => {
   let finishScan;
   const h = makeHarness(true, ({ cmd }) => {
     if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
@@ -1437,23 +1787,30 @@ test("菜单栏: 扫描期间「设置…」禁用, 结束后恢复", async () =
     return null;
   });
   await h.flush();
+  await h.flush();
   assert.ok(!h.doc.getElementById("menu-settings-open").disabled, "设置加载完成后启用");
   h.doc.getElementById("src").click();
   await h.flush();
   await h.flush();
-  assert.ok(h.doc.getElementById("menu-settings-open").disabled, "扫描期间禁用");
+  assert.ok(!h.doc.getElementById("menu-settings-open").disabled, "扫描期间设置可用");
 
+  // 扫描期间可以从菜单进入设置页(其它控件都不锁)
   h.doc.getElementById("menu-settings-trigger").click();
-  h.doc.getElementById("menu-settings-open").click(); // disabled: 不触发动作
+  h.doc.getElementById("menu-settings-open").click();
+  await h.flush();
   await h.flush();
   assert.ok(
-    h.doc.getElementById("view-settings").classList.contains("hidden"),
-    "扫描中「设置…」不应打开设置页"
+    !h.doc.getElementById("view-settings").classList.contains("hidden"),
+    "扫描期间「设置…」应能打开设置页"
   );
+  h.doc.getElementById("settings-back").click();
+  await h.flush();
+  await h.flush();
 
   finishScan(SCAN_COMPRESS);
   for (let i = 0; i < 5; i += 1) await h.flush();
-  assert.ok(!h.doc.getElementById("menu-settings-open").disabled, "扫描结束后恢复启用");
+  assert.ok(!h.doc.getElementById("menu-settings-open").disabled, "扫描结束后仍启用");
+  assert.ok(h.doc.getElementById("msg").textContent.includes("3 个条目"));
 });
 
 test("菜单栏: 报告问题失败时状态栏提示", async () => {

@@ -1,15 +1,21 @@
 //! Step 1 扫描:列出 input 顶层条目(按名字排序)并递归统计字节大小。
-//! 大小只用于进度加权与预检, 允许有误差; 扫描进度经回调上报, 不支持取消。
+//! 大小只用于进度加权与预检, 允许有误差; 扫描进度经回调上报。
+//! 流式形态([`scan_dir_stream`]): 顶层条目骨架先回调(UI 可先渲染行), 统计出大小后
+//! 逐条回调; 扫描可经 [`CancelFlag`] 在条目/目录边界取消(返回 [`CoreError::Cancelled`])。
 
 use std::fs;
 use std::path::Path;
 
+use crate::CancelFlag;
 use crate::exclude::{
     ExcludeReason, ExcludeRules, ExcludedEntry, effective_patterns, matches_patterns,
     validate_patterns,
 };
 use crate::progress::{Phase, Progress};
 use crate::{CoreError, Result};
+
+/// 目录树内每处理 N 个条目检查一次取消旗标(取消延迟 ≤ N 次 read_dir/stat)
+const CANCEL_CHECK_EVERY: u32 = 512;
 
 /// 一个待压缩的顶层条目(Step 1 产出, Step 2 补全 dst, Step 3 消费)
 #[derive(Debug, Clone)]
@@ -58,10 +64,78 @@ pub fn scan_dir(
     rules: &ExcludeRules,
     on_progress: &dyn Fn(&Progress),
 ) -> Result<ScanReport> {
+    scan_dir_full(
+        input,
+        rules,
+        &CancelFlag::new(),
+        &|_| {},
+        &|_, _| {},
+        on_progress,
+    )
+}
+
+/// 流式扫描: 顶层条目(排序后)一列出就回调 `on_list` —— 此时文件大小已填、
+/// 目录大小仍是 0 —— 之后每完成一个顶层条目的递归统计回调 `on_entry(下标, 条目)`。
+/// 下标与 `on_list` 的顺序一致; 最终返回与 [`scan_dir`] 相同的完整报告。
+/// 取消经 `cancel` 生效(检查点之间最多再处理 [`CANCEL_CHECK_EVERY`] 个条目),
+/// 取消时立即返回 [`CoreError::Cancelled`], 不返回部分结果。
+pub fn scan_dir_stream(
+    input: &Path,
+    rules: &ExcludeRules,
+    cancel: &CancelFlag,
+    on_list: &dyn Fn(&[Entry]),
+    on_entry: &dyn Fn(usize, &Entry),
+) -> Result<ScanReport> {
+    scan_dir_full(input, rules, cancel, on_list, on_entry, &|_| {})
+}
+
+/// 取消检查器: 目录树遍历里按固定粒度轮询旗标(避免每个条目都做原子读)
+struct ScanCtl<'a> {
+    cancel: &'a CancelFlag,
+    ticks: u32,
+}
+
+impl<'a> ScanCtl<'a> {
+    fn new(cancel: &'a CancelFlag) -> Self {
+        Self { cancel, ticks: 0 }
+    }
+
+    /// 条目级检查: 累计到粒度才查一次旗标
+    fn tick(&mut self) -> Result<()> {
+        self.ticks = self.ticks.wrapping_add(1);
+        if self.ticks.is_multiple_of(CANCEL_CHECK_EVERY) && self.cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        Ok(())
+    }
+
+    /// 边界级检查(每个目录 / 每个顶层条目): 每次必查
+    fn check(&self) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            Err(CoreError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn scan_dir_full(
+    input: &Path,
+    rules: &ExcludeRules,
+    cancel: &CancelFlag,
+    on_list: &dyn Fn(&[Entry]),
+    on_entry: &dyn Fn(usize, &Entry),
+    on_progress: &dyn Fn(&Progress),
+) -> Result<ScanReport> {
+    // 取消已置位的扫描不再读盘, 也不给前端发骨架(旧扫描已被新扫描取代)
+    if cancel.is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
     // 宁停不错: 生效模式先校验(UI/CLI 入口已校验, 这里兜底库直调场景)
     let patterns = effective_patterns(rules);
     validate_patterns(&patterns).map_err(CoreError::InvalidExclude)?;
 
+    let mut warnings: Vec<String> = Vec::new();
     // 顶层条目按名字字典序排序, 保证进度与后续产物顺序稳定、可复现
     let mut names: Vec<String> = fs::read_dir(input)?
         .collect::<std::io::Result<Vec<_>>>()?
@@ -70,36 +144,28 @@ pub fn scan_dir(
         .collect();
     names.sort_by_key(|n| n.clone());
 
-    let total = names.len();
-    let mut report = ScanReport::default();
-
-    for (i, name) in names.into_iter().enumerate() {
+    // 第一遍: 顶层骨架(类型 / 文件大小 / 排除标记; 目录大小留到第二遍统计)
+    let mut entries: Vec<Entry> = Vec::with_capacity(names.len());
+    for name in names {
         let path = input.join(&name);
         let (kind, size, entry_count) = match fs::symlink_metadata(&path) {
             Ok(md) => {
                 if md.file_type().is_dir() {
                     // 目录: 只统计普通文件与链接自身, 不跟随目录链接(避免循环与重复计数)
-                    let (sz, count) = dir_size(&path, &name, &patterns, &mut report.warnings);
-                    (EntryKind::Dir, sz, count)
+                    (EntryKind::Dir, 0, 1)
                 } else {
                     // 文件与符号链接都按自身大小计, 链接归为 File
                     (EntryKind::File, md.len(), 1)
                 }
             }
             Err(e) => {
-                report.warnings.push(format!("{}: {e}", path.display()));
+                warnings.push(format!("{}: {e}", path.display()));
                 (EntryKind::File, 0, 0)
             }
         };
         // 顶层打标: 只按生效模式命中; 不按任何文件属性/`.` 前缀判定。
         let exclude = matches_patterns(&patterns, &name).map(ExcludeReason::Pattern);
-        if let Some(reason) = &exclude {
-            report.excluded.push(ExcludedEntry {
-                name: name.clone(),
-                reason: reason.clone(),
-            });
-        }
-        report.entries.push(Entry {
+        entries.push(Entry {
             name,
             kind,
             size,
@@ -108,22 +174,53 @@ pub fn scan_dir(
             format: String::new(),
             exclude,
         });
-        // 被标条目不计入总量(统计口径 = 默认将压缩的内容; 条目 size 保留真实值供展示)
-        if report.entries[i].exclude.is_none() {
-            report.total_bytes += size;
-        }
+    }
+    on_list(&entries);
 
+    // 第二遍: 逐条递归统计目录大小, 每条完成即回调(UI 据此填表)
+    let total = entries.len();
+    let mut ctl = ScanCtl::new(cancel);
+    let mut total_bytes = 0u64;
+    for (index, entry) in entries.iter_mut().enumerate() {
+        ctl.check()?;
+        if entry.kind == EntryKind::Dir {
+            let path = input.join(&entry.name);
+            let (size, entry_count) =
+                dir_size(&path, &entry.name, &patterns, &mut warnings, &mut ctl)?;
+            entry.size = size;
+            entry.entry_count = entry_count;
+        }
+        // 被标条目不计入总量(统计口径 = 默认将压缩的内容; 条目 size 保留真实值供展示)
+        if entry.exclude.is_none() {
+            total_bytes += entry.size;
+        }
+        on_entry(index, entry);
         on_progress(&Progress {
             phase: Phase::Scanning,
-            done: i + 1,
+            done: index + 1,
             total,
-            done_bytes: report.total_bytes,
+            done_bytes: total_bytes,
             total_bytes: 0, // 总量在扫描完成前未知
-            entry: report.entries[i].name.clone(),
+            entry: entry.name.clone(),
         });
     }
 
-    Ok(report)
+    let excluded: Vec<ExcludedEntry> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry.exclude.clone().map(|reason| ExcludedEntry {
+                name: entry.name.clone(),
+                reason,
+            })
+        })
+        .collect();
+
+    Ok(ScanReport {
+        entries,
+        total_bytes,
+        warnings,
+        excluded,
+    })
 }
 
 /// 递归累加目录下所有普通文件/链接自身的大小与条目数(目录自身计 1);
@@ -132,17 +229,21 @@ pub fn scan_dir(
 /// 排除(树内): 模式(条目名前缀相对路径, 与后端开关同坐标系);
 /// 命中文件不计尺寸, 命中目录整树不下钻。
 /// 不按任何文件属性 / `.` 前缀排除用户文件。
+/// 取消: 每个目录边界必查, 条目按 [`CANCEL_CHECK_EVERY`] 粒度查; 命中返回
+/// [`CoreError::Cancelled`](部分统计结果丢弃)。
 fn dir_size(
     dir: &Path,
     entry_name: &str,
     patterns: &[String],
     warnings: &mut Vec<String>,
-) -> (u64, usize) {
+    ctl: &mut ScanCtl<'_>,
+) -> Result<(u64, usize)> {
     let mut total = 0u64;
     // 目录自身也计 1 个条目(空目录 = 1, 与 strategy::StrategyItem.entry_count 对齐)
     let mut entries = 1usize;
     let mut stack = vec![(dir.to_path_buf(), String::new())]; // (目录, 相对条目根的前缀)
     while let Some((d, prefix)) = stack.pop() {
+        ctl.check()?;
         let rd = match fs::read_dir(&d) {
             Ok(rd) => rd,
             Err(e) => {
@@ -151,6 +252,7 @@ fn dir_size(
             }
         };
         for entry in rd {
+            ctl.tick()?;
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
@@ -186,7 +288,7 @@ fn dir_size(
             }
         }
     }
-    (total, entries)
+    Ok((total, entries))
 }
 
 #[cfg(test)]
@@ -413,6 +515,113 @@ mod tests {
         );
         assert!(s.iter().all(|(_, _, t)| *t == 3));
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scan_dir_stream_lists_entries_before_sizes_then_reports_each_entry() {
+        let root = unique_temp("scan-stream");
+        fs::create_dir_all(root.join("in/b_dir/nested")).unwrap();
+        fs::create_dir_all(root.join("in/empty_dir")).unwrap();
+        fs::write(root.join("in/a.txt"), "a").unwrap(); // 1 字节
+        fs::write(root.join("in/b_dir/c.txt"), "abc").unwrap(); // 3 字节
+
+        let listed = RefCell::new(Vec::new());
+        let measured = RefCell::new(Vec::new());
+        let flag = CancelFlag::new();
+        let report = scan_dir_stream(
+            &root.join("in"),
+            &ExcludeRules::default(),
+            &flag,
+            &|entries| {
+                listed.borrow_mut().extend(
+                    entries
+                        .iter()
+                        .map(|entry| (entry.name.clone(), entry.kind, entry.size)),
+                );
+            },
+            &|index, entry| {
+                measured
+                    .borrow_mut()
+                    .push((index, entry.name.clone(), entry.size));
+            },
+        )
+        .unwrap();
+
+        // 骨架阶段: 排序已固定; 文件大小可见, 目录大小未知(0)
+        let listed = listed.borrow();
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0], ("a.txt".to_string(), EntryKind::File, 1));
+        assert_eq!(listed[1], ("b_dir".to_string(), EntryKind::Dir, 0));
+        assert_eq!(listed[2], ("empty_dir".to_string(), EntryKind::Dir, 0));
+
+        // 逐条回调: 下标与骨架序一致, 回调时大小已统计完成
+        let measured = measured.borrow();
+        assert_eq!(
+            measured
+                .iter()
+                .map(|(index, name, _)| (*index, name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "a.txt"), (1, "b_dir"), (2, "empty_dir")]
+        );
+        assert_eq!(measured[1].2, 3, "b_dir 回调时递归大小已就绪");
+
+        assert_eq!(report.total_bytes, 4);
+        assert_eq!(
+            report.entries[1].entry_count, 3,
+            "b_dir 自身 + nested + c.txt"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scan_dir_stream_cancelled_before_start_skips_listing_and_io() {
+        let root = unique_temp("scan-stream-cancel-early");
+        fs::create_dir_all(root.join("in/a")).unwrap();
+        fs::write(root.join("in/a/x"), "x").unwrap();
+
+        let flag = CancelFlag::new();
+        flag.cancel();
+        let listed = RefCell::new(false);
+        let err = scan_dir_stream(
+            &root.join("in"),
+            &ExcludeRules::default(),
+            &flag,
+            &|_| *listed.borrow_mut() = true,
+            &|_, _| panic!("取消后不应统计任何条目"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Cancelled));
+        assert!(!*listed.borrow(), "取消的扫描不再给前端发骨架");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scan_dir_stream_stops_after_cancel_between_top_level_entries() {
+        let root = unique_temp("scan-stream-cancel-mid");
+        for name in ["a", "b", "c"] {
+            fs::create_dir_all(root.join("in").join(name)).unwrap();
+        }
+        fs::write(root.join("in/a/x"), "x").unwrap();
+
+        let flag = CancelFlag::new();
+        let cancel_after_first = flag.clone();
+        let measured = RefCell::new(Vec::new());
+        let err = scan_dir_stream(
+            &root.join("in"),
+            &ExcludeRules::default(),
+            &flag,
+            &|_| {},
+            &|index, entry| {
+                measured.borrow_mut().push(entry.name.clone());
+                if index == 0 {
+                    cancel_after_first.cancel(); // 第一条完成后取消
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Cancelled));
+        assert_eq!(*measured.borrow(), ["a"], "取消后不再统计后续条目");
         fs::remove_dir_all(&root).unwrap();
     }
 }

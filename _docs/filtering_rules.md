@@ -478,8 +478,10 @@ pub struct SettingsLoadResult {
 ### 6.1 `scan`
 
 ```text
-scan(mode, path, filters?, excludes?, on_progress) -> ScanResult
+scan(mode, path, filters?, excludes?, on_scan) -> ScanResult
 ```
+
+- `on_scan`: 流式 `Channel<ScanEvent>`(compress: 先 `Rows` 骨架再逐条 `Row{index,size}`; 见 ui-backend.md 4.1), scan 不再用 `on_progress`
 
 - `filters?: { enabledPolicies: string[] }`: 仅压缩模式有意义; 缺省 = 默认策略(见 §4.1)
 - `excludes?: string[]`: 高级区自定义模式, 语义不变
@@ -604,7 +606,7 @@ scan(mode, path, filters?, excludes?, on_progress) -> ScanResult
 - `showView("main" | "settings")`: 切换两个容器的 `hidden` 类; 主界面 DOM 不销毁, 扫描表 / 勾选 / 滚动位置自然保留
 - 打开: 默认「通用」; 关闭时把焦点还给菜单栏的「设置」触发按钮
 - 关闭: 返回按钮 / `Escape`; 若策略确实变化且当前是压缩模式并已有扫描结果 → 自动重扫(§7.6)
-- 运行 / 扫描中「设置…」禁用(由前端 `syncMenuState()` 控制), 与现有锁定规则一致; 因此设置页不会遮住「取消」按钮
+- 运行中「设置…」禁用(由前端 `syncMenuState()` 控制), 与现有锁定规则一致; 扫描期间只锁确认钮, 「设置…」可用(设置变更关闭后触发重扫/取消旧扫描)
 - 拖拽仅在主视图生效: `zoneAt()` / `handleDrop()` 在 `state.view !== "main"` 时直接忽略, 打开设置时清掉拖拽高亮
 
 ### 7.3 边栏
@@ -707,7 +709,7 @@ boot ── load_settings ──▶ ready
 
 ### 7.7 锁定、键盘与可访问性
 
-- 任务 / 扫描期间「设置…」禁用(`syncMenuState()`), 设置页内控件因此只可能在空闲态被操作
+- 任务运行中「设置…」禁用(`syncMenuState()`); 扫描期间只锁确认钮, 设置页可用, 设置页内控件因此只可能在空闲 / 扫描态被操作
 - 打开设置: 焦点到当前侧栏项; 关闭: 焦点回菜单栏「设置」触发按钮
 - `Escape` 优先级: 语言菜单 > 设置页; 语言菜单打开时先关菜单, 否则关闭设置页
 - 侧栏按钮 `aria-current="page"`; 内容 section `role="region"` + `aria-labelledby` 指向标题

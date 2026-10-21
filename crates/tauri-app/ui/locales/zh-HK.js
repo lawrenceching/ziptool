@@ -6,7 +6,8 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "extract": "解壓",
       "confirm": "確認",
       "cancel": "取消",
-      "language": "語言"
+      "language": "語言",
+      "scanning": "掃描中…"
     },
     "lang": {
       "system": "跟隨系統"
@@ -48,6 +49,8 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "exclude": "排除",
       "excludePlaceholder": "以逗號分隔, 如 Thumbs.db, *.tmp",
       "force": "覆蓋現有檔案",
+      "smartPackaging": "智能打包",
+      "smartPackagingTitle": "勾選後按打包策略自動合併小檔案並分包; 不勾選則每個頂層條目單獨壓縮",
       "pwHintZip": "zip 格式: ZipCrypto 加密(相容性最好, 強度較弱)",
       "pwHint7z": "7z 格式: AES-256 加密"
     },

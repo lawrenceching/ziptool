@@ -17,7 +17,7 @@
 
 ### 非目标
 
-- 不做扫描取消(`scan_dir` 无取消点, 大目录扫描期间 UI 锁定等待, 见 13.1)
+- ~~不做扫描取消~~: 已实现(2026-10)——`scan_dir_stream` 支持 `CancelFlag`, 扫描期间改选源/切模式由壳层取消旧 scan(见 3.1 / 13.1)
 - 不做多任务并行(单窗口同时至多一个后台任务, 见 3.5)
 - 不做扫描结果持久化 / 增量重扫
 - 不做内容级选择性解压(解包内的部分文件; extract.md 12.5 仍是后续, UI 勾选是**组级**选择)
@@ -56,7 +56,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 
 | 命令 | 签名(前端视角) | 作用 |
 |---|---|---|
-| `scan` | `(mode, path, filters?, excludes?, on_progress) → ScanResult` | 只扫描不执行, 选源后渲染表格 |
+| `scan` | `(mode, path, filters?, excludes?, on_scan) → ScanResult` | 只扫描不执行, 选源后渲染表格; `on_scan` 流式给行骨架与逐条大小 |
 | `plan_packages` | `(src, entries, packaging) → PlanResult` | 纯内存计算可审核打包方案; 不扫描/不压缩/不占忙锁 |
 | `compress` | `(src, dst, entries, options, planId?, on_progress) → CompressResult` | 批量压缩勾选项; 有 packaging 时必须带 planId |
 | `extract_archive` | `(src, dst, entries, options, on_progress) → ExtractResult` | 批量解压勾选项 |
@@ -73,9 +73,11 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 - `mode`: `"compress" | "extract"`, 与 UI 顶栏模式一致; `path`: 源文件夹(系统对话框返回值)
 - `filters?: { enabledPolicies: string[] }`(仅 compress 模式, 可选): 排除策略 id; 缺省 = 默认策略(两种都开); 壳层用 `filter::effective_rules` 展开
 - `excludes?: string[]`(仅 compress 模式, 可选): 自定义排除模式, 与策略并集; 非法模式返回错误字符串, 不开工
-- compress → `core::scan_dir`(递归统计大小, `Phase::Scanning` 进度经 Channel 推送, 状态栏显示 `i/n`)
-- extract → `core::scan_groups`(顶层分组, 量小无需进度); 每组补大小(组内各卷大小之和), mapping.csv 作为元数据行返回
-- 错误透传 core: 路径不存在 / 非目录 → `InputNotFound`; 空目录 → `NoEntries`; 无包 → `NoArchives`
+- `on_scan`: 流式 `Channel<ScanEvent>`(**不是进度**), 见 4.1:
+  - compress → core `scan_dir_stream`: 顶层条目骨架一列出就发 `Rows`(UI 立刻渲染行, 大小列 spinner), 之后每完成一个顶层条目的递归大小统计就发 `Row{index, size}`
+  - extract → core `scan_groups`(顶层分组, 量小); 不流式, 命令返回后一次性渲染
+- 扫描可取消: `cancel_current` 对扫描同样生效; UI 扫描期间改选源/切模式会发起新 scan, **壳层自动取消上一次 scan 并等待忙锁释放**(新扫描胜出, 旧结果由前端 `scanSeq` 丢弃)
+- 错误透传 core: 路径不存在 / 非目录 → `InputNotFound`; 空目录 → `NoEntries`; 无包 → `NoArchives`; 被取消 → 可读的"扫描已取消"
 - **为什么 scan 不做 Step 2 预检**(OutputExists 等): 预检依赖 random_name / dst 等确认时才定的输入, 且用户扫完还可能换目标目录; 预检留在执行入口(plan / B2), 错误在任何产物产生前报出, 同样满足宁停不错
 
 ### 3.2 compress / 3.3 extract_archive
@@ -134,7 +136,26 @@ struct ScanResult { mode: String, items: Vec<ScanItem>, warnings: Vec<String>, t
 - **显示名规则(UI)**: 表格"文件名"列显示 `original ?? name`; 进度事件的 `entry` 与该规则一致(extract 用原名, 无 mapping 用入口卷名), 所以行匹配天然成立
 - 告警分两条通道: **表格行**(有明确文件名且不会被处理的: extract 的孤儿卷 / 非包文件)与 **statusbar 汇总**(挂在子树 / 全局的: compress 的无权限子树, mapping 解析异常). 区分的理由: 前者在表格里不可见就会被遗忘, 后者没有干净的行归属且条目仍会执行(后端失败时自然报错)
 
-事件(不变): `{ phase: "scanning"|"compressing"|"extracting", done, total, doneBytes, totalBytes, entry }`
+### 4.1 流式事件(`Channel<ScanEvent>`, 仅 scan)
+
+scan 的 Channel 与 compress/extract 的进度 Channel **是两套协议**, 别混用:
+
+```rust
+#[serde(tag = "event", rename_all = "camelCase")]
+enum ScanEvent {
+    // 顶层条目骨架: 排序已定, 目录大小待统计(前端先渲染行, 大小列 spinner)
+    Rows { mode: String, items: Vec<ScanSkeletonItem> }, // ScanSkeletonItem = ScanItem 去掉 size
+    // 单个顶层条目大小统计完成; index 对应 Rows.items 下标
+    Row { index: usize, size: u64 },
+}
+```
+
+- 前端行为: `Rows` → 渲染骨架表(勾选默认与最终一致) + 状态栏 `扫描中 0/N`; `Row` → 只更新对应行大小列(换成 `fmtBytes`)并推进 `done`; 命令返回后按最终 `ScanResult` 整表重绘(补齐告警行、保留用户勾选)
+- 骨架行字段与最终 `ScanItem` 一致(仅无 `size`): `name / kind / status / original / detail / excluded`
+
+### 4.2 进度事件(compress / extract, `Channel<ProgressEvent>`)
+
+`{ phase: "compressing"|"extracting", done, total, doneBytes, totalBytes, entry }`(scan 不再发进度事件)
 
 结果(扩展现有): `CompressResult { cancelled, entries: [{archive, original}], packages: [{id, kind, archive, members, inputBytes, entryCount}], warnings }`; 包级路径 `entries` 为空, 新 UI 用 `packages`。`ExtractResult { cancelled, groups: [{entry, original, files}], warnings }`.
 
@@ -146,11 +167,13 @@ struct ScanResult { mode: String, items: Vec<ScanItem>, warnings: Vec<String>, t
 
 ```
 UI(index.html)            壳层(lib.rs)                 core
-│ scan(mode, src) ─────────▶ 忙闲抢占; spawn_blocking    │
-│   ◀ Scanning 事件 ════════ Channel ════════════════════│ scan_dir 逐条目回调
-│   (状态栏: 扫描中 i/n)    结果存入 ScanContext         │
+│ scan(mode, src, onScan) ─▶ 忙闲抢占; spawn_blocking    │
+│   ◀ Rows 事件 ═══════════ Channel ════════════════════│ 顶层条目骨架(先渲染行)
+│   ◀ Row{index,size} 事件 ═ Channel ═══════════════════│ scan_dir_stream 逐条大小
+│   (骨架行大小列 spinner;   结果存入 ScanContext         │
+│    确认按钮 loading)                                   │
 │ ◀── ScanResult ──────────                             │
-│ 渲染表格(默认全选 pending 行)                          │
+│ 整表重绘(默认全选 pending 行)                          │
 │ (勾选 / 填选项 / 选目标)                                │
 │ compress(src,dst,名单,opt)▶ 忙闲抢占; 校验 ScanContext │
 │   ◀ Compressing 事件 ═════ Channel ════════════════════│ plan → compress_entries
@@ -243,9 +266,9 @@ idle ──选源──▶ scanning ──ScanResult──▶ ready ──确认
 
 ### 7.2 锁定规则
 
-- scanning: 模式按钮 / 路径框 / 选项 / 确认全部禁用(扫描不可取消, 见 13.1); 状态栏实时 `扫描中 i/n`
-- running: 同上全部禁用, **确认按钮变形为「取消」**(红色), 点击 → `cancel_current`; 无新增控件
-- ready: 确认可用条件 = 存在勾选的 pending 行 且 dst 非空(现有逻辑); 选项行随模式切换显示压缩 / 解压各自的控件
+- scanning: **只锁确认按钮**(变成 loading: spinner + `header.scanning` 文案 + `disabled` + `aria-busy`); 模式按钮 / 路径框 / 选项 / 设置菜单 / 拖拽全部保持可用。表格随 `ScanEvent` 流式渲染: 骨架行大小列显示 spinner, 收到 `Row` 后填大小; 状态栏实时 `扫描中 i/n`。扫描期间改选源/切模式 = 作废旧扫描并重新开始(见 3.1); 旧结果由前端 `scanSeq` 丢弃
+- running: 全部输入禁用(7.2), **确认按钮变形为「取消」**(红色), 点击 → `cancel_current`; 无新增控件
+- ready: 确认可用条件 = 存在勾选的 pending 行 且(智能打包开启时)方案已就绪 且 dst 非空(现有逻辑); 选项行随模式切换显示压缩 / 解压各自的控件
 
 ### 7.3 行状态推导协议
 
@@ -270,7 +293,7 @@ meta / warning 行:      恒定不变
 - 使用 Tauri 原生 drag-drop(`dragDropEnabled: true`, 默认即开启): UI 通过 `window.__TAURI__.webview.getCurrentWebview().onDragDropEvent` 监听 enter / over / drop / leave; 不使用 HTML5 `dataTransfer`(WebView2 拿不到绝对路径, 且原生处理器会替换 HTML5 拖拽)
 - 源/目标路径行整体是投放区(`data-drop="src" / "dst"`), 拖入时行与输入框高亮, 离开/落定后恢复; 落点按「物理坐标 ÷ devicePixelRatio → elementFromPoint → closest(`[data-drop]`)」判定, `drop` 落点失效时回退最近一次 hover 行
 - 只接受恰好一个路径; 落定前调 `validate_dir`, 必须是已存在的文件夹; 源路径校验通过后自动 `scan`(与点击选择一致), 目标路径仅写入
-- 扫描中 / 任务运行中输入框被禁用, 拖拽直接忽略并提示, 不打断任务; 路径落定前切换模式或重新选择会以 token 作废进行中的异步校验
+- 任务运行中输入框被禁用, 拖拽直接忽略并提示, 不打断任务; 扫描期间拖拽可用(落定即取消旧扫描并重扫); 路径落定前切换模式或重新选择会以 token 作废进行中的异步校验
 - 浏览器预览(无 `__TAURI__`)不注册拖拽, 保留点击 mock 流程
 
 ## 8. 选项控件
@@ -279,7 +302,8 @@ meta / warning 行:      恒定不变
 
 | 模式 | 控件 | 默认值 | 说明 |
 |---|---|---|---|
-| 压缩 | 打包策略(独立行, 已实现) | 合并≤100m / 分包>2g / 合并包≤跟随 / 条目≤50000 | 阈值改动只重算 `plan_packages`, 不重扫; 摘要常驻, "查看方案"打开只读抽屉; 契约见 plan-preview.md |
+| 压缩 | 智能打包(checkbox, 已实现) | 关 | 只有勾选时才计算并应用打包策略(合并小文件 / 分包); 不勾选 = 每个顶层条目单独压缩(`packaging=null`, 无 `planId`), `plan_packages` 不调用 |
+| 压缩 | 打包策略(独立行, 已实现) | 合并≤100m / 分包>2g / 合并包≤跟随 / 条目≤50000 | 仅在「智能打包」勾选时显示; 阈值改动只重算 `plan_packages`, 不重扫; 摘要常驻, "查看方案"打开只读抽屉; 契约见 plan-preview.md |
 | 压缩 | 密码(password) | 空 = 不加密 | 空串按 None; 不持久化 |
 | 压缩 | 随机包名(checkbox) | 关 | 与 CLI `--random-name` 默认关闭一致 |
 | 压缩 | 压缩成功后校验(checkbox) | 开 | 压缩完成后只读包头/中央目录做结构检查; 关闭则跳过(性能敏感场景), 语义见 compress.md 6.8 |
@@ -288,7 +312,7 @@ meta / warning 行:      恒定不变
 | 压缩 | 排除模式输入(text, 高级区) | 空 = 不排除 | 多行/逗号分隔; scan 与 compress 都透传 `excludes`, 与设置页策略并集; 被标行默认不勾选, 可手动勾选 |
 | 解压 | 密码(password) | 空 = 不加密 | 整批一个密码, 与 compress 对称 |
 | 解压 | 覆盖已有文件(checkbox) | 关 | 宁停不错, 与 CLI `--force` 默认一致 |
-| 设置页 | 边栏(通用 / 文件排除) | 通用 | 菜单栏「设置 > 设置…」打开, 与主界面同文档视图切换; 运行/扫描中该项禁用 |
+| 设置页 | 边栏(通用 / 文件排除) | 通用 | 菜单栏「设置 > 设置…」打开, 与主界面同文档视图切换; 任务运行中该项禁用(扫描期间可用) |
 | 设置页 | 文件排除策略(Switch) | 两项都开 | `os-hidden` / `lang-temp`; 即时保存, 失败回滚; 修改后关闭设置页自动重扫压缩源 |
 | 设置页 | 压缩完成后关机(checkbox) | 关 | 本期仅占位: `disabled` + 「即将支持」; 字段保留, 实际行为后续 ticket |
 
@@ -339,7 +363,7 @@ meta / warning 行:      恒定不变
 
 按价值排序, 均不在本次规格内:
 
-1. **扫描可取消**: scan_dir 加取消点(栈式遍历每轮回查), 大目录扫描期间允许反悔
+1. ~~**扫描可取消**~~: 已实现(2026-10)——`scan_dir_stream` 在目录/条目边界检查 `CancelFlag`; 扫描期间改选源/切模式会由壳层取消旧 scan; UI 扫描期间只锁确认按钮(loading), 其余控件保持可用
 2. ~~**取消杀子进程 / 关窗收尾**~~: 已实现(2026-10)——取消立即 kill 后端进程, 关窗时 `ExitRequested` 置取消并等待收尾
 3. **doctor 自检入 UI**: 启动时调 `doctor` 检查平台工具, 缺 7z 提前预警(核心已有 check_platform_tools, 只差暴露与展示)
 4. **打开输出目录**: 完成后一键 reveal 产物(含 mapping.csv 提示)
