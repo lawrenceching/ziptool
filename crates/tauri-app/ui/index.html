@@ -313,16 +313,9 @@
         />
       </label>
       <span id="plan-summary" role="status" aria-live="polite" class="text-slate-600"></span>
-      <button
-        id="plan-open"
-        type="button"
-        disabled
-        data-i18n="strategy.viewPlan"
-        class="px-2 py-1 rounded-md border border-slate-300 text-blue-600 enabled:hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
-      >
-        查看方案
-      </button>
     </div>
+    <!-- 方案提醒(条目超限等): 有提醒时才显示, 与表格同一屏 -->
+    <div id="plan-warnings" class="hidden bg-amber-50 px-4 py-1.5 text-xs text-amber-700"></div>
 
     <!-- 条目表格: 通栏铺满剩余空间 -->
     <div class="flex-1 min-h-0 overflow-auto">
@@ -342,7 +335,7 @@
             </th>
             <th data-i18n="table.name" class="py-2 pr-2 text-left font-medium">文件名</th>
             <th data-i18n="table.size" class="py-2 pr-4 text-right font-medium">大小</th>
-            <th id="th-package" data-i18n="table.package" class="hidden w-24 py-2 pr-2 text-left font-medium">打包</th>
+            <th id="th-strategy" data-i18n="table.strategy" class="hidden w-24 py-2 pr-2 text-left font-medium">策略</th>
             <th data-i18n="table.status" class="w-24 py-2 pr-4 text-left font-medium">状态</th>
           </tr>
         </thead>
@@ -351,44 +344,6 @@
       <div id="empty" data-i18n="table.empty" class="py-16 text-center text-slate-400">
         点击「源文件夹」选择目录, 也可直接拖入文件夹
       </div>
-    </div>
-
-    <!-- 打包方案抽屉: 只读审核; 包卡片与源表双向高亮 -->
-    <div id="plan-backdrop" class="hidden fixed inset-0 z-40 bg-slate-900/40 p-4">
-      <div
-        id="plan-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="plan-title"
-        class="mx-auto mt-8 flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
-      >
-        <header class="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-          <h2 id="plan-title" data-i18n="plan.title" class="font-medium text-slate-800">打包方案</h2>
-          <button
-            id="plan-close"
-            type="button"
-            data-i18n="plan.close"
-            data-i18n-aria-label="plan.close"
-            aria-label="关闭"
-            class="rounded p-1 text-slate-500 hover:bg-slate-100"
-          >
-            ×
-          </button>
-        </header>
-        <div id="plan-strategy" class="border-b border-slate-100 px-4 py-2 text-xs text-slate-500"></div>
-        <div id="plan-filters" class="flex flex-wrap gap-2 border-b border-slate-100 px-4 py-2 text-xs">
-          <button type="button" id="plan-filter-all" data-plan-filter="all" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
-          <button type="button" id="plan-filter-direct" data-plan-filter="direct" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
-          <button type="button" id="plan-filter-split" data-plan-filter="split" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
-          <button type="button" id="plan-filter-bundle" data-plan-filter="bundle" class="rounded-full border border-slate-300 px-2 py-0.5"></button>
-        </div>
-        <div id="plan-warnings" class="hidden border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-700"></div>
-        <div id="plan-list" class="min-h-0 flex-1 space-y-3 overflow-auto p-4"></div>
-        <div class="border-t border-slate-100 px-4 py-2 text-xs text-slate-400" data-i18n="plan.note">
-          大小为原始大小；压缩后大小/实际卷数未知。
-        </div>
-      </div>
-    </div>
     </div>
     <!-- /view-main -->
 

@@ -16,8 +16,6 @@ const state = {
   planSeq: 0, // 丢弃过期异步方案
   planning: false,
   planError: null,
-  planOpen: false,
-  planFilter: "all",
   view: "main", // "main" | "settings"
   locked: false, // 任务互斥锁(setLocked 维护; 原生菜单「设置…」可用性依赖它)
   smartPackaging: false, // 智能打包开关(仅内存; 关闭时逐条目压缩, 不计算/不传方案)
@@ -63,7 +61,8 @@ const BADGE = {
   warning: "bg-amber-50 text-amber-600",
 };
 
-const PKG_BADGE = {
+// 智能打包: 表格「策略」列的徽章配色(压缩 / 分包 / 合并)
+const STRATEGY_BADGE = {
   direct: "bg-slate-100 text-slate-600",
   split: "bg-amber-50 text-amber-700",
   bundle: "bg-blue-50 text-blue-700",
@@ -214,7 +213,6 @@ window.addEventListener("localechange", () => {
   renderStatus();
   renderTable(state.rows);
   renderPlanSummary();
-  renderPlanDialog();
   updatePwHint();
   syncActionButton();
   syncLanguageMenu();
@@ -338,10 +336,10 @@ function focusMenuItem(key, items) {
   return true;
 }
 
-// 「设置…」可用性: 设置加载完成前 / 任务期间 / 方案抽屉打开时 / 已在设置页时禁用
-// (扫描期间不锁 UI, 因此不禁用)
+// 「设置…」可用性: 设置加载完成前 / 任务期间 / 已在设置页时禁用
+// (扫描与方案计算都不锁 UI, 因此不禁用)
 function menuSettingsEnabled() {
-  return state.settingsReady && !state.locked && !state.planOpen && state.view !== "settings";
+  return state.settingsReady && !state.locked && state.view !== "settings";
 }
 
 function syncMenuState() {
@@ -513,7 +511,7 @@ function setLocked(locked) {
   if (locked) setDropHover(null); // 任务期不允许拖拽更换路径
 }
 
-// —— 选项显隐: 模式 + 智能打包开关共同决定(策略行/打包列只在"压缩 + 智能打包"时可见) ——
+// —— 选项显隐: 模式 + 智能打包开关共同决定(策略行/策略列只在"压缩 + 智能打包"时可见) ——
 function syncOptionVisibility() {
   const compress = state.mode === "compress";
   const smart = compress && state.smartPackaging;
@@ -521,17 +519,17 @@ function syncOptionVisibility() {
     $(id).classList.toggle("hidden", !compress);
     $(id).classList.toggle("flex", compress);
   }
-  // 策略行/打包列: 解压模式永远隐藏, 压缩模式随智能打包开关显隐
+  // 策略行/策略列: 解压模式永远隐藏, 压缩模式随智能打包开关显隐
   $("strategy-row").classList.toggle("hidden", !smart);
   $("strategy-row").classList.toggle("flex", smart);
-  $("th-package").classList.toggle("hidden", !smart);
+  $("th-strategy").classList.toggle("hidden", !smart);
   $("opt-smart-wrap").classList.toggle("hidden", !compress);
   $("opt-smart-wrap").classList.toggle("flex", compress);
   $("opt-random-wrap").classList.toggle("hidden", !compress);
   $("opt-verify-wrap").classList.toggle("hidden", !compress);
   $("opt-force-wrap").classList.toggle("hidden", !(state.mode === "extract"));
   $("opt-force-wrap").classList.toggle("flex", state.mode === "extract");
-  // 行内打包列: 由下一次 renderTable 按同样条件重绘
+  // 行内策略列: 由下一次 renderTable 按同样条件重绘
 }
 
 // —— 智能打包开关: 关闭 = 逐条目压缩(不请求方案, 打包参数/方案 id 传 null) ——
@@ -541,6 +539,8 @@ function setSmartPackaging(on) {
   $("opt-smart").checked = next;
   syncOptionVisibility();
   if (next) {
+    // 列显隐变了, 先按现有行重绘(策略列显示占位), 方案就绪后自动切成方案分组
+    renderTable(state.rows);
     schedulePlan();
   } else {
     clearPlan();
@@ -732,8 +732,7 @@ function showSection(section) {
 }
 
 function openSettings() {
-  if (!state.settingsReady || state.locked || state.planOpen || state.view === "settings")
-    return;
+  if (!state.settingsReady || state.locked || state.view === "settings") return;
   setDropHover(null);
   showView("settings");
   showSection("general");
@@ -928,7 +927,6 @@ function invalidatePlan() {
   applyPlanToRows();
   renderTable(state.rows);
   renderPlanSummary();
-  if (state.planOpen) renderPlanDialog();
   syncConfirm();
 }
 
@@ -949,13 +947,8 @@ function clearPlan() {
   state.plan = null;
   state.planning = false;
   state.planError = null;
-  state.planOpen = false;
-  $("plan-backdrop")?.classList.add("hidden");
   state.rows.forEach((row) => {
-    delete row.packageId;
-    delete row.packageKind;
     delete row.packageIndex;
-    delete row.packageOrdinal;
     delete row.packageTip;
     delete row.packageWarning;
   });
@@ -963,12 +956,10 @@ function clearPlan() {
   syncConfirm();
 }
 
+// 行 → 包映射: 表格分组与包级状态都从这里取(packageIndex), packageTip 供悬停解释
 function applyPlanToRows() {
   state.rows.forEach((row) => {
-    delete row.packageId;
-    delete row.packageKind;
     delete row.packageIndex;
-    delete row.packageOrdinal;
     delete row.packageTip;
     delete row.packageWarning;
   });
@@ -977,16 +968,11 @@ function applyPlanToRows() {
   const warnings = new Map(
     (state.plan.warnings ?? []).map((warning) => [warning.memberIndex, warning])
   );
-  const ordinals = { direct: 0, split: 0, bundle: 0 };
   state.plan.packages.forEach((pkg, packageIndex) => {
-    ordinals[pkg.kind] = (ordinals[pkg.kind] ?? 0) + 1;
     pkg.memberIndexes.forEach((rowIndex) => {
       const row = state.rows[rowIndex];
       if (!row) return;
-      row.packageId = pkg.id;
-      row.packageKind = pkg.kind;
       row.packageIndex = packageIndex;
-      row.packageOrdinal = ordinals[pkg.kind];
       const warning = warnings.get(rowIndex);
       if (warning) {
         row.packageWarning = true;
@@ -1010,21 +996,6 @@ function applyPlanToRows() {
       }
     });
   });
-}
-
-function packageLabel(row) {
-  if (!row.packageKind) return "—";
-  if (row.packageWarning) return t("plan.kind.directOver");
-  if (row.packageKind === "bundle") {
-    return t("plan.kind.bundleN", { n: row.packageOrdinal });
-  }
-  return t(`plan.kind.${row.packageKind}`);
-}
-
-function packageBadgeClass(row) {
-  if (!row.packageKind) return PKG_BADGE.none;
-  if (row.packageWarning) return PKG_BADGE.warning;
-  return PKG_BADGE[row.packageKind] ?? PKG_BADGE.none;
 }
 
 function planSummaryText() {
@@ -1058,19 +1029,28 @@ function planSummaryText() {
 
 function renderPlanSummary() {
   const el = $("plan-summary");
-  const button = $("plan-open");
-  if (!el || !button) return;
+  if (!el) return;
   const text = planSummaryText();
   el.textContent = text;
   el.title = text;
   el.className = "text-xs " +
     (state.planError ? "text-red-600" : state.planning ? "text-slate-400" : "text-slate-600");
-  button.disabled =
-    state.mode !== "compress" ||
-    !state.smartPackaging ||
-    !state.plan ||
-    state.planning ||
-    !!state.planError;
+
+  // 方案提醒(条目超限等)与表格同一屏展示, 不再藏进弹窗
+  const warnings = $("plan-warnings");
+  if (!warnings) return;
+  const list =
+    state.mode === "compress" && state.smartPackaging ? state.plan?.warnings ?? [] : [];
+  warnings.classList.toggle("hidden", list.length === 0);
+  warnings.textContent = list
+    .map((warning) =>
+      t("plan.warning.tooManyEntries", {
+        name: state.rows[warning.memberIndex]?.name ?? "?",
+        count: warning.entryCount,
+        limit: warning.limit,
+      })
+    )
+    .join("；");
 }
 
 async function refreshPlan() {
@@ -1107,7 +1087,6 @@ async function refreshPlan() {
     applyPlanToRows();
     renderTable(state.rows);
     renderPlanSummary();
-    if (state.planOpen) renderPlanDialog();
   } catch (error) {
     if (seq !== state.planSeq) return;
     state.plan = null;
@@ -1116,207 +1095,263 @@ async function refreshPlan() {
     applyPlanToRows();
     renderTable(state.rows);
     renderPlanSummary();
-    if (state.planOpen) renderPlanDialog();
   }
   syncConfirm();
 }
 
-function planKindLabel(pkg) {
-  if (pkg.kind === "bundle") {
-    const n =
-      state.plan.packages.filter((p) => p.kind === "bundle").indexOf(pkg) + 1;
-    return t("plan.kind.bundleN", { n });
+function strategyLabel(kind) {
+  return t(`plan.strategy.${kind}`);
+}
+
+// —— 方案 → 表格: 智能打包时复用条目表格展示方案(不弹窗) ——
+// 每个包按「策略」列呈现: 压缩(单行) / 分包(单行) / 合并(标题行 + 成员行);
+// 未勾选的条目集中在表尾「未纳入打包」分组里, 勾回即重新计算方案。
+const GROUP_ROW_CLASS = "border-b border-slate-200 bg-slate-50 text-slate-600";
+
+function strategyBadgeClass(kind, warning) {
+  if (warning) return STRATEGY_BADGE.warning;
+  return STRATEGY_BADGE[kind] ?? STRATEGY_BADGE.none;
+}
+
+// 方案表格只在「压缩 + 智能打包 + 方案已就绪」时启用; 其余时候显示普通文件列表
+function planView() {
+  return state.mode === "compress" && state.smartPackaging && !!state.plan;
+}
+
+// 包级状态(合并包标题行用): 成员全部完成 → 完成; 任一失败 → 失败; 运行中按包序号推进
+function packageDisplayStatus(packageIndex) {
+  const pkg = state.plan.packages[packageIndex];
+  const members = pkg.memberIndexes.map((i) => state.rows[i]).filter(Boolean);
+  if (members.some((row) => row.status === "failed")) return "failed";
+  if (members.length > 0 && members.every((row) => row.status === "done")) return "done";
+  if (state.run) {
+    if (packageIndex < state.run.done) return "done";
+    if (packageIndex === state.run.done) return state.run.finished ? "done" : "running";
   }
-  return t(`plan.kind.${pkg.kind}`);
+  return "pending";
 }
 
-function formatLimit(value) {
-  return value == null ? "—" : fmtBytes(value);
+function statusText(st) {
+  if (st === "pending") {
+    return t(
+      state.mode === "compress" ? "row.status.pendingCompress" : "row.status.pendingExtract"
+    );
+  }
+  if (st === "done") return t("row.status.done");
+  if (st === "running") return t("row.status.running");
+  if (st === "failed") return t("row.status.failed");
+  if (st === "warning") return t("row.status.warning");
+  return t("row.status.meta");
 }
 
-function renderPlanCard(pkg) {
-  const card = document.createElement("div");
-  card.className = "rounded-lg border border-slate-200 overflow-hidden";
+// 单元格构造: 条目行与包标题行共用同一套列
+function checkboxCell(rowIndex) {
+  const row = state.rows[rowIndex];
+  const st = displayStatus(rowIndex);
+  const td = document.createElement("td");
+  td.className = "py-2 text-center";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = !!row.checked && st === "pending";
+  cb.disabled = row.status !== "pending" || !!state.run;
+  cb.setAttribute("aria-label", t("row.select", { name: row.name }));
+  cb.className = "accent-blue-600 align-middle";
+  cb.addEventListener("change", () => {
+    state.rows[rowIndex].checked = cb.checked;
+    syncConfirm();
+    schedulePlan();
+  });
+  td.appendChild(cb);
+  return td;
+}
 
-  const header = document.createElement("div");
-  header.className = "flex flex-wrap items-center gap-2 bg-slate-50 px-3 py-2";
+function nameCell(name, tip, { indent = false } = {}) {
+  const td = document.createElement("td");
+  td.className = "py-2 pr-2 truncate max-w-0" + (indent ? " pl-4" : "");
+  // 悬停看全名 + 附注(排除原因 / 原名 / 告警原因 / 元数据行数)
+  td.title = tip ? `${name}(${tip})` : name;
+  td.textContent = name;
+  return td;
+}
+
+function sizeCell(size) {
+  const td = document.createElement("td");
+  td.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
+  td.dataset.cell = "size";
+  if (size == null) {
+    // 扫描流式骨架: 大小未知, 先显示小 spinner(收到 row 事件后原地替换)
+    const spinner = document.createElement("span");
+    spinner.className = SCAN_SIZE_SPINNER;
+    spinner.setAttribute("aria-hidden", "true");
+    td.appendChild(spinner);
+  } else {
+    td.textContent = fmtBytes(size);
+  }
+  return td;
+}
+
+function strategyCell(kind, { warning = false, tip = null, text = null } = {}) {
+  const td = document.createElement("td");
+  td.className = "py-2 pr-2 text-xs";
+  td.dataset.cell = "strategy";
+  td.classList.toggle("hidden", !(state.mode === "compress" && state.smartPackaging));
+  if (!kind) {
+    td.textContent = text ?? "—";
+    td.classList.add("text-slate-400");
+    return td;
+  }
   const badge = document.createElement("span");
   badge.className =
-    "inline-block rounded-full px-2 py-0.5 text-xs " +
-    (PKG_BADGE[pkg.kind] ?? PKG_BADGE.none);
-  badge.textContent = planKindLabel(pkg);
-  const meta = document.createElement("span");
-  meta.className = "text-xs text-slate-500";
-  meta.textContent = t("plan.packageMeta", {
-    size: fmtBytes(pkg.inputBytes),
-    members: pkg.memberIndexes.length,
-    entries: pkg.entryCount,
-  });
-  header.append(badge, meta);
-
-  const body = document.createElement("div");
-  body.className = "space-y-1 px-3 py-2";
-  pkg.memberIndexes.slice(0, 20).forEach((rowIndex) => {
-    const row = state.rows[rowIndex];
-    if (!row) return;
-    const line = document.createElement("button");
-    line.type = "button";
-    line.dataset.rowIndex = String(rowIndex);
-    line.className =
-      "flex w-full items-center justify-between gap-3 rounded px-1.5 py-1 text-left text-xs text-slate-700 hover:bg-blue-50";
-    const name = document.createElement("span");
-    name.className = "truncate";
-    name.textContent = row.name;
-    const size = document.createElement("span");
-    size.className = "shrink-0 tabular-nums text-slate-500";
-    size.textContent = fmtBytes(row.size);
-    line.append(name, size);
-    body.append(line);
-  });
-  if (pkg.memberIndexes.length > 20) {
-    const more = document.createElement("div");
-    more.className = "px-1.5 text-xs text-slate-400";
-    more.textContent = t("plan.moreMembers", {
-      count: pkg.memberIndexes.length - 20,
-    });
-    body.append(more);
-  }
-  if (pkg.kind === "split") {
-    const note = document.createElement("p");
-    note.className = "px-1.5 pt-1 text-xs text-amber-700";
-    note.textContent = t("plan.splitCardNote", {
-      limit: formatLimit(state.plan?.summary?.effective?.splitAbove),
-    });
-    body.append(note);
-  }
-
-  card.append(header, body);
-  return card;
+    "inline-block rounded-full px-2 py-0.5 text-xs " + strategyBadgeClass(kind, warning);
+  badge.textContent = strategyLabel(kind);
+  if (tip) badge.title = tip;
+  td.appendChild(badge);
+  return td;
 }
 
-function renderPlanDialog() {
-  const backdrop = $("plan-backdrop");
-  if (!backdrop) return;
-  backdrop.classList.toggle("hidden", !state.planOpen);
-  if (!state.planOpen) return;
-
-  const plan = state.plan;
-  const eff = plan?.summary?.effective ?? {};
-  $("plan-strategy").textContent = plan
-    ? t("plan.strategyLine", {
-        merge: formatLimit(eff.mergeBelow),
-        split: formatLimit(eff.splitAbove),
-        bundle: formatLimit(eff.bundleMax),
-        entries: eff.maxEntries == null ? "∞" : eff.maxEntries,
-      })
-    : "";
-
-  const counts = {
-    all: plan?.packages.length ?? 0,
-    direct: plan?.summary?.direct ?? 0,
-    split: plan?.summary?.split ?? 0,
-    bundle: plan?.summary?.bundle ?? 0,
-  };
-  document.querySelectorAll("[data-plan-filter]").forEach((button) => {
-    const filter = button.dataset.planFilter;
-    button.textContent = `${t(`plan.filter.${filter}`)} ${counts[filter] ?? 0}`;
-    const active = state.planFilter === filter;
-    button.className =
-      "rounded-full border px-2 py-0.5 " +
-      (active
-        ? "border-blue-500 bg-blue-50 text-blue-700"
-        : "border-slate-300 text-slate-600");
-  });
-
-  const warnings = $("plan-warnings");
-  if (plan?.warnings?.length) {
-    warnings.classList.remove("hidden");
-    warnings.textContent = plan.warnings
-      .map((warning) => {
-        const row = state.rows[warning.memberIndex];
-        return t("plan.warning.tooManyEntries", {
-          name: row?.name ?? "?",
-          count: warning.entryCount,
-          limit: warning.limit,
-        });
-      })
-      .join("；");
-  } else {
-    warnings.classList.add("hidden");
-    warnings.textContent = "";
+function statusCell(st, { failMsg = "", detail = "", text = null } = {}) {
+  const td = document.createElement("td");
+  td.className = "py-2 pr-4";
+  if (st == null) {
+    if (text) td.textContent = text;
+    return td;
   }
+  const badge = document.createElement("span");
+  badge.className = "inline-block px-2 py-0.5 rounded-full text-xs " + (BADGE[st] ?? BADGE.meta);
+  badge.textContent = statusText(st);
+  if (st === "failed") badge.title = failMsg;
+  if (st === "warning") badge.title = detail;
+  td.appendChild(badge);
+  return td;
+}
 
-  const list = $("plan-list");
-  list.textContent = "";
-  if (!plan) {
-    const empty = document.createElement("p");
-    empty.className = "py-10 text-center text-sm text-slate-400";
-    empty.textContent = state.planning
-      ? t("plan.summary.planning")
-      : t("plan.summary.noSelection");
-    list.append(empty);
-    return;
-  }
-  const packages = plan.packages.filter(
-    (pkg) => state.planFilter === "all" || pkg.kind === state.planFilter
+function entryRow(
+  rowIndex,
+  { strategy = null, strategyTip = null, strategyWarning = false, indent = false } = {}
+) {
+  const row = state.rows[rowIndex];
+  const tr = document.createElement("tr");
+  tr.className = "border-b border-slate-100 hover:bg-slate-50";
+  tr.dataset.rowIndex = String(rowIndex);
+  const tip = [
+    row.excluded,
+    row.original ? t("row.original", { name: row.original }) : null,
+    row.detail,
+    row.packageTip,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  tr.append(
+    checkboxCell(rowIndex),
+    nameCell(row.name, tip, { indent }),
+    sizeCell(row.size),
+    strategyCell(strategy, { warning: strategyWarning, tip: strategyTip }),
+    statusCell(displayStatus(rowIndex), { failMsg: row.failMsg, detail: row.detail })
   );
-  if (!packages.length) {
-    const empty = document.createElement("p");
-    empty.className = "py-10 text-center text-sm text-slate-400";
-    empty.textContent = t("plan.empty");
-    list.append(empty);
-    return;
+  return tr;
+}
+
+// 分组标题行: 标题 + 灰色附注(如「共 86 个文件」); 合并包/未纳入打包共用
+function groupRow({ title, note = null, tip, size, kind, status, dataset = {} }) {
+  const tr = document.createElement("tr");
+  tr.className = GROUP_ROW_CLASS;
+  const td0 = document.createElement("td");
+  td0.className = "py-2";
+  const td1 = document.createElement("td");
+  td1.className = "py-2 pr-2 truncate max-w-0";
+  const titleEl = document.createElement("span");
+  titleEl.className = "font-medium text-slate-700";
+  titleEl.textContent = title;
+  td1.appendChild(titleEl);
+  if (note) {
+    td1.appendChild(document.createTextNode(" "));
+    const noteEl = document.createElement("span");
+    noteEl.className = "ml-1.5 text-slate-400";
+    noteEl.textContent = note;
+    td1.appendChild(noteEl);
   }
-  const limit = 200;
-  packages.slice(0, limit).forEach((pkg) => list.append(renderPlanCard(pkg)));
-  if (packages.length > limit) {
-    const more = document.createElement("p");
-    more.className = "py-2 text-center text-xs text-slate-400";
-    more.textContent = t("plan.morePackages", { count: packages.length - limit });
-    list.append(more);
+  if (tip) td1.title = tip;
+  const td2 = document.createElement("td");
+  td2.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
+  if (size != null) td2.textContent = fmtBytes(size);
+  const tdStatus = statusCell(status);
+  for (const [key, value] of Object.entries(dataset)) tr.dataset[key] = value;
+  tr.append(td0, td1, td2, strategyCell(kind, { tip }), tdStatus);
+  return tr;
+}
+
+// 智能打包: 按方案顺序平铺表格 —— 合并在标题行下展开成员(成员行缩进), 压缩/分包各占一行,
+// 未勾选条目集中到表尾, 保证任何条目都能勾回。
+function renderPlanRows(tbody) {
+  const included = new Set();
+  let bundleCount = 0;
+  state.plan.packages.forEach((pkg, packageIndex) => {
+    pkg.memberIndexes.forEach((i) => included.add(i));
+    if (pkg.kind === "bundle") {
+      bundleCount += 1;
+      tbody.appendChild(
+        groupRow({
+          title: t("plan.group.bundle", { n: bundleCount }),
+          note: t("plan.group.count", { count: pkg.memberIndexes.length }),
+          tip: t("plan.group.meta", {
+            members: pkg.memberIndexes.length,
+            entries: pkg.entryCount,
+          }),
+          size: pkg.inputBytes,
+          kind: "bundle",
+          status: packageDisplayStatus(packageIndex),
+          dataset: { packageIndex: String(packageIndex) },
+        })
+      );
+      for (const i of pkg.memberIndexes) tbody.appendChild(entryRow(i, { indent: true }));
+      return;
+    }
+    for (const i of pkg.memberIndexes) {
+      const row = state.rows[i];
+      tbody.appendChild(
+        entryRow(i, {
+          strategy: pkg.kind,
+          strategyWarning: !!row?.packageWarning,
+          strategyTip: row?.packageTip ?? null,
+        })
+      );
+    }
+  });
+
+  const rest = [];
+  state.rows.forEach((_, i) => {
+    if (!included.has(i)) rest.push(i);
+  });
+  if (rest.length > 0) {
+    tbody.appendChild(
+      groupRow({
+        title: t("plan.group.unselected"),
+        note: t("plan.group.count", { count: rest.length }),
+        tip: t("plan.group.unselectedTip", { count: rest.length }),
+        size: null,
+        kind: null,
+        status: null,
+        dataset: { group: "unselected" },
+      })
+    );
+    for (const i of rest) tbody.appendChild(entryRow(i));
   }
 }
 
-function setPlanOpen(open) {
-  state.planOpen = open;
-  renderPlanDialog();
-  syncMenuState(); // 方案抽屉打开时不允许从菜单进入设置页
-  if (open) $("plan-close")?.focus();
-  else $("plan-open")?.focus();
+function renderRows() {
+  const tbody = $("rows");
+  tbody.textContent = "";
+  $("empty").classList.toggle("hidden", state.rows.length > 0);
+  if (planView()) renderPlanRows(tbody);
+  else state.rows.forEach((_, i) => tbody.appendChild(entryRow(i)));
 }
 
-function highlightRow(rowIndex) {
-  const tr = $("rows").querySelector(`tr[data-row-index="${rowIndex}"]`);
-  if (!tr) return;
-  tr.scrollIntoView?.({ block: "center" });
-  tr.classList.add("bg-amber-50");
-  setTimeout(() => tr.classList.remove("bg-amber-50"), 1200);
-}
-
-$("plan-open").addEventListener("click", () => setPlanOpen(true));
-$("plan-close").addEventListener("click", () => setPlanOpen(false));
-$("plan-backdrop").addEventListener("click", (event) => {
-  if (event.target === $("plan-backdrop")) setPlanOpen(false);
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.planOpen) setPlanOpen(false);
-});
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || event.defaultPrevented) return;
   if (state.view === "settings") {
     event.preventDefault();
     closeSettings();
   }
-});
-$("plan-filters").addEventListener("click", (event) => {
-  const button = event.target.closest?.("[data-plan-filter]");
-  if (!button) return;
-  state.planFilter = button.dataset.planFilter;
-  renderPlanDialog();
-});
-$("plan-list").addEventListener("click", (event) => {
-  const target = event.target.closest?.("[data-row-index]");
-  if (target) highlightRow(Number(target.dataset.rowIndex));
 });
 
 // —— 扫描: invoke("scan"), onScan Channel 流式推送(rows 骨架 → 逐条 row 大小) ——
@@ -1548,7 +1583,7 @@ function displayStatus(i) {
   return state.run.finished ? "done" : "running";
 }
 
-// —— 表格渲染 ——
+// —— 表格渲染: 普通模式 = 文件列表; 智能打包且方案就绪 = 按方案分组的同一张表 ——
 function renderTable(items) {
   // checked 已有值则保留(全选切换/进度重绘时), 否则默认勾选 pending 行
   // (被标排除行 excluded 显示但默认不勾选; 手动勾选了就会被压缩)
@@ -1556,99 +1591,7 @@ function renderTable(items) {
     ...it,
     checked: state.rows[i]?.checked ?? (it.status === "pending" && !it.excluded),
   }));
-  const tbody = $("rows");
-  tbody.textContent = "";
-  $("empty").classList.toggle("hidden", items.length > 0);
-
-  for (const [i, r] of state.rows.entries()) {
-    const st = displayStatus(i);
-    const tr = document.createElement("tr");
-    tr.className = "border-b border-slate-100 hover:bg-slate-50";
-
-    const td0 = document.createElement("td");
-    td0.className = "py-2 text-center";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = r.checked && st === "pending";
-    cb.disabled = r.status !== "pending" || !!state.run;
-    cb.setAttribute("aria-label", t("row.select", { name: r.name }));
-    cb.className = "accent-blue-600 align-middle";
-    cb.addEventListener("change", () => {
-      state.rows[i].checked = cb.checked;
-      syncConfirm();
-      schedulePlan();
-    });
-    td0.appendChild(cb);
-
-    const td1 = document.createElement("td");
-    td1.className = "py-2 pr-2 truncate max-w-0";
-    // 悬停看全名 + 附注(排除原因 / 原名 / 告警原因 / 元数据行数)
-    const tip = [
-      r.excluded,
-      r.original ? t("row.original", { name: r.original }) : null,
-      r.detail,
-      r.packageTip,
-    ]
-      .filter(Boolean)
-      .join(", ");
-    td1.title = tip ? `${r.name}(${tip})` : r.name;
-    td1.textContent = r.name;
-
-    const td2 = document.createElement("td");
-    td2.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
-    td2.dataset.cell = "size";
-    if (r.size == null) {
-      // 扫描流式骨架: 大小未知, 先显示小 spinner(收到 row 事件后原地替换)
-      const spinner = document.createElement("span");
-      spinner.className = SCAN_SIZE_SPINNER;
-      spinner.setAttribute("aria-hidden", "true");
-      td2.appendChild(spinner);
-    } else {
-      td2.textContent = fmtBytes(r.size);
-    }
-
-    const tdPkg = document.createElement("td");
-    tdPkg.className = "py-2 pr-2 text-xs";
-    tdPkg.classList.toggle(
-      "hidden",
-      !(state.mode === "compress" && state.smartPackaging)
-    );
-    const pkgBadge = document.createElement("span");
-    pkgBadge.className =
-      "inline-block rounded-full px-2 py-0.5 text-xs " + packageBadgeClass(r);
-    pkgBadge.textContent = packageLabel(r);
-    if (r.packageTip) pkgBadge.title = r.packageTip;
-    tdPkg.appendChild(pkgBadge);
-
-    const td3 = document.createElement("td");
-    td3.className = "py-2 pr-4";
-    const badge = document.createElement("span");
-    badge.className =
-      "inline-block px-2 py-0.5 rounded-full text-xs " + BADGE[st];
-    badge.textContent =
-      st === "pending"
-        ? t(
-            state.mode === "compress"
-              ? "row.status.pendingCompress"
-              : "row.status.pendingExtract"
-          )
-        : st === "done"
-          ? t("row.status.done")
-          : st === "running"
-            ? t("row.status.running")
-            : st === "failed"
-              ? t("row.status.failed")
-              : st === "warning"
-                ? t("row.status.warning")
-                : t("row.status.meta");
-    if (st === "failed") badge.title = r.failMsg || "";
-    if (st === "warning") badge.title = r.detail || "";
-    td3.appendChild(badge);
-
-    tr.dataset.rowIndex = String(i);
-    tr.append(td0, td1, td2, tdPkg, td3);
-    tbody.appendChild(tr);
-  }
+  renderRows();
   syncConfirm();
 }
 
@@ -1916,7 +1859,7 @@ function mockRun(names) {
   const total = packages ? packages.length : names.length;
   return new Promise((resolve) => {
     let done = 0;
-    const t = setInterval(() => {
+    const timer = setInterval(() => {
       done += 1;
       let frac;
       let entry;
@@ -1926,7 +1869,7 @@ function mockRun(names) {
           .reduce((sum, pkg) => sum + pkg.inputBytes, 0);
         const pkg = packages[done - 1];
         entry = pkg.kind === "bundle"
-          ? t("plan.kind.bundleN", {
+          ? t("plan.group.bundle", {
               n: packages.filter((p) => p.kind === "bundle").indexOf(pkg) + 1,
             })
           : state.rows[pkg.memberIndexes[0]]?.name ?? pkg.id;
@@ -1946,7 +1889,7 @@ function mockRun(names) {
         entry,
       });
       if (done >= total) {
-        clearInterval(t);
+        clearInterval(timer);
         if (packages) {
           resolve({
             cancelled: false,
@@ -1981,7 +1924,7 @@ function mockRun(names) {
       }
     }, 400);
     mockCancel = () => {
-      clearInterval(t);
+      clearInterval(timer);
       resolve({ cancelled: true, entries: [], packages: [], groups: [], warnings: [] });
     };
   });

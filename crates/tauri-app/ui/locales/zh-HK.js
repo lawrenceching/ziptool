@@ -67,20 +67,16 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "bundleMaxTitle": "單一合併包的原始大小上限; 留空跟隨分卷門檻",
       "maxEntries": "項目≤",
       "maxEntriesPlaceholder": "50000",
-      "maxEntriesTitle": "單一合併包的項目數上限; 留空不限制",
-      "viewPlan": "查看方案"
+      "maxEntriesTitle": "單一合併包的項目數上限; 留空不限制"
     },
     "plan": {
-      "title": "打包方案",
-      "close": "關閉",
-      "strategyLine": "目前策略: 合併≤{{merge}} · 分卷>{{split}} · 合併包≤{{bundle}} · 項目≤{{entries}}",
-      "filter": { "all": "全部", "direct": "直接", "split": "分卷", "bundle": "合併" },
-      "kind": {
-        "direct": "直接",
-        "split": "分卷",
-        "bundle": "合併",
-        "bundleN": "合併 #{{n}}",
-        "directOver": "直接 · 超限"
+      "strategy": { "direct": "壓縮", "split": "分卷", "bundle": "合併" },
+      "group": {
+        "bundle": "合併打包 #{{n}}",
+        "count": "共 {{count}} 個檔案",
+        "unselected": "未納入打包",
+        "meta": "{{members}} 項 · {{entries}} 個項目",
+        "unselectedTip": "{{count}} 個項目未勾選, 勾選後會重新計算方案"
       },
       "reason": {
         "split": "{{size}} > 分卷門檻 {{limit}}",
@@ -92,16 +88,10 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
         "noSelection": "未選擇項目",
         "planning": "正在計算打包方案…",
         "error": "方案無效: {{error}}",
-        "text": "預計 {{total}} 個邏輯包（{{direct}} 直接 · {{split}} 分卷 · {{bundle}} 合併）· 最大 {{max}}",
+        "text": "預計 {{total}} 個壓縮包（{{direct}} 壓縮 · {{split}} 分卷 · {{bundle}} 合併）· 最大 {{max}}",
         "splitNote": "{{count}} 個分卷按 {{limit}} 切卷",
         "warnings": "{{count}} 個提醒"
       },
-      "packageMeta": "{{size}} · {{members}} 項 · {{entries}} 個項目",
-      "moreMembers": "還有 {{count}} 個成員",
-      "morePackages": "還有 {{count}} 個包未顯示, 請用篩選縮小範圍",
-      "empty": "沒有符合目前篩選的包",
-      "splitCardNote": "單一項目超過分卷門檻; 壓縮時按 {{limit}} 切卷, 實際卷數取決於壓縮後大小",
-      "note": "大小為原始大小; 壓縮後大小/實際卷數未知。",
       "warning": {
         "tooManyEntries": "{{name}} 項目數 {{count}} 超過上限 {{limit}}, 已改為直接壓縮"
       }
@@ -139,7 +129,7 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "selectAll": "全選",
       "name": "檔案名稱",
       "size": "大小",
-      "package": "打包",
+      "strategy": "策略",
       "status": "狀態",
       "empty": "點擊「來源資料夾」選擇目錄, 也可直接拖入資料夾"
     },

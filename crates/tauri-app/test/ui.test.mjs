@@ -327,10 +327,11 @@ test("行为: 压缩全流程 — 勾选筛选、进度行状态、终态烘焙�
   assert.equal(comp.args.src, "C:\\demo\\data");
   assert.equal(comp.args.dst, "C:\\out");
 
-  // 运行中第一帧(进度 done=1): sel=[Novel, photo.jpg] → Novel 完成, photo.jpg 进行中
-  assert.deepEqual(prog, ["完成", "待压缩", "进行中"]);
-  // 终态: 勾选的两行完成, 未勾选保持待压缩; 告警走状态栏
-  assert.deepEqual(h.badges(), ["完成", "待压缩", "完成"]);
+  // 运行中第一帧(进度 done=1): 方案表格按包推进 → Novel 完成, photo.jpg 进行中,
+  // 未勾选的 media 在表尾「未纳入打包」分组里保持待压缩
+  assert.deepEqual(prog, ["完成", "进行中", "待压缩"]);
+  // 终态: 勾选的两个包完成, 未勾选条目保持待压缩; 告警走状态栏
+  assert.deepEqual(h.badges(), ["完成", "完成", "待压缩"]);
   assert.ok(h.doc.getElementById("msg").textContent.includes("压缩完成: 2 个压缩包"));
   assert.ok(h.doc.getElementById("msg").textContent.includes("1 条告警"));
   // 完成行不再可勾选; 确认钮恢复但无新勾选可处理 → 禁用
@@ -470,7 +471,7 @@ test("行为: 模式切换作废旧扫描(源清空、表格清空、提示重�
 });
 
 // ———— 智能打包开关 ————
-test("智能打包: 默认关闭 — 策略/打包列隐藏, 不算方案, compress 传 null 打包参数", async () => {
+test("智能打包: 默认关闭 — 策略行/策略列隐藏, 不算方案, compress 传 null 打包参数", async () => {
   let planCalls = 0;
   const h = makeHarness(true, ({ cmd, args }) => {
     if (cmd === "plugin:dialog|open")
@@ -486,7 +487,10 @@ test("智能打包: 默认关闭 — 策略/打包列隐藏, 不算方案, compr
   const el = (id) => h.doc.getElementById(id);
   assert.equal(el("opt-smart").checked, false, "默认不勾选");
   assert.ok(el("strategy-row").classList.contains("hidden"), "策略行隐藏");
-  assert.ok(el("th-package").classList.contains("hidden"), "打包列表头隐藏");
+  assert.ok(el("th-strategy").classList.contains("hidden"), "策略列表头隐藏");
+  // 方案弹窗已删除: 方案直接呈现在表格里
+  assert.equal(h.doc.getElementById("plan-backdrop"), null);
+  assert.equal(h.doc.getElementById("plan-open"), null);
 
   // 阈值改动也不得触发方案计算(未勾选时没有方案概念)
   const merge = el("opt-merge-below");
@@ -500,10 +504,10 @@ test("智能打包: 默认关闭 — 策略/打包列隐藏, 不算方案, compr
   assert.equal(h.rows().length, 3);
   assert.ok(
     h.rows().every((tr) => tr.children[3].classList.contains("hidden")),
-    "行内打包列隐藏"
+    "行内策略列隐藏"
   );
   assert.equal(el("plan-summary").textContent, "");
-  assert.ok(el("plan-open").disabled);
+  assert.ok(el("plan-warnings").classList.contains("hidden"));
 
   el("dst").click();
   await h.flush();
@@ -519,7 +523,7 @@ test("智能打包: 默认关闭 — 策略/打包列隐藏, 不算方案, compr
   jsonEq(comp.args.entries, ["Novel", "media", "photo.jpg"]);
 });
 
-test("智能打包: 勾选后恢复方案(摘要/抽屉/确认校验), 取消勾选清方案", async () => {
+test("智能打包: 勾选后表格切换为方案分组(策略列), 取消勾选恢复文件列表", async () => {
   let planCalls = 0;
   const h = makeHarness(true, ({ cmd, args }) => {
     if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
@@ -534,36 +538,86 @@ test("智能打包: 勾选后恢复方案(摘要/抽屉/确认校验), 取消勾
   await pickSource(h);
   assert.equal(planCalls, 0, "默认关闭时扫描后不算方案");
 
-  // 勾选: 立即显示策略行/打包列, 方案计算中禁用确认
+  // 勾选: 立即显示策略行/策略列, 方案计算中禁用确认
   el("opt-smart").click();
   assert.ok(!el("strategy-row").classList.contains("hidden"), "策略行显示");
-  assert.ok(!el("th-package").classList.contains("hidden"), "打包列显示");
+  assert.ok(!el("th-strategy").classList.contains("hidden"), "策略列显示");
   assert.equal(el("confirm").disabled, true, "方案计算中确认禁用");
   await sleep(260);
   await h.flush();
   assert.equal(planCalls, 1, "勾选后计算一次方案");
   assert.equal(el("confirm").disabled, false, "方案就绪后可确认");
   assert.match(el("plan-summary").textContent, /预计/);
-  assert.equal(el("plan-open").disabled, false);
+  // 每行 = 一个包: Novel 超分包阈值 → 分包; 其余 → 压缩
   assert.deepEqual(
     h.rows().map((tr) => tr.children[3].textContent),
-    ["分包", "直接", "直接"]
+    ["分包", "压缩", "压缩"]
   );
+  assert.equal(h.doc.getElementById("plan-warnings").classList.contains("hidden"), true);
 
-  el("plan-open").click();
-  assert.ok(!el("plan-backdrop").classList.contains("hidden"), "可打开方案抽屉");
-  el("plan-close").click();
-  assert.ok(el("plan-backdrop").classList.contains("hidden"));
-
-  // 再取消勾选: 清方案/隐藏策略行与打包列, 不再请求方案, 确认恢复可用
+  // 再取消勾选: 清方案/隐藏策略行与策略列, 不再请求方案, 确认恢复可用
   el("opt-smart").click();
   await sleep(260);
   assert.equal(planCalls, 1, "取消勾选不得再调用 plan_packages");
   assert.ok(el("strategy-row").classList.contains("hidden"));
-  assert.ok(el("th-package").classList.contains("hidden"));
+  assert.ok(el("th-strategy").classList.contains("hidden"));
   assert.ok(h.rows().every((tr) => tr.children[3].classList.contains("hidden")));
   assert.equal(el("plan-summary").textContent, "");
   assert.equal(el("confirm").disabled, false, "无方案也可确认");
+});
+
+test("方案表格: 合并包 = 标题行 + 成员行; 未勾选条目归入「未纳入打包」", async () => {
+  const plan = {
+    planId: "group-plan",
+    packages: [
+      { id: "p0", kind: "split", memberIndexes: [0], inputBytes: 2_600_000_000, entryCount: 1 },
+      { id: "p1", kind: "bundle", memberIndexes: [1], inputBytes: 890_000_000, entryCount: 1 },
+    ],
+    summary: {
+      totalPackages: 2,
+      direct: 0,
+      split: 1,
+      bundle: 1,
+      selectedBytes: 3_490_000_000,
+      maxDirectOrBundleBytes: 890_000_000,
+      maxBundleEntries: 1,
+      effective: {
+        mergeBelow: 100 * 1024 ** 2,
+        splitAbove: 2 * 1024 ** 3,
+        bundleMax: 2 * 1024 ** 3,
+        maxEntries: 50_000,
+      },
+    },
+    warnings: [],
+  };
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "scan") return SCAN_COMPRESS;
+    if (cmd === "plan_packages") return plan;
+    return null;
+  });
+  h.doc.getElementById("opt-smart").click();
+  await pickSource(h);
+  await h.flush();
+
+  // photo.jpg(行 2)不在方案里 → 表尾「未纳入打包」分组
+  const rows = h.rows();
+  assert.equal(rows.length, 5);
+  assert.equal(rows[0].children[1].textContent, "Novel", "分包单行");
+  assert.equal(rows[0].children[3].textContent, "分包");
+  // 合并包标题行: 「合并打包 #N 共 M 个文件」, 成员行行首缩进
+  assert.equal(rows[1].children[1].textContent, "合并打包 #1 共 1 个文件");
+  assert.equal(rows[1].children[3].textContent, "合并");
+  assert.equal(rows[1].children[2].textContent.includes("MB"), true, "标题行显示包原始大小");
+  assert.equal(rows[2].children[1].textContent, "media", "成员行");
+  assert.ok(rows[2].children[1].className.includes("pl-4"), "成员行行首缩进");
+  assert.equal(rows[2].children[3].textContent, "—", "成员行策略列不重复标包策略");
+  assert.equal(rows[2].children[4].textContent, "待压缩", "成员行状态跟随包");
+  assert.equal(rows[3].children[1].textContent, "未纳入打包 共 1 个文件", "未勾选条目分组标题");
+  assert.equal(rows[4].children[1].textContent, "photo.jpg");
+  assert.ok(!rows[4].children[1].className.includes("pl-4"), "未纳入打包的条目不做缩进");
+  assert.equal(rows[4].children[3].textContent, "—");
+  assert.match(h.doc.getElementById("plan-summary").textContent, /2 个压缩包/);
 });
 
 // ———— 扫描不锁 UI: 只锁确认钮 + 流式表格 ————
@@ -827,12 +881,12 @@ test("行为: 首次打开(未点过模式)— 压缩模式控件初始可见, �
   const h = makeHarness(false, () => null);
   assert.ok(!h.doc.getElementById("opt-preset-wrap").classList.contains("hidden"), "「模式」预设开关初始可见");
   assert.ok(!h.doc.getElementById("opt-advanced-wrap").classList.contains("hidden"), "「高级」checkbox 初始可见");
-  // 智能打包默认关闭: 策略行/打包列初始隐藏, 开关本身在压缩模式常显
+  // 智能打包默认关闭: 策略行/策略列初始隐藏, 开关本身在压缩模式常显
   const smart = h.doc.getElementById("opt-smart");
   assert.ok(!smart.checked, "智能打包默认不勾选");
   assert.ok(!h.doc.getElementById("opt-smart-wrap").classList.contains("hidden"), "智能打包开关压缩模式可见");
   assert.ok(h.doc.getElementById("strategy-row").classList.contains("hidden"), "策略行默认隐藏");
-  assert.ok(h.doc.getElementById("th-package").classList.contains("hidden"), "打包列表头默认隐藏");
+  assert.ok(h.doc.getElementById("th-strategy").classList.contains("hidden"), "策略列表头默认隐藏");
   assert.ok(h.doc.getElementById("opt-force-wrap").classList.contains("hidden"), "解压专属「覆盖」初始隐藏");
   assert.ok(h.doc.getElementById("opt-format-wrap").classList.contains("hidden"), "高级子项仍等勾选展开");
 });
@@ -1354,7 +1408,7 @@ test("契约: 扫描后自动算方案; 阈值改动只重算方案, 不重扫",
   await h.flush();
   assert.equal(planCalls, 1, "扫描完成后应自动算一次方案");
   assert.match(h.doc.getElementById("plan-summary").textContent, /预计/);
-  assert.equal(h.doc.getElementById("plan-open").disabled, false);
+  assert.equal(h.doc.getElementById("plan-warnings").classList.contains("hidden"), true);
 
   const merge = h.doc.getElementById("opt-merge-below");
   merge.value = "50m";
@@ -1373,7 +1427,7 @@ test("契约: 扫描后自动算方案; 阈值改动只重算方案, 不重扫",
   assert.equal(lastPlan.args.packaging.splitAbove, "2g");
 });
 
-test("行为: 摘要/打包列/方案抽屉展示只读方案", async () => {
+test("行为: 摘要 + 表格方案分组展示只读方案", async () => {
   const plan = {
     planId: "custom-plan",
     packages: [
@@ -1417,29 +1471,26 @@ test("行为: 摘要/打包列/方案抽屉展示只读方案", async () => {
     return null;
   });
 
-  h.doc.getElementById("opt-smart").click(); // 智能打包: 展示策略/打包列/抽屉
+  h.doc.getElementById("opt-smart").click(); // 智能打包: 表格按方案分组展示
   await pickSource(h);
-  assert.match(h.doc.getElementById("plan-summary").textContent, /2 个逻辑包/);
-  assert.deepEqual(
-    h.rows().map((tr) => tr.children[3].textContent),
-    ["分包", "合并 #1", "合并 #1"]
-  );
-
-  h.doc.getElementById("plan-open").click();
-  assert.ok(!h.doc.getElementById("plan-backdrop").classList.contains("hidden"));
-  assert.equal(h.doc.querySelectorAll("#plan-list > div").length, 2);
-  assert.match(h.doc.getElementById("plan-list").textContent, /media/);
-  assert.match(h.doc.getElementById("plan-list").textContent, /photo\.jpg/);
-
-  h.doc.getElementById("plan-filter-bundle").click();
-  assert.equal(h.doc.querySelectorAll("#plan-list > div").length, 1);
-  assert.match(h.doc.getElementById("plan-list").textContent, /media/);
-
-  h.doc.getElementById("plan-close").click();
-  assert.ok(h.doc.getElementById("plan-backdrop").classList.contains("hidden"));
+  assert.match(h.doc.getElementById("plan-summary").textContent, /2 个压缩包/);
+  // 分包单行 + 合并标题行 + 两个成员行
+  const rows = h.rows();
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0].children[1].textContent, "Novel");
+  assert.equal(rows[0].children[3].textContent, "分包");
+  assert.equal(rows[1].children[1].textContent, "合并打包 #1 共 2 个文件");
+  assert.equal(rows[1].children[3].textContent, "合并");
+  assert.equal(rows[2].children[1].textContent, "media");
+  assert.ok(rows[2].children[1].className.includes("pl-4"), "合并成员行缩进");
+  assert.equal(rows[2].children[3].textContent, "—");
+  assert.equal(rows[3].children[1].textContent, "photo.jpg");
+  // 只读审核: 没有筛选/关闭按钮, 也没有可交互的包卡片
+  assert.equal(h.doc.getElementById("plan-backdrop"), null);
+  assert.equal(h.doc.getElementById("plan-list"), null);
 });
 
-test("行为: 条目超限 warning 显示在摘要/行/抽屉", async () => {
+test("行为: 条目超限 warning 显示在摘要/提醒条/行", async () => {
   const plan = {
     planId: "warn-plan",
     packages: [
@@ -1474,18 +1525,24 @@ test("行为: 条目超限 warning 显示在摘要/行/抽屉", async () => {
     return null;
   });
 
-  h.doc.getElementById("opt-smart").click(); // 智能打包: 方案提醒需展示在摘要/行/抽屉
+  h.doc.getElementById("opt-smart").click(); // 智能打包: 提醒展示在摘要/提醒条/行
   await pickSource(h);
   assert.match(h.doc.getElementById("plan-summary").textContent, /1 条提醒/);
+  // 超限条目改为直接压缩: 策略列仍是「压缩」, 但徽章为告警色并带原因
+  const rows = h.rows();
   assert.deepEqual(
-    h.rows().map((tr) => tr.children[3].textContent),
-    ["直接", "直接 · 超限", "直接"]
+    rows.map((tr) => tr.children[3].textContent),
+    ["压缩", "压缩", "压缩"]
   );
+  const warnBadge = rows[1].children[3].querySelector("span");
+  assert.ok(warnBadge.className.includes("text-amber-700"), "超限行用告警色");
+  assert.match(warnBadge.title, /60000/, "徽章悬停看超限原因");
 
-  h.doc.getElementById("plan-open").click();
-  assert.match(h.doc.getElementById("plan-warnings").textContent, /media/);
-  assert.match(h.doc.getElementById("plan-warnings").textContent, /60000/);
-  h.doc.getElementById("plan-close").click();
+  // 提醒不再藏进弹窗: 常驻提醒条与表格同屏
+  const warnings = h.doc.getElementById("plan-warnings");
+  assert.ok(!warnings.classList.contains("hidden"));
+  assert.match(warnings.textContent, /media/);
+  assert.match(warnings.textContent, /60000/);
 });
 
 test("行为: 包级进度失败时, 合并包所有成员一起标失败", async () => {
@@ -1541,7 +1598,7 @@ test("行为: 包级进度失败时, 合并包所有成员一起标失败", asyn
   await h.flush();
   await h.flush();
 
-  assert.deepEqual(h.badges(), ["完成", "失败", "失败"]);
+  assert.deepEqual(h.badges(), ["完成", "失败", "失败", "失败"]);
   assert.ok(h.doc.getElementById("msg").textContent.includes("压缩失败"));
 });
 

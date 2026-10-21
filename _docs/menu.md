@@ -120,12 +120,11 @@ App
 ## 5. 设置入口与可用性
 
 - 设置入口: 菜单栏 `设置 > 设置…`(`#menu-settings-open`)
-- 可用性: `settingsReady && !state.locked && !state.planOpen && state.view !== "settings"`
+- 可用性: `settingsReady && !state.locked && state.view !== "settings"`
   - 设置加载完成前禁用(避免用默认值展示/保存)
-  - 扫描 / 压缩 / 解压期间禁用(与原齿轮按钮规则一致)
-  - 方案抽屉打开时禁用
+  - 任务运行中(压缩 / 解压)禁用; 扫描与方案计算期间可用, 不锁 UI
   - 已在设置页时禁用, 避免重复进入
-- `syncMenuState()` 在设置加载前后、任务锁变化、方案抽屉开关、视图切换时更新 `disabled`
+- `syncMenuState()` 在设置加载前后、任务锁变化、视图切换时更新 `disabled`
 
 ## 6. 菜单动作(壳层命令)
 

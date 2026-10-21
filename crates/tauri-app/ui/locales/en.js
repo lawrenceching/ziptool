@@ -67,20 +67,16 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "bundleMaxTitle": "Maximum raw size of one merged bundle; leave empty to follow the split threshold",
       "maxEntries": "Entries ≤",
       "maxEntriesPlaceholder": "50000",
-      "maxEntriesTitle": "Maximum archive entries in one merged bundle; leave empty for no limit",
-      "viewPlan": "View plan"
+      "maxEntriesTitle": "Maximum archive entries in one merged bundle; leave empty for no limit"
     },
     "plan": {
-      "title": "Packaging plan",
-      "close": "Close",
-      "strategyLine": "Strategy: merge ≤ {{merge}} · split > {{split}} · bundle ≤ {{bundle}} · entries ≤ {{entries}}",
-      "filter": { "all": "All", "direct": "Direct", "split": "Split", "bundle": "Merged" },
-      "kind": {
-        "direct": "Direct",
-        "split": "Split",
-        "bundle": "Merged",
-        "bundleN": "Merged #{{n}}",
-        "directOver": "Direct · over limit"
+      "strategy": { "direct": "Compress", "split": "Split", "bundle": "Merge" },
+      "group": {
+        "bundle": "Merged pack #{{n}}",
+        "count": "{{count}} file(s)",
+        "unselected": "Not packaged",
+        "meta": "{{members}} item(s) · {{entries}} entries",
+        "unselectedTip": "{{count}} unchecked item(s); checking them recalculates the plan"
       },
       "reason": {
         "split": "{{size}} > split threshold {{limit}}",
@@ -92,16 +88,10 @@ window.__ZIPTOOL_LOCALES__["en"] = {
         "noSelection": "No items selected",
         "planning": "Calculating packaging plan…",
         "error": "Plan invalid: {{error}}",
-        "text": "Expected {{total}} logical packages ({{direct}} direct · {{split}} split · {{bundle}} merged) · max {{max}}",
+        "text": "Expected {{total}} archives ({{direct}} compress · {{split}} split · {{bundle}} merge) · max {{max}}",
         "splitNote": "{{count}} split package(s) at {{limit}}",
         "warnings": "{{count}} notice(s)"
       },
-      "packageMeta": "{{size}} · {{members}} item(s) · {{entries}} entries",
-      "moreMembers": "{{count}} more member(s)",
-      "morePackages": "{{count}} more package(s) not shown; narrow the filter",
-      "empty": "No packages match this filter",
-      "splitCardNote": "Single item above the split threshold; compressed into volumes of {{limit}}, actual count depends on compressed size",
-      "note": "Sizes are raw; compressed size and actual volume count are unknown.",
       "warning": {
         "tooManyEntries": "{{name}} has {{count}} entries, over the limit {{limit}}; changed to direct compression"
       }
@@ -139,7 +129,7 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "selectAll": "Select all",
       "name": "Name",
       "size": "Size",
-      "package": "Package",
+      "strategy": "Strategy",
       "status": "Status",
       "empty": "Click Source folder to select a directory, or drop a folder here"
     },
