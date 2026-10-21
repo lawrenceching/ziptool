@@ -1698,8 +1698,13 @@ test("结构: App = MenuBar / Content / StatusBar; 菜单栏语义、快捷键�
       "MenuBar / Content / StatusBar 顺序正确"
     );
   }
-  assert.ok(content.contains(h.doc.getElementById("view-main")));
-  assert.ok(content.contains(h.doc.getElementById("view-settings")));
+  const viewMain = h.doc.getElementById("view-main");
+  const viewSettings = h.doc.getElementById("view-settings");
+  // 两者必须是 Content 的兄弟节点。设置页若嵌在主界面里,
+  // showView 给 #view-main 加 hidden 时会把设置页一起藏掉, 页面空白。
+  assert.equal(viewMain.parentElement, content);
+  assert.equal(viewSettings.parentElement, content);
+  assert.ok(!viewMain.contains(viewSettings));
 
   const nav = h.doc.getElementById("app-menu");
   assert.ok(menuBar.contains(nav));
@@ -1906,8 +1911,13 @@ test("设置页: 打开、边栏两项、默认策略都开、关机占位置灰
   });
   await openSettingsPage(h);
 
-  assert.ok(!h.doc.getElementById("view-settings").classList.contains("hidden"));
-  assert.ok(h.doc.getElementById("view-main").classList.contains("hidden"));
+  const viewSettings = h.doc.getElementById("view-settings");
+  const viewMain = h.doc.getElementById("view-main");
+  assert.ok(!viewSettings.classList.contains("hidden"));
+  assert.ok(viewMain.classList.contains("hidden"));
+  for (let node = viewSettings; node && node !== h.doc.body; node = node.parentElement) {
+    assert.ok(!node.classList.contains("hidden"), "设置页的祖先不能处于 hidden");
+  }
   assert.equal(h.doc.querySelectorAll("#settings-nav [data-section]").length, 2);
   assert.equal(h.doc.querySelector("#settings-nav [aria-current=page]").dataset.section, "general");
   assert.ok(!h.doc.querySelector('[data-panel="general"]').classList.contains("hidden"));
