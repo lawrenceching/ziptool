@@ -1,5 +1,7 @@
 # WebView2 启动失败：HRESULT 0x800700AA（2026-10-21）
 
+> 向 dsh 反馈的报告草稿见 [`dsh-workspace-write-tauri-report.md`](./dsh-workspace-write-tauri-report.md)。
+
 ## 现象
 
 ```text
