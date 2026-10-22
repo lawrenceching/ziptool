@@ -8,11 +8,12 @@
 ### 目标
 
 - 手动触发(`workflow_dispatch`, **无输入**): 从当前 `Cargo.toml` 读取版本, 要求 `v<版本>` tag 指向当前 HEAD, 先校验该 commit 的 CI 全绿, 再构建并创建 GitHub Release
-- 5 平台(与 CI test 矩阵一致: ubuntu-latest / ubuntu-24.04-arm / windows-latest / windows-11-arm / macos-latest)产出 **CLI 包 + Tauri 安装包**, 全部作为 Release 附件
+- 5 平台(与 CI test 矩阵一致: ubuntu-latest / ubuntu-24.04-arm / windows-latest / windows-11-arm / macos-latest)产出 **Tauri 安装包**, 全部作为 Release 附件
 - 产品名统一为 `ziptool`: CLI 二进制名 / Tauri `productName` / 发布包文件名
 
 ### 非目标
 
+- 发布 CLI 归档(`ziptool-cli-*.tar.gz` / `*.zip`); CLI 仍可本地 `cargo build -p zip-tool-cli`, 不进 GitHub Release
 - 代码签名 / 公证 / 自动更新(updater)
 - crate 内部名改名(`zip-tool-cli` / `zip-tool-core` / `zip-tool-tauri` 保持不变, 那是包管理层面名字)
 - 自动创建/推送 tag(由 `cargo bump-version` 负责; Release 只消费已存在的 tag)
@@ -40,7 +41,7 @@
     │  permissions: 顶层 contents: read; 仅 release job 提权 contents: write
     │  concurrency: release-${{ github.ref }}(cancel-in-progress: true)
     ├── job verify   ubuntu-latest   版本/tag 一致性 + 等待该 commit 的 CI 全绿
-    ├── job build    5 平台矩阵      CLI 归档 + tauri bundle → upload-artifact
+    ├── job build    5 平台矩阵      tauri bundle → upload-artifact
     └── job release  ubuntu-latest   download-artifact 合并 → gh release create
 ```
 
@@ -70,25 +71,20 @@ verify job 需显式 `permissions: {contents: read, actions: read}`——顶层�
 
 1. checkout(`ref: needs.verify.outputs.sha`)+ `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`(`cache-on-failure: true`)
 2. 平台依赖(照抄 ci.yml 相应步骤): Linux 装 webkit2gtk 等 Tauri 依赖; Windows / macOS 构建期无额外依赖(7z 是运行期依赖, release 构建不需要)
-3. **CLI 归档**:
-   - `cargo build --release -p zip-tool-cli` → `target/release/ziptool(.exe)`
-   - triple: `rustc -vV | sed -n 's/^host: //p'`; 版本: `${TAG#v}`(verify 已保证与 Cargo.toml 一致)
-   - unix: `tar czf dist/ziptool-cli-<ver>-<triple>.tar.gz -C target/release ziptool`
-   - Windows(`shell: pwsh`): `Compress-Archive -Path target/release/ziptool.exe -DestinationPath dist/ziptool-cli-<ver>-<triple>.zip`(runner 预装, 零额外依赖)
-4. **Tauri 包**: `setup-node@v4`(node 22, npm 缓存)→ `npm ci`(crates/tauri-app)→ `npx tauri build`
+3. **Tauri 包**: `setup-node@v4`(node 22, npm 缓存)→ `npm ci`(crates/tauri-app)→ `npx tauri build`
    - 前置: `crates/tauri-app/package.json` 增加 devDependency `@tauri-apps/cli: "^2"`, 本地 `npm install` 重生成 package-lock 后提交(npm 装平台预编译二进制, 5 平台全覆盖, 附赠本地 `npx tauri build` 能力)
    - 产物位置(workspace 根): `target/release/bundle/{deb,rpm,appimage,dmg,nsis,msi}/`
-5. **归集**: 把 CLI 归档与 bundle 按 glob 拷入平铺的 `dist/`(`*.deb` `*.rpm` `*.AppImage` `*.dmg` `*-setup.exe` `*.msi`), `upload-artifact@v4` 上传, artifact 名 `bundle-<os>`(`matrix.os`, 已足够区分平台, 免去跨 step 传递 triple). macOS 只取 `.dmg`(不传 `.app` 目录)
+4. **归集**: 把 bundle 按 glob 拷入平铺的 `dist/`(`*.deb` `*.rpm` `*.AppImage` `*.dmg` `*-setup.exe` `*.msi`), `upload-artifact@v4` 上传, artifact 名 `bundle-<os>`(`matrix.os`, 已足够区分平台, 免去跨 step 传递 triple). macOS 只取 `.dmg`(不传 `.app` 目录). **不包含 CLI 归档**
 
 产出物一览:
 
-| 平台 | CLI | Tauri |
-|---|---|---|
-| ubuntu-latest | `ziptool-cli-0.1.0-x86_64-unknown-linux-gnu.tar.gz` | `ziptool_0.1.0_amd64.deb` / `ziptool-0.1.0-1.x86_64.rpm` / `ziptool_0.1.0_amd64.AppImage` |
-| ubuntu-24.04-arm | `…-aarch64-unknown-linux-gnu.tar.gz` | 同上, 注意 rpm 的 arch 名是 `aarch64`(`ziptool-0.1.0-1.aarch64.rpm`), deb/AppImage 用 `arm64`/`amd64` 风格 |
-| windows-latest | `ziptool-cli-0.1.0-x86_64-pc-windows-msvc.zip` | `ziptool_0.1.0_x64-setup.exe` / `_x64_en-US.msi` |
-| windows-11-arm | `…-aarch64-pc-windows-msvc.zip` | 同上, `arm64` |
-| macos-latest | `ziptool-cli-0.1.0-aarch64-apple-darwin.tar.gz` | `ziptool_0.1.0_aarch64.dmg` |
+| 平台 | Tauri |
+|---|---|
+| ubuntu-latest | `ziptool_0.1.0_amd64.deb` / `ziptool-0.1.0-1.x86_64.rpm` / `ziptool_0.1.0_amd64.AppImage` |
+| ubuntu-24.04-arm | 同上, 注意 rpm 的 arch 名是 `aarch64`(`ziptool-0.1.0-1.aarch64.rpm`), deb/AppImage 用 `arm64`/`amd64` 风格 |
+| windows-latest | `ziptool_0.1.0_x64-setup.exe` / `_x64_en-US.msi` |
+| windows-11-arm | 同上, `arm64` |
+| macos-latest | `ziptool_0.1.0_aarch64.dmg` |
 
 ## 6. release job(发布)
 
@@ -119,11 +115,10 @@ verify job 需显式 `permissions: {contents: read, actions: read}`——顶层�
 | 风险 | 兜底 |
 |---|---|
 | Linux arm64 的 AppImage 打包失败(Tauri 生态历史弱点) | 回退为该平台 `npx tauri build --bundles deb,rpm` |
-| `windows-11-arm` 上 NSIS / WiX 打包失败 | 先实跑观察; 失败则该平台降级只出 CLI 归档(矩阵加 bundle 条件) |
+| `windows-11-arm` 上 NSIS / WiX 打包失败 | 先实跑观察; 失败则该平台从矩阵剔除或只保留可产出的 bundle 类型 |
 | 版本漂移(tag ≠ Cargo.toml ≠ tauri.conf) | `cargo bump-version` 统一写入三处; verify 再校验 Cargo/tauri 一致且 tag 指向 HEAD, 不会带病发布 |
 | 同一分支重复 dispatch 竞争 | `concurrency: release-<ref>` 取消旧 run; release job 的 view/upload 分支幂等 |
 | tauri build 首次运行下载 NSIS / WiX 工具慢 | 计入 build timeout 60 分钟余量; rust-cache 不缓存该目录, 接受每次下载 |
-| CLI 与 GUI 独立可执行文件同为 target/release/ziptool.exe, 后构建覆盖先构建 | Release 流程 CLI 归档步骤固定先于 tauri build(顺序写死在 yml 并加注释) |
 
 ## 9. 验证方式(bootstrap)
 
