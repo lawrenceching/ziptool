@@ -7,10 +7,13 @@
 //! - `cancel_current`: 取消当前任务(立即 kill 在跑的后端进程并清理半成品, 停止后续)
 //! - `load_settings` / `save_settings`: `settings.json` 读写(见 _docs/filtering_rules.md)
 //! - `menu_action`: 应用内菜单栏动作分发(报告问题 / 退出, 见 _docs/menu.md)
+//! - `dedup_scan` / `dedup_compare` / `dedup_verify` / `reveal_dedup_file`:
+//!   重复文件查找(见 _docs/dedup.md; 会话缓存在 [`DedupContext`], 大文件全量校验须用户确认)
 //!
 //! 命令在 `spawn_blocking` 中调 core, 进度经 `tauri::ipc::Channel` 推给前端;
-//! scan/compress/extract 单任务互斥, 任务结束释放忙闲标志并清空取消旗标。
+//! scan/compress/extract/查重单任务互斥, 任务结束释放忙闲标志并清空取消旗标。
 
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -31,26 +34,40 @@ use tauri::AppHandle;
 
 use zip_tool_core::strategy::{self, PackageKind, StrategyItem, StrategyParams};
 use zip_tool_core::{
-    CancelFlag, Entry, EntryKind, ExcludeReason, ExcludeRules, ExtractGroup, ExtractScan, Format,
-    Options, Phase, Progress, ScanReport,
+    CancelFlag, DedupGroup, DedupGroupState, DedupOptions, Entry, EntryKind, ExcludeReason,
+    ExcludeRules, ExtractGroup, ExtractScan, Format, Options, Phase, Progress, ScanReport,
 };
 
 use settings::SettingsLoadResult;
 
 const POISONED: &str = "state poisoned";
 const EXPIRED: &str = "扫描结果已过期, 请重新选择源文件夹";
+const DEDUP_EXPIRED: &str = "查重结果已过期, 请重新选择源文件夹";
 
 /// 全局状态:当前任务取消旗标 + 任务互斥 + 扫描结果缓存
 #[derive(Default)]
 struct AppState {
-    /// 运行中任务(扫描/压缩/解压)的取消旗标; 任务结束清空
+    /// 运行中任务(扫描/压缩/解压/查重)的取消旗标; 任务结束清空
     current: Mutex<Option<CancelFlag>>,
-    /// 任务互斥(scan/compress/extract 互斥): Some(kind) = 忙
+    /// 任务互斥(scan/compress/extract/查重互斥): Some(kind) = 忙
     busy: Mutex<Option<&'static str>>,
     /// 最近一次 scan 的结果(保鲜: 确认时校验 mode + src, 名单严格匹配)
     scan: Mutex<Option<ScanContext>>,
     /// 扫描代数: 每次成功 scan 递增, 用于 planId 失效旧方案
     scan_generation: AtomicU64,
+    /// 查重会话缓存(src + session_id 保鲜; 见 _docs/dedup.md §7.1)
+    dedup: Mutex<Option<DedupContext>>,
+    /// 查重会话代数: 每次成功 dedup_scan 递增, 作为 sessionId
+    dedup_generation: AtomicU64,
+}
+
+/// dedup 命令缓存的查重会话(每次阶段操作校验 src + session_id)
+struct DedupContext {
+    session_id: u64,
+    src: PathBuf,
+    /// 扫描时的排除规则(compare 时比对, 不一致 = 过期)
+    rules: ExcludeRules,
+    groups: Vec<DedupGroup>,
 }
 
 /// scan 命令缓存的扫描结果(mode + src + 规则匹配才可用)
@@ -88,6 +105,9 @@ impl From<&Progress> for ProgressEvent {
                 Phase::Scanning => "scanning".into(),
                 Phase::Compressing => "compressing".into(),
                 Phase::Extracting => "extracting".into(),
+                Phase::DedupScanning => "dedupScanning".into(),
+                Phase::DedupComparing => "dedupComparing".into(),
+                Phase::DedupVerifying => "dedupVerifying".into(),
             },
             done: p.done,
             total: p.total,
@@ -721,7 +741,7 @@ async fn scan(
 
     // UI 扫描期间不锁死: 用户可能已改选源/切模式。连点扫描时后到的 scan 胜出,
     // 先到的 scan 被取消并快速释放忙锁。
-    acquire_scan_slot(&state).await?;
+    acquire_scan_slot(&state, "scan").await?;
 
     let flag = CancelFlag::new();
     if let Ok(mut current) = state.current.lock() {
@@ -798,18 +818,19 @@ async fn scan(
 /// 扫描取消等待上限: 扫描取消点最迟在若干条目后到达, 正常远小于此值
 const SCAN_CANCEL_WAIT: Duration = Duration::from_secs(5);
 
-/// 抢占 scan 忙锁。已有 scan 在跑(用户在扫描期间改选源/连点)时: 取消它、等它释放忙锁
-/// 后由后到的 scan 胜出; 压缩/解压运行中则保持原互斥错误(不做抢占)。
-async fn acquire_scan_slot(state: &AppState) -> Result<(), String> {
+/// 抢占扫描忙锁(`kind` = "scan" 或 "dedup-scan")。已有扫描在跑(用户在扫描期间
+/// 改选源/连点/切模式)时: 取消它、等它释放忙锁后由后到的扫描胜出;
+/// 压缩/解压运行中则保持原互斥错误(不做抢占)。
+async fn acquire_scan_slot(state: &AppState, kind: &'static str) -> Result<(), String> {
     let deadline = std::time::Instant::now() + SCAN_CANCEL_WAIT;
     loop {
-        match acquire_busy(&state.busy, "scan") {
+        match acquire_busy(&state.busy, kind) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 let scanning = state
                     .busy
                     .lock()
-                    .map(|busy| *busy == Some("scan"))
+                    .map(|busy| matches!(&*busy, Some("scan") | Some("dedup-scan")))
                     .unwrap_or(false);
                 if !scanning || std::time::Instant::now() >= deadline {
                     return Err(e);
@@ -831,6 +852,398 @@ fn scan_error_text(e: zip_tool_core::CoreError) -> String {
         zip_tool_core::CoreError::Cancelled => "扫描已取消".into(),
         other => other.to_string(),
     }
+}
+
+/// 查重错误文案: 取消是正常路径(换源/切模式/手动取消), 给前端可读中文
+fn dedup_error_text(e: zip_tool_core::CoreError) -> String {
+    match e {
+        zip_tool_core::CoreError::Cancelled => "查重已取消".into(),
+        other => other.to_string(),
+    }
+}
+
+fn dedup_group_state_str(s: &DedupGroupState) -> &'static str {
+    match s {
+        DedupGroupState::Candidate => "candidate",
+        DedupGroupState::Confirmed => "confirmed",
+        DedupGroupState::LargePrefixMatched => "largePrefixMatched",
+    }
+}
+
+fn dedup_group_dto(g: &DedupGroup) -> DedupGroupDto {
+    DedupGroupDto {
+        id: g.id,
+        state: dedup_group_state_str(&g.state).into(),
+        size: g.size,
+        files: g
+            .files
+            .iter()
+            .map(|f| DedupFileDto {
+                rel_path: f.rel_path.clone(),
+                size: f.size,
+            })
+            .collect(),
+        wasted_bytes: g.wasted_bytes,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DedupFileDto {
+    rel_path: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DedupGroupDto {
+    id: u64,
+    /// "candidate" | "confirmed" | "largePrefixMatched"
+    state: String,
+    size: u64,
+    files: Vec<DedupFileDto>,
+    wasted_bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DedupScanResult {
+    session_id: u64,
+    groups: Vec<DedupGroupDto>,
+    files_scanned: u64,
+    estimated_first_pass_bytes: u64,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DedupCompareResult {
+    session_id: u64,
+    groups: Vec<DedupGroupDto>,
+    cancelled: bool,
+    rejected_groups: usize,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DedupVerifyResult {
+    session_id: u64,
+    groups: Vec<DedupGroupDto>,
+    cancelled: bool,
+    warnings: Vec<String>,
+}
+
+/// 查重会话校验: src + session_id 必须与缓存一致; rules 有值时还须与扫描时规则一致。
+/// 过期一律返回 [`DEDUP_EXPIRED`](未知 id / 状态不符都按过期处理)。
+fn validate_dedup_session(
+    ctx: Option<&DedupContext>,
+    src: &str,
+    session_id: u64,
+    rules: Option<&ExcludeRules>,
+) -> Result<(), String> {
+    let ctx = ctx.ok_or_else(|| DEDUP_EXPIRED.to_string())?;
+    if ctx.src != Path::new(src) || ctx.session_id != session_id {
+        return Err(DEDUP_EXPIRED.into());
+    }
+    if let Some(rules) = rules
+        && !rules_eq(&ctx.rules, rules)
+    {
+        return Err(DEDUP_EXPIRED.into());
+    }
+    Ok(())
+}
+
+/// dedup_verify 的 groupIds 校验: 非空 / 无重复 / 全部存在且为 LargePrefixMatched。
+/// 未知 ID / 状态不符 / 重复 ID 都按过期处理; 空名单给可读提示。
+fn validate_verify_ids(ctx: &DedupContext, group_ids: &[u64]) -> Result<Vec<u64>, String> {
+    if group_ids.is_empty() {
+        return Err("请先勾选要全量校验的文件组".into());
+    }
+    let mut seen = HashSet::new();
+    for &id in group_ids {
+        if !seen.insert(id) {
+            return Err(DEDUP_EXPIRED.into());
+        }
+        match ctx.groups.iter().find(|g| g.id == id) {
+            Some(g) if g.state == DedupGroupState::LargePrefixMatched => {}
+            _ => return Err(DEDUP_EXPIRED.into()),
+        }
+    }
+    Ok(group_ids.to_vec())
+}
+
+/// 从缓存组解析「定位」路径(不信任前端传绝对路径; 组 / 文件下标必须存在)
+fn resolve_dedup_path(
+    ctx: &DedupContext,
+    group_id: u64,
+    file_index: usize,
+) -> Result<PathBuf, String> {
+    let group = ctx
+        .groups
+        .iter()
+        .find(|g| g.id == group_id)
+        .ok_or_else(|| format!("未找到文件组 #{group_id}"))?;
+    let file = group
+        .files
+        .get(file_index)
+        .ok_or_else(|| format!("文件组 #{group_id} 中不存在第 {} 个文件", file_index + 1))?;
+    Ok(ctx.src.join(&file.rel_path))
+}
+
+fn lock_dedup(state: &AppState) -> Result<std::sync::MutexGuard<'_, Option<DedupContext>>, String> {
+    state.dedup.lock().map_err(|_| POISONED.to_string())
+}
+
+/// 查重阶段 1(选源后自动调): 元数据扫描, 只 stat 不读内容。
+/// 可被新的 dedup_scan / scan 抢占取消; 成功后覆盖 DedupContext 并分配新 sessionId。
+#[tauri::command]
+async fn dedup_scan(
+    src: String,
+    filters: Option<settings::FilterSettingsDto>,
+    on_progress: Channel<ProgressEvent>,
+    state: State<'_, AppState>,
+) -> Result<DedupScanResult, String> {
+    // 宁停不错: 策略在占忙之前展开并校验(查重无单次自定义模式, 只用设置页策略)
+    let filters = filters.unwrap_or_default();
+    let rules = zip_tool_core::effective_rules(&filters.to_core(), &[])
+        .map_err(|e| format!("排除模式无效: {e}"))?;
+    let p = PathBuf::from(&src);
+
+    // 与 compress scan 互相抢占(扫描期间换源/切模式, 后到的扫描胜出)
+    acquire_scan_slot(&state, "dedup-scan").await?;
+
+    let flag = CancelFlag::new();
+    if let Ok(mut current) = state.current.lock() {
+        *current = Some(flag.clone());
+    }
+    let rules_for_scan = rules.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        zip_tool_core::scan_candidates(
+            &p,
+            &rules_for_scan,
+            &DedupOptions::default(),
+            &flag,
+            &|p: &Progress| {
+                let _ = on_progress.send(ProgressEvent::from(p));
+            },
+        )
+    })
+    .await;
+
+    let report = match result {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
+            finish_job(&state);
+            return Err(dedup_error_text(e));
+        }
+        Err(e) => {
+            finish_job(&state);
+            return Err(e.to_string());
+        }
+    };
+
+    let session_id = state.dedup_generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let dto = DedupScanResult {
+        session_id,
+        groups: report.groups.iter().map(dedup_group_dto).collect(),
+        files_scanned: report.files_scanned,
+        estimated_first_pass_bytes: report.estimated_first_pass_bytes,
+        warnings: report.warnings.clone(),
+    };
+    let poisoned = match lock_dedup(&state) {
+        Ok(mut guard) => {
+            *guard = Some(DedupContext {
+                session_id,
+                src: PathBuf::from(&src),
+                rules,
+                groups: report.groups,
+            });
+            false
+        }
+        Err(_) => true,
+    };
+    finish_job(&state);
+    if poisoned {
+        return Err(POISONED.into());
+    }
+    Ok(dto)
+}
+
+/// 查重阶段 2/3(用户点「开始查重」): 前缀比对与哈希。严格忙闲互斥;
+/// 长任务约定: 克隆缓存 groups 并释放锁, 完成后重新加锁校验再写回(_docs/dedup.md §9)。
+#[tauri::command]
+async fn dedup_compare(
+    src: String,
+    session_id: u64,
+    filters: Option<settings::FilterSettingsDto>,
+    on_progress: Channel<ProgressEvent>,
+    state: State<'_, AppState>,
+) -> Result<DedupCompareResult, String> {
+    let filters = filters.unwrap_or_default();
+    let rules = zip_tool_core::effective_rules(&filters.to_core(), &[])
+        .map_err(|e| format!("排除模式无效: {e}"))?;
+
+    acquire_busy(&state.busy, "dedup-compare")?;
+    // 校验 + 克隆缓存(纯内存; 锁在 await 前释放)
+    let cloned = match lock_dedup(&state) {
+        Ok(guard) => {
+            let r = validate_dedup_session(guard.as_ref(), &src, session_id, Some(&rules))
+                .map(|()| guard.as_ref().map(|c| c.groups.clone()).unwrap_or_default());
+            r
+        }
+        Err(e) => Err(e),
+    };
+    let groups = match cloned {
+        Ok(v) => v,
+        Err(e) => {
+            release_busy(&state.busy);
+            return Err(e);
+        }
+    };
+
+    let flag = CancelFlag::new();
+    if let Ok(mut current) = state.current.lock() {
+        *current = Some(flag.clone());
+    }
+    let p = PathBuf::from(&src);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        zip_tool_core::compare_candidates(
+            &p,
+            groups,
+            &DedupOptions::default(),
+            &flag,
+            &|p: &Progress| {
+                let _ = on_progress.send(ProgressEvent::from(p));
+            },
+        )
+    })
+    .await;
+
+    let report = match result {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
+            finish_job(&state);
+            return Err(dedup_error_text(e));
+        }
+        Err(e) => {
+            finish_job(&state);
+            return Err(e.to_string());
+        }
+    };
+
+    let dto = DedupCompareResult {
+        session_id,
+        groups: report.groups.iter().map(dedup_group_dto).collect(),
+        cancelled: report.cancelled,
+        rejected_groups: report.rejected_groups,
+        warnings: report.warnings.clone(),
+    };
+    // 忙锁仍持有: 校验 + 写回期间不可能有新 dedup_scan 覆盖缓存(校验是兜底)
+    let mut report = report;
+    let outcome = (|| -> Result<(), String> {
+        let mut guard = lock_dedup(&state)?;
+        validate_dedup_session(guard.as_ref(), &src, session_id, None)?;
+        if let Some(ctx) = guard.as_mut() {
+            ctx.groups = std::mem::take(&mut report.groups);
+        }
+        Ok(())
+    })();
+    finish_job(&state);
+    outcome?;
+    Ok(dto)
+}
+
+/// 查重阶段 4(用户勾选大文件组并确认): 仅对选中的 LargePrefixMatched 组做全量 BLAKE3。
+/// 严格忙闲互斥; 长任务约定与 dedup_compare 一致(克隆 + 释放锁 + 校验写回)。
+#[tauri::command]
+async fn dedup_verify(
+    src: String,
+    session_id: u64,
+    group_ids: Vec<u64>,
+    on_progress: Channel<ProgressEvent>,
+    state: State<'_, AppState>,
+) -> Result<DedupVerifyResult, String> {
+    acquire_busy(&state.busy, "dedup-verify")?;
+    // 校验 + 克隆缓存(纯内存; 锁在 await 前释放)
+    let cloned = match lock_dedup(&state) {
+        Ok(guard) => validate_dedup_session(guard.as_ref(), &src, session_id, None).and_then(
+            |()| match guard.as_ref() {
+                Some(ctx) => {
+                    validate_verify_ids(ctx, &group_ids).map(|ids| (ctx.groups.clone(), ids))
+                }
+                None => Err(DEDUP_EXPIRED.to_string()),
+            },
+        ),
+        Err(e) => Err(e),
+    };
+    let (groups, ids) = match cloned {
+        Ok(v) => v,
+        Err(e) => {
+            release_busy(&state.busy);
+            return Err(e);
+        }
+    };
+
+    let flag = CancelFlag::new();
+    if let Ok(mut current) = state.current.lock() {
+        *current = Some(flag.clone());
+    }
+    let p = PathBuf::from(&src);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        zip_tool_core::verify_large_groups(&p, groups, &ids, &flag, &|p: &Progress| {
+            let _ = on_progress.send(ProgressEvent::from(p));
+        })
+    })
+    .await;
+
+    let report = match result {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
+            finish_job(&state);
+            return Err(dedup_error_text(e));
+        }
+        Err(e) => {
+            finish_job(&state);
+            return Err(e.to_string());
+        }
+    };
+
+    let dto = DedupVerifyResult {
+        session_id,
+        groups: report.groups.iter().map(dedup_group_dto).collect(),
+        cancelled: report.cancelled,
+        warnings: report.warnings.clone(),
+    };
+    let mut report = report;
+    let outcome = (|| -> Result<(), String> {
+        let mut guard = lock_dedup(&state)?;
+        validate_dedup_session(guard.as_ref(), &src, session_id, None)?;
+        if let Some(ctx) = guard.as_mut() {
+            ctx.groups = std::mem::take(&mut report.groups);
+        }
+        Ok(())
+    })();
+    finish_job(&state);
+    outcome?;
+    Ok(dto)
+}
+
+/// 在系统文件管理器中定位重复文件(只读短操作, 不加忙闲锁)。
+/// 路径由壳层从缓存组解析, 不信任前端传绝对路径。
+#[tauri::command]
+fn reveal_dedup_file(
+    src: String,
+    session_id: u64,
+    group_id: u64,
+    file_index: usize,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let guard = lock_dedup(&state)?;
+    let ctx = guard.as_ref().ok_or_else(|| DEDUP_EXPIRED.to_string())?;
+    validate_dedup_session(Some(ctx), &src, session_id, None)?;
+    let path = resolve_dedup_path(ctx, group_id, file_index)?;
+    desktop::reveal_path(&path).map_err(|e| format!("无法定位文件: {e}"))
 }
 
 /// 计算可审核的打包方案(纯内存, 不读盘/不压缩/不占忙锁)。
@@ -1156,7 +1569,11 @@ pub fn run() {
             cancel_current,
             load_settings,
             save_settings,
-            menu_action
+            menu_action,
+            dedup_scan,
+            dedup_compare,
+            dedup_verify,
+            reveal_dedup_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1288,7 +1705,7 @@ mod tests {
     fn acquire_scan_slot_rejects_when_other_job_kind_runs() {
         let state = AppState::default();
         *state.busy.lock().unwrap() = Some("compress");
-        let err = tauri::async_runtime::block_on(acquire_scan_slot(&state)).unwrap_err();
+        let err = tauri::async_runtime::block_on(acquire_scan_slot(&state, "scan")).unwrap_err();
         assert_eq!(err, "已有任务在运行");
         assert_eq!(
             *state.busy.lock().unwrap(),
@@ -1315,7 +1732,7 @@ mod tests {
             finish_job(&worker);
         });
 
-        tauri::async_runtime::block_on(acquire_scan_slot(&state)).unwrap();
+        tauri::async_runtime::block_on(acquire_scan_slot(&state, "scan")).unwrap();
         handle.join().unwrap();
         assert_eq!(
             *state.busy.lock().unwrap(),
@@ -1323,6 +1740,180 @@ mod tests {
             "后到的扫描应取消旧的并占住忙锁"
         );
         assert!(state.current.lock().unwrap().is_none(), "旧旗标已清空");
+    }
+
+    #[test]
+    fn dedup_scan_slot_preempts_compress_scan_and_vice_versa() {
+        use std::sync::Arc;
+
+        // dedup-scan 可抢占 compress scan
+        let state = Arc::new(AppState::default());
+        *state.busy.lock().unwrap() = Some("scan");
+        let old_flag = CancelFlag::new();
+        *state.current.lock().unwrap() = Some(old_flag.clone());
+        let worker = state.clone();
+        let handle = std::thread::spawn(move || {
+            while !old_flag.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            finish_job(&worker);
+        });
+        tauri::async_runtime::block_on(acquire_scan_slot(&state, "dedup-scan")).unwrap();
+        handle.join().unwrap();
+        assert_eq!(*state.busy.lock().unwrap(), Some("dedup-scan"));
+
+        // compress scan 可抢占 dedup-scan
+        let flag = CancelFlag::new();
+        *state.current.lock().unwrap() = Some(flag.clone());
+        let worker = state.clone();
+        let handle = std::thread::spawn(move || {
+            while !flag.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            finish_job(&worker);
+        });
+        tauri::async_runtime::block_on(acquire_scan_slot(&state, "scan")).unwrap();
+        handle.join().unwrap();
+        assert_eq!(*state.busy.lock().unwrap(), Some("scan"));
+    }
+
+    fn dedup_ctx(src: &str) -> DedupContext {
+        let group = DedupGroup {
+            id: 1,
+            state: DedupGroupState::LargePrefixMatched,
+            size: 2000,
+            files: vec![
+                zip_tool_core::DedupFile {
+                    rel_path: "video/a.mp4".into(),
+                    size: 2000,
+                },
+                zip_tool_core::DedupFile {
+                    rel_path: "backup/a.mp4".into(),
+                    size: 2000,
+                },
+            ],
+            wasted_bytes: 2000,
+        };
+        DedupContext {
+            session_id: 7,
+            src: PathBuf::from(src),
+            rules: ExcludeRules::default(),
+            groups: vec![group],
+        }
+    }
+
+    #[test]
+    fn dedup_session_validation_rejects_mismatches() {
+        let ctx = dedup_ctx("C:\\s");
+        let rules = ExcludeRules {
+            include_hidden: true,
+            patterns: vec!["*.tmp".into()],
+        };
+        // 一致 → 通过
+        assert!(validate_dedup_session(Some(&ctx), "C:\\s", 7, None).is_ok());
+        assert!(
+            validate_dedup_session(Some(&ctx), "C:\\s", 7, Some(&rules)).is_err(),
+            "规则不一致 = 过期"
+        );
+        assert!(
+            validate_dedup_session(Some(&ctx), "C:\\other", 7, None).is_err(),
+            "src 不一致 = 过期"
+        );
+        assert!(
+            validate_dedup_session(Some(&ctx), "C:\\s", 8, None).is_err(),
+            "sessionId 不一致 = 过期"
+        );
+        assert!(
+            validate_dedup_session(None, "C:\\s", 7, None).is_err(),
+            "无缓存 = 过期"
+        );
+    }
+
+    #[test]
+    fn verify_ids_reject_empty_unknown_wrong_state_and_duplicates() {
+        let mut ctx = dedup_ctx("C:\\s");
+        ctx.groups.push(DedupGroup {
+            id: 2,
+            state: DedupGroupState::Confirmed,
+            size: 100,
+            files: vec![zip_tool_core::DedupFile {
+                rel_path: "x.txt".into(),
+                size: 100,
+            }],
+            wasted_bytes: 0,
+        });
+        // 空
+        assert!(validate_verify_ids(&ctx, &[]).is_err());
+        // 正常
+        assert_eq!(validate_verify_ids(&ctx, &[1]).unwrap(), vec![1]);
+        // 未知 ID / 状态不符 / 重复
+        assert!(validate_verify_ids(&ctx, &[99]).is_err());
+        assert!(
+            validate_verify_ids(&ctx, &[2]).is_err(),
+            "Confirmed 组不可校验"
+        );
+        assert!(validate_verify_ids(&ctx, &[1, 1]).is_err(), "重复 ID 拒绝");
+    }
+
+    #[test]
+    fn dedup_group_dto_maps_state_strings() {
+        let group = DedupGroup {
+            id: 3,
+            state: DedupGroupState::Candidate,
+            size: 10,
+            files: vec![zip_tool_core::DedupFile {
+                rel_path: "a/b.txt".into(),
+                size: 10,
+            }],
+            wasted_bytes: 10,
+        };
+        let dto = dedup_group_dto(&group);
+        assert_eq!(dto.id, 3);
+        assert_eq!(dto.state, "candidate");
+        assert_eq!(dto.files[0].rel_path, "a/b.txt");
+        assert_eq!(dto.wasted_bytes, 10);
+        assert_eq!(
+            dedup_group_state_str(&DedupGroupState::Confirmed),
+            "confirmed"
+        );
+        assert_eq!(
+            dedup_group_state_str(&DedupGroupState::LargePrefixMatched),
+            "largePrefixMatched"
+        );
+    }
+
+    #[test]
+    fn resolve_dedup_path_rejects_unknown_group_or_index() {
+        let ctx = dedup_ctx("C:\\s");
+        // 正常: src.join(rel)
+        let p = resolve_dedup_path(&ctx, 1, 0).unwrap();
+        assert!(p.ends_with("video/a.mp4"), "{p:?}");
+        // 未知组 / 越界下标
+        assert!(resolve_dedup_path(&ctx, 99, 0).is_err());
+        assert!(resolve_dedup_path(&ctx, 1, 5).is_err());
+    }
+
+    #[test]
+    fn progress_event_maps_dedup_phases() {
+        for (phase, want) in [
+            (Phase::DedupScanning, "dedupScanning"),
+            (Phase::DedupComparing, "dedupComparing"),
+            (Phase::DedupVerifying, "dedupVerifying"),
+        ] {
+            let p = Progress {
+                phase,
+                done: 1,
+                total: 2,
+                done_bytes: 0,
+                total_bytes: 0,
+                entry: "x".into(),
+            };
+            assert_eq!(ProgressEvent::from(&p).phase, want);
+        }
+        assert_eq!(
+            dedup_error_text(zip_tool_core::CoreError::Cancelled),
+            "查重已取消"
+        );
     }
 
     #[test]
