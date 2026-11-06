@@ -2416,3 +2416,77 @@ test("查重: 浏览器预览 mock 全流程(扫描 → 比对 → 勾选 → �
   assert.match(h.doc.getElementById("msg").textContent, /找到 2 组重复文件 · 3 个副本 · 可释放 4.9 KB/);
   assert.deepEqual(dedupGroupBadges(h), ["完全相同", "完全相同"]);
 });
+
+test("查重: 全量校验后勾选整批清空 — 重编号的旧组号不得误留勾选", async () => {
+  // 3 个待确认组, 勾选非相邻子集 {1, 3}; 校验后结果整体重编号,
+  // 未选中的原组 2 变成新 id 3 — 按「仍待确认就保留勾选」的旧规则会被误勾选。
+  const mk = (id, size, a, b) => ({
+    id,
+    state: "candidate",
+    size,
+    wastedBytes: size,
+    files: [
+      { relPath: `${a}.mkv`, size },
+      { relPath: `${b}.mkv`, size },
+    ],
+  });
+  const scanRes = {
+    sessionId: 7,
+    groups: [mk(1, 3000, "ga", "gb"), mk(2, 2000, "gc", "gd"), mk(3, 1000, "ge", "gf")],
+    filesScanned: 6,
+    estimatedFirstPassBytes: 6000,
+    warnings: [],
+  };
+  const pending = (g) => ({ ...g, state: "largePrefixMatched" });
+  const confirmed = (g) => ({ ...g, state: "confirmed" });
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return scanRes;
+    if (cmd === "dedup_compare") {
+      return { sessionId: 7, groups: scanRes.groups.map(pending), cancelled: false, rejectedGroups: 0, warnings: [] };
+    }
+    if (cmd === "dedup_verify") {
+      // 勾选 [1, 3]: 两选中的转 Confirmed, 未选中的原组 2 保留待确认
+      // 真实后端会整体重编号 1..n: 未选中的原组 2 排到确认组之后, 拿到新 id 3
+      jsonEq(args.groupIds, [1, 3]);
+      return {
+        sessionId: 7,
+        groups: [
+          confirmed(scanRes.groups[0]),
+          confirmed(scanRes.groups[2]),
+          { ...pending(scanRes.groups[1]), id: 3 },
+        ],
+        cancelled: false,
+        warnings: [],
+      };
+    }
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  h.doc.getElementById("dedup-start").click();
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  assert.deepEqual(dedupGroupBadges(h), ["前 10 MB 相同", "前 10 MB 相同", "前 10 MB 相同"]);
+  const groupCb = (id) =>
+    h.doc.querySelector(`#rows tr[data-group-id="${id}"]:not([data-file-index]) input[type=checkbox]`);
+  groupCb(1).click();
+  await h.flush();
+  groupCb(3).click();
+  await h.flush();
+  assert.equal(h.doc.getElementById("dedup-verify-selected").textContent, "全量校验选中组 (2)");
+
+  h.doc.getElementById("dedup-verify-selected").click();
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  // 重编号后: 原组 2 现在是 id 3 — 不得带勾选
+  assert.deepEqual(dedupGroupBadges(h), ["完全相同", "完全相同", "前 10 MB 相同"]);
+  assert.ok(!groupCb(3).checked, "重编号后的同号组不得误留勾选");
+  assert.equal(h.doc.getElementById("check-all").checked, false);
+  assert.equal(h.doc.getElementById("dedup-verify-selected").textContent, "全量校验选中组 (0)");
+  assert.ok(h.doc.getElementById("dedup-verify-selected").disabled);
+  assert.match(h.doc.getElementById("msg").textContent, /找到 2 组重复文件/);
+  assert.match(h.doc.getElementById("msg").textContent, /另有 1 组待确认/);
+});

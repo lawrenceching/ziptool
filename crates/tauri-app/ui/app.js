@@ -820,9 +820,10 @@ async function closeSettings() {
   const pending = savePromise;
   if (pending) await pending;
   showView("main");
-  const src = $("src").value.trim();
+  // 空值判断才 trim; 实际扫描传原始路径(Unix 合法路径可能带首尾空格)
+  const src = $("src").value;
   const needRescan =
-    src !== "" &&
+    src.trim() !== "" &&
     ((state.mode === "compress" &&
       state.filtersDirty &&
       state.rows.length > 0) ||
@@ -2184,18 +2185,6 @@ function setDedupResultStatus(warnings, cancelled) {
   setStatusParts(parts, { warnings });
 }
 
-// 从勾选中移除已不存在或已不是待确认的 ID(整表重绘后调用)
-function pruneDedupSelection() {
-  const pending = new Set(
-    state.dedup.groups
-      .filter((g) => g.state === "largePrefixMatched")
-      .map((g) => g.id)
-  );
-  for (const id of [...state.dedup.selectedGroupIds]) {
-    if (!pending.has(id)) state.dedup.selectedGroupIds.delete(id);
-  }
-}
-
 // 阶段 1: 选源后自动调用; 可被换源/切模式抢占(旧结果按 seq 丢弃)
 async function doDedupScan(path) {
   await settingsReady;
@@ -2227,7 +2216,7 @@ async function doDedupScan(path) {
     renderDedupRows();
     syncConfirm();
     if (res.groups.length === 0) {
-      setStatus("dedup.noCandidates");
+      setStatus("dedup.noCandidates", { warnings: res.warnings });
     } else {
       setStatus("dedup.foundCandidates", {
         count: res.groups.length,
@@ -2254,7 +2243,6 @@ async function dedupCompare() {
   if (dedupBusy() || d.stage !== "candidates") return;
   const seq = ++d.seq;
   d.stage = "comparing";
-  d.compared = true;
   d.progress = {
     done: 0,
     total: d.groups.filter((g) => g.state === "candidate").length,
@@ -2277,7 +2265,8 @@ async function dedupCompare() {
     d.sessionId = res.sessionId;
     d.groups = res.groups;
     d.rejectedGroups = res.rejectedGroups ?? 0;
-    pruneDedupSelection();
+    // 仅完整(未取消)的比对才算「已比对过」: 失败/取消后剩余候选仍可显示首轮预估并重开比对
+    d.compared = !res.cancelled;
     d.stage = d.groups.some((g) => g.state === "candidate")
       ? "candidates"
       : "results";
@@ -2290,9 +2279,11 @@ async function dedupCompare() {
       : "results";
     setRawStatus(String(e));
   } finally {
-    setLocked(false);
-    syncConfirm();
-    renderDedupRows();
+    if (seq === d.seq) {
+      setLocked(false);
+      syncConfirm();
+      renderDedupRows();
+    }
   }
 }
 
@@ -2303,7 +2294,6 @@ async function dedupVerify() {
   const groupIds = [...d.selectedGroupIds];
   const seq = ++d.seq;
   d.stage = "verifying";
-  d.compared = true;
   d.progress = { done: 0, total: groupIds.length };
   setLocked(true);
   syncConfirm();
@@ -2321,7 +2311,10 @@ async function dedupVerify() {
     if (seq !== d.seq) return;
     d.sessionId = res.sessionId;
     d.groups = res.groups;
-    pruneDedupSelection();
+    d.compared = true;
+    // 结果已整体重编号: 旧组号不再指向原组, 必须整批清空勾选,
+    // 否则重编号后的同号组会被误当成用户勾选的组(诱导多余的全量读盘)
+    d.selectedGroupIds.clear();
     d.stage = d.groups.some((g) => g.state === "candidate")
       ? "candidates"
       : "results";
@@ -2333,9 +2326,11 @@ async function dedupVerify() {
       : "results";
     setRawStatus(String(e));
   } finally {
-    setLocked(false);
-    syncConfirm();
-    renderDedupRows();
+    if (seq === d.seq) {
+      setLocked(false);
+      syncConfirm();
+      renderDedupRows();
+    }
   }
 }
 
