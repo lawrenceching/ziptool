@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 zip-tool-core = { path = "crates/core" }
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }

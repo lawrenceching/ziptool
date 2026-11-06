@@ -4,5 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# 压缩通过外部命令完成 (Linux: zip / Windows: 7z), 暂无依赖
+blake3.workspace = true
+# 压缩通过外部命令完成 (Linux: zip / Windows: 7z)
 # 实现功能时可能再加: rand —— 随机包名

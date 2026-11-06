@@ -1,6 +1,6 @@
 //! 进度载荷:扫描/压缩/解压三阶段共用,经 `on_progress` 回调上报给外壳(CLI / Tauri)。
 
-/// 压缩/解压流程的阶段
+/// 压缩/解压/查重流程的阶段
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// Step 1 扫描(统计条目与大小)
@@ -9,6 +9,12 @@ pub enum Phase {
     Compressing,
     /// 解压(单包或批量;7z 系组内按预扫大小加权出增量, unzip 退化为组级计数)
     Extracting,
+    /// 查重阶段 1: 元数据扫描(见 _docs/dedup.md 第 6.4 节)
+    DedupScanning,
+    /// 查重阶段 2/3: 前缀比对与哈希(见 _docs/dedup.md 第 6.5 节)
+    DedupComparing,
+    /// 查重阶段 4: 大文件全量校验(见 _docs/dedup.md 第 6.6 节)
+    DedupVerifying,
 }
 
 /// 单条进度(条目级粒度, 7z 系条目内 tick 帧更细, 见技术文档 _docs/compress.md 第 7 节)

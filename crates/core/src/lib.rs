@@ -25,6 +25,7 @@
 pub mod backend;
 pub mod cancel;
 pub mod compress;
+pub mod dedup;
 pub mod doctor;
 pub mod exclude;
 pub mod extract;
@@ -39,6 +40,10 @@ pub mod strategy;
 pub use backend::{Format, parse_size};
 pub use cancel::CancelFlag;
 pub use compress::{CompressedEntry, Report, compress_dir, compress_entries, plan};
+pub use dedup::{
+    DedupCompareReport, DedupFile, DedupGroup, DedupGroupState, DedupOptions, DedupScanReport,
+    DedupVerifyReport, compare_candidates, scan_candidates, verify_large_groups,
+};
 pub use exclude::{ExcludeReason, ExcludeRules, ExcludedEntry, validate_patterns};
 pub use extract::{
     ExtractGroup, ExtractReport, ExtractScan, MetaFile, ScanIssue, extract, extract_prepared,

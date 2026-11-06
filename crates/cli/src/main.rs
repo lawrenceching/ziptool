@@ -140,6 +140,8 @@ fn main() -> ExitCode {
                         Phase::Extracting => {
                             eprint!("\r[extract {}/{}] {}        ", p.done, p.total, p.entry);
                         }
+                        // CLI 本期没有查重子命令; 仅保持 match 穷尽
+                        Phase::DedupScanning | Phase::DedupComparing | Phase::DedupVerifying => {}
                     }
                     ControlFlow::Continue(())
                 },
