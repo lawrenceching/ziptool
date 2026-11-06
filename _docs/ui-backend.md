@@ -52,7 +52,7 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 
 ## 3. 命令面
 
-收敛为 10 个命令(`invoke_handler` 注册面):
+收敛为 13 个命令(`invoke_handler` 注册面; 查重 4 个见 [dedup.md](dedup.md)):
 
 | 命令 | 签名(前端视角) | 作用 |
 |---|---|---|
@@ -65,8 +65,12 @@ crates/core — 纯库(分阶段 API, 见第 6 节)
 | `load_settings` | `() → { settings, warnings }` | 读取 `app_config_dir()/settings.json`; 损坏/过新回退默认值并带警告 |
 | `save_settings` | `(settings) → Settings` | 归一化并落盘(未知策略 id 丢弃), 返回 canonical DTO |
 | `menu_action` | `(action) → Result<(), String>` | 应用内菜单栏动作: `report-issue` 打开浏览器, `quit` 退出应用(白名单校验) |
+| `dedup_scan` | `(src, filters?, on_progress) → DedupScanResult` | 查重阶段 1: 元数据扫描产出候选组; 占可抢占扫描槽(与 `scan` 互抢占) |
+| `dedup_compare` | `(src, sessionId, filters?, on_progress) → DedupCompareResult` | 查重阶段 2/3: 内容比对(前缀哈希/全量哈希); 占严格忙锁 |
+| `dedup_verify` | `(src, sessionId, groupIds, on_progress) → DedupVerifyResult` | 查重阶段 4: 用户勾选组全量校验; 占严格忙锁 |
+| `reveal_dedup_file` | `(src, sessionId, groupId, fileIndex) → Result<(), String>` | 在系统文件管理器中显示查重组成员文件(只读, 不占忙锁) |
 
-`plan_packages` / `planId` / `packaging` DTO 的完整契约见 [plan-preview.md](plan-preview.md)。旧客户端不传 `packaging` 时 `compress` 走原逐条目路径, `planId` 可省略。
+`plan_packages` / `planId` / `packaging` DTO 的完整契约见 [plan-preview.md](plan-preview.md)。旧客户端不传 `packaging` 时 `compress` 走原逐条目路径, `planId` 可省略。查重命令面(会话状态机 / DTO 形状 / 取消与过期语义)的完整契约见 [dedup.md](dedup.md)。
 
 ### 3.1 scan
 
