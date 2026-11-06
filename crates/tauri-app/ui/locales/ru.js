@@ -7,7 +7,8 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
       "confirm": "Подтвердить",
       "cancel": "Отмена",
       "language": "Язык",
-      "scanning": "Сканирование…"
+      "scanning": "Сканирование…",
+      "dedup": "Дубликаты"
     },
     "lang": {
       "system": "Как в системе"
@@ -25,7 +26,8 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
       "srcPlaceholder": "Нажмите, чтобы выбрать, или перетащите папку для сжатия / извлечения",
       "dst": "Папка назначения",
       "dstPlaceholder": "Нажмите, чтобы выбрать, или перетащите папку назначения",
-      "dropRelease": "Отпустите мышь, чтобы выбрать эту папку"
+      "dropRelease": "Отпустите мышь, чтобы выбрать эту папку",
+      "srcPlaceholderDedup": "Нажмите, чтобы выбрать, или перетащите папку для поиска дубликатов"
     },
     "options": {
       "split": "Размер части",
@@ -96,6 +98,58 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
         "tooManyEntries": "{{name}}: элементов {{count}} больше лимита {{limit}}, выбрано прямое сжатие"
       }
     },
+    "dedup": {
+      "strategyLine": "Стратегия: сравнение первых 1 МБ → полная BLAKE3 для малых файлов / первые 10 МБ для файлов ≥ 500 МБ",
+      "start": "Начать проверку",
+      "noCandidates": "Подозрительных файлов не найдено",
+      "stateCandidate": "Кандидат",
+      "stateConfirmed": "Идентичны",
+      "stateLargePrefix": "Первые 10 МБ совпадают",
+      "needVerify": "Ожидает проверки",
+      "locate": "Показать",
+      "ariaSelectGroup": "Выбрать эту группу для полной проверки",
+      "ariaLocate": "Показать в проводнике",
+      "tableCaption": "Группы дубликатов",
+      "comparing": "Сравнение {{done}}/{{total}} групп · прочитано {{bytes}}",
+      "verifying": "Полная проверка {{done}}/{{total}} групп · прочитано {{bytes}}",
+      "cancelled": "Отменено: выполнено {{done}}/{{total}} групп",
+      "scanning_one": "Сканирование {{count}} файла…",
+      "scanning_few": "Сканирование {{count}} файла…",
+      "scanning_many": "Сканирование {{count}} файлов…",
+      "scanning_other": "Сканирование {{count}} файлов…",
+      "foundCandidates_one": "Найдена {{count}} группа подозрительных файлов · первый проход прочитает {{bytes}}",
+      "foundCandidates_few": "Найдены {{count}} группы подозрительных файлов · первый проход прочитает {{bytes}}",
+      "foundCandidates_many": "Найдено {{count}} групп подозрительных файлов · первый проход прочитает {{bytes}}",
+      "foundCandidates_other": "Найдено {{count}} групп подозрительных файлов · первый проход прочитает {{bytes}}",
+      "summary_one": "Найдена {{count}} группа дубликатов · копий: {{copies}} · можно освободить {{bytes}}",
+      "summary_few": "Найдены {{count}} группы дубликатов · копий: {{copies}} · можно освободить {{bytes}}",
+      "summary_many": "Найдено {{count}} групп дубликатов · копий: {{copies}} · можно освободить {{bytes}}",
+      "summary_other": "Найдено {{count}} групп дубликатов · копий: {{copies}} · можно освободить {{bytes}}",
+      "summaryPending_one": "; ещё {{count}} группа ожидает проверки",
+      "summaryPending_few": "; ещё {{count}} группы ожидают проверки",
+      "summaryPending_many": "; ещё {{count}} групп ожидают проверки",
+      "summaryPending_other": "; ещё {{count}} групп ожидают проверки",
+      "noDuplicates_one": "Дубликаты не найдены (отклонена {{count}} группа кандидатов)",
+      "noDuplicates_few": "Дубликаты не найдены (отклонены {{count}} группы кандидатов)",
+      "noDuplicates_many": "Дубликаты не найдены (отклонено {{count}} групп кандидатов)",
+      "noDuplicates_other": "Дубликаты не найдены (отклонено {{count}} групп кандидатов)",
+      "banner_one": "Первые 10 МБ совпадают у {{count}} группы больших файлов, полная проверка прочитает {{bytes}} (файлов: {{files}})",
+      "banner_few": "Первые 10 МБ совпадают у {{count}} групп больших файлов, полная проверка прочитает {{bytes}} (файлов: {{files}})",
+      "banner_many": "Первые 10 МБ совпадают у {{count}} групп больших файлов, полная проверка прочитает {{bytes}} (файлов: {{files}})",
+      "banner_other": "Первые 10 МБ совпадают у {{count}} групп больших файлов, полная проверка прочитает {{bytes}} (файлов: {{files}})",
+      "verifySelected_one": "Полностью проверить выбранную группу ({{count}})",
+      "verifySelected_few": "Полностью проверить выбранные группы ({{count}})",
+      "verifySelected_many": "Полностью проверить выбранные группы ({{count}})",
+      "verifySelected_other": "Полностью проверить выбранные группы ({{count}})",
+      "groupTitle_one": "{{count}} файл · можно освободить {{bytes}}",
+      "groupTitle_few": "{{count}} файла · можно освободить {{bytes}}",
+      "groupTitle_many": "{{count}} файлов · можно освободить {{bytes}}",
+      "groupTitle_other": "{{count}} файлов · можно освободить {{bytes}}",
+      "rejected_one": "; отклонена {{count}} группа кандидатов",
+      "rejected_few": "; отклонены {{count}} группы кандидатов",
+      "rejected_many": "; отклонено {{count}} групп кандидатов",
+      "rejected_other": "; отклонено {{count}} групп кандидатов"
+    },
     "settings": {
       "title": "Настройки",
       "back": "Назад",
@@ -149,7 +203,8 @@ window.__ZIPTOOL_LOCALES__["ru"] = {
     "dialog": {
       "selectSourceCompress": "Выберите папку для сжатия",
       "selectSourceExtract": "Выберите папку для извлечения",
-      "selectDst": "Выберите папку назначения"
+      "selectDst": "Выберите папку назначения",
+      "selectSourceDedup": "Выберите папку для поиска дубликатов"
     },
     "status": {
       "ready": "Готов к работе",

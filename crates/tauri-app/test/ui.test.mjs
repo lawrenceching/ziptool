@@ -2018,3 +2018,401 @@ test("设置页: 切换语言更新静态文案", async () => {
   assert.equal(h.doc.querySelector("#view-settings h1").textContent, "Settings");
   assert.equal(h.doc.getElementById("policy-os-hidden-title").textContent, "OS hidden files");
 });
+
+// ———— 查重(_docs/dedup.md) ————
+// 组状态徽章文本(组标题行第 4 列的 span)
+const dedupGroupBadges = (h) =>
+  [
+    ...h.doc.querySelectorAll("#rows tr:not([data-file-index]) td:nth-child(4) span"),
+  ].map((b) => b.textContent);
+
+const DEDUP_FILES_1 = [
+  { relPath: "photos\\a.jpg", size: 1024 },
+  { relPath: "backup\\photos\\a.jpg", size: 1024 },
+  { relPath: "copy\\a.jpg", size: 1024 },
+];
+const DEDUP_FILES_2 = [
+  { relPath: "doc.pdf", size: 512 },
+  { relPath: "old\\doc.pdf", size: 512 },
+];
+const DEDUP_SCAN_RES = {
+  sessionId: 7,
+  groups: [
+    { id: 1, state: "candidate", size: 1024, wastedBytes: 2048, files: DEDUP_FILES_1 },
+    { id: 2, state: "candidate", size: 512, wastedBytes: 512, files: DEDUP_FILES_2 },
+  ],
+  filesScanned: 5,
+  estimatedFirstPassBytes: 3072,
+  warnings: [],
+};
+// 比对后的形态: 组 1 直接确认, 组 2 进「前 10 MB 相同」待确认
+const DEDUP_COMPARED = [
+  { id: 1, state: "confirmed", size: 1024, wastedBytes: 2048, files: DEDUP_FILES_1 },
+  { id: 2, state: "largePrefixMatched", size: 512, wastedBytes: 512, files: DEDUP_FILES_2 },
+];
+
+async function dedupMode(h) {
+  h.doc.getElementById("mode-dedup").click();
+  await h.flush();
+}
+
+test("查重: 模式切换显隐 + dedup_scan 契约与阶段 1 渲染", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return DEDUP_SCAN_RES;
+    return null;
+  });
+  // 初始(压缩模式): 选项与目标行可见, 查重行/定位列隐藏
+  assert.ok(!h.doc.getElementById("options").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("dedup-row").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("th-action").classList.contains("hidden"));
+  await dedupMode(h);
+  assert.ok(h.doc.getElementById("options").classList.contains("hidden"));
+  assert.ok(!h.doc.getElementById("dedup-row").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("dst-row").classList.contains("hidden"));
+  assert.ok(!h.doc.getElementById("th-action").classList.contains("hidden"));
+  assert.equal(h.doc.getElementById("table-caption").textContent, "重复文件组");
+  assert.equal(
+    h.doc.getElementById("src").placeholder,
+    "点击选择, 或拖入要查重的文件夹",
+    "源占位文案应随模式切换"
+  );
+
+  await pickSource(h);
+  const scan = h.calls.find((c) => c.cmd === "dedup_scan");
+  assert.ok(scan, "应调用 dedup_scan");
+  assert.equal(scan.args.src, "C:\\demo\\data");
+  jsonEq(scan.args.filters, { enabledPolicies: ["os-hidden", "lang-temp"] });
+  assert.ok(scan.args.onProgress instanceof coreApi.Channel, "onProgress 必须是 core.Channel");
+
+  // 阶段 1 渲染: 2 组标题行 + 5 成员行; 开始钮可用; 确认钮禁用(spinner)
+  assert.equal(h.rows().length, 7);
+  assert.deepEqual(dedupGroupBadges(h), ["候选", "候选"]);
+  const start = h.doc.getElementById("dedup-start");
+  assert.ok(!start.classList.contains("hidden") && !start.disabled);
+  assert.ok(h.doc.getElementById("confirm").disabled);
+  assert.match(h.doc.getElementById("dedup-summary").textContent, /找到 2 组可疑文件/);
+  assert.match(h.doc.getElementById("msg").textContent, /找到 2 组可疑文件 · 首轮预计读取 3.0 KB/);
+  // 成员行: 缩进相对路径 + title 完整路径 + 定位按钮
+  const member = h.doc.querySelector('#rows tr[data-group-id="1"][data-file-index="0"]');
+  assert.equal(member.querySelector("td:nth-child(2)").textContent, "photos\\a.jpg");
+  assert.equal(member.querySelector("td:nth-child(2)").title, "C:\\demo\\data\\photos\\a.jpg");
+  assert.equal(member.querySelector("td:nth-child(5) button").textContent, "定位");
+});
+
+test("查重: compare/verify 契约、按钮矩阵、横幅与勾选联动", async () => {
+  let resolveCompare;
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return DEDUP_SCAN_RES;
+    if (cmd === "dedup_compare") {
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "dedupComparing", done: 1, total: 2, entry: "", doneBytes: 1024, totalBytes: 3584,
+      });
+      // 挂起 promise: 断言运行中按钮矩阵后再放行结果
+      return new Promise((resolve) => {
+        resolveCompare = resolve;
+      });
+    }
+    if (cmd === "dedup_verify") {
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "dedupVerifying", done: 1, total: 1, entry: "", doneBytes: 1024, totalBytes: 1024,
+      });
+      return {
+        sessionId: 7,
+        groups: DEDUP_COMPARED.map((g) => ({ ...g, state: "confirmed" })),
+        cancelled: false,
+        warnings: [],
+      };
+    }
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+
+  // 阶段 2 运行: 确认钮变取消(可用), 开始钮隐藏, 横幅隐藏, 进度写状态栏
+  h.doc.getElementById("dedup-start").click();
+  await h.flush();
+  assert.equal(h.doc.getElementById("confirm").textContent, "取消");
+  assert.ok(!h.doc.getElementById("confirm").disabled);
+  assert.ok(h.doc.getElementById("dedup-start").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("dedup-banner").classList.contains("hidden"), "阶段 2 运行时横幅隐藏");
+  assert.match(h.doc.getElementById("msg").textContent, /正在比对 1\/2 组 · 已读 1.0 KB/);
+  const compare = h.calls.find((c) => c.cmd === "dedup_compare");
+  assert.ok(compare, "应调用 dedup_compare");
+  assert.equal(compare.args.src, "C:\\demo\\data");
+  assert.equal(compare.args.sessionId, 7);
+  jsonEq(compare.args.filters, { enabledPolicies: ["os-hidden", "lang-temp"] });
+  assert.ok(compare.args.onProgress instanceof coreApi.Channel);
+
+  resolveCompare({ sessionId: 7, groups: DEDUP_COMPARED, cancelled: false, rejectedGroups: 0, warnings: [] });
+  await h.flush();
+  await h.flush();
+  // 比对完成: 徽章 绿/琥珀; 横幅出现; 全量校验钮未勾选时禁用; 摘要含待确认段
+  assert.deepEqual(dedupGroupBadges(h), ["完全相同", "前 10 MB 相同"]);
+  assert.ok(!h.doc.getElementById("dedup-banner").classList.contains("hidden"));
+  assert.match(
+    h.doc.getElementById("dedup-banner-text").textContent,
+    /1 组大文件前 10 MB 相同/
+  );
+  assert.ok(h.doc.getElementById("dedup-verify-selected").disabled);
+  assert.match(h.doc.getElementById("msg").textContent, /找到 1 组重复文件 · 2 个副本 · 可释放 2.0 KB/);
+  assert.match(h.doc.getElementById("msg").textContent, /另有 1 组待确认/);
+  // 待确认组的成员行带「待校验」徽章, 确认组没有(3 个确认组成员 + 2 个待确认组成员)
+  assert.deepEqual(
+    [...h.doc.querySelectorAll("#rows tr[data-file-index] td:nth-child(4)")].map(
+      (td) => td.textContent
+    ),
+    ["", "", "", "待校验", "待校验"],
+  );
+
+  // 表头全选框勾选所有待确认组 → 横幅预计读取量 + 校验钮计数联动
+  h.doc.getElementById("check-all").click();
+  await h.flush();
+  assert.equal(h.doc.getElementById("dedup-verify-selected").textContent, "全量校验选中组 (1)");
+  assert.ok(!h.doc.getElementById("dedup-verify-selected").disabled);
+  assert.match(
+    h.doc.getElementById("dedup-banner-text").textContent,
+    /全量校验预计读取 1.0 KB\(2 个文件\)/
+  );
+  // 取消勾选 → 校验钮回到禁用; 再勾选组级复选框恢复
+  const groupCb = () =>
+    h.doc.querySelector(
+      '#rows tr[data-group-id="2"]:not([data-file-index]) input[type=checkbox]'
+    );
+  groupCb().click();
+  await h.flush();
+  assert.ok(h.doc.getElementById("dedup-verify-selected").disabled);
+  groupCb().click();
+  await h.flush();
+  assert.ok(!h.doc.getElementById("dedup-verify-selected").disabled);
+
+  h.doc.getElementById("dedup-verify-selected").click();
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  const verify = h.calls.find((c) => c.cmd === "dedup_verify");
+  assert.ok(verify, "应调用 dedup_verify");
+  assert.equal(verify.args.src, "C:\\demo\\data");
+  assert.equal(verify.args.sessionId, 7, "sessionId 应透传");
+  jsonEq(verify.args.groupIds, [2]);
+  // 全部确认: 横幅收起, 状态栏汇总(2 组 · 3 副本 · 2.5 KB)
+  assert.ok(h.doc.getElementById("dedup-banner").classList.contains("hidden"));
+  assert.match(h.doc.getElementById("msg").textContent, /找到 2 组重复文件 · 3 个副本 · 可释放 2.5 KB/);
+});
+
+test("查重: 比对中确认钮触发 cancel_current, 取消返回部分结果并恢复开始钮", async () => {
+  let resolveCompare;
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return DEDUP_SCAN_RES;
+    if (cmd === "dedup_compare") {
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "dedupComparing", done: 1, total: 2, entry: "", doneBytes: 1024, totalBytes: 3584,
+      });
+      return new Promise((resolve) => {
+        resolveCompare = resolve;
+      });
+    }
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  h.doc.getElementById("dedup-start").click();
+  await h.flush();
+
+  h.doc.getElementById("confirm").click(); // = 取消
+  await h.flush();
+  assert.ok(h.calls.some((c) => c.cmd === "cancel_current"), "运行中应触发 cancel_current");
+
+  // 壳层取消: 已比完的组 1 保留为部分结果, 组 2 回到候选
+  resolveCompare({
+    sessionId: 7,
+    groups: [DEDUP_COMPARED[0], DEDUP_SCAN_RES.groups[1]],
+    cancelled: true,
+    rejectedGroups: 0,
+    warnings: [],
+  });
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  assert.match(h.doc.getElementById("msg").textContent, /已取消: 已完成 1\/2 组/);
+  assert.deepEqual(dedupGroupBadges(h), ["完全相同", "候选"]);
+  const start = h.doc.getElementById("dedup-start");
+  assert.ok(!start.classList.contains("hidden") && !start.disabled, "剩余候选时开始钮恢复");
+});
+
+test("查重: 阶段 1 失败显示壳层错误原文, 表格进空态且源路径保留", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return Promise.reject("查重结果已过期, 请重新选择源文件夹");
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  assert.equal(h.doc.getElementById("msg").textContent, "查重结果已过期, 请重新选择源文件夹");
+  assert.equal(h.rows().length, 0);
+  assert.ok(!h.doc.getElementById("empty").classList.contains("hidden"));
+  assert.equal(h.doc.getElementById("src").value, "C:\\demo\\data");
+  assert.ok(h.doc.getElementById("confirm").disabled);
+});
+
+test("查重: 比对排除全部候选 → 未发现重复文件 + 排除计数", async () => {
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return DEDUP_SCAN_RES;
+    if (cmd === "dedup_compare") {
+      sendProgress(callbacks, args.onProgress, 0, {
+        phase: "dedupComparing", done: 2, total: 2, entry: "", doneBytes: 3584, totalBytes: 3584,
+      });
+      return { sessionId: 7, groups: [], cancelled: false, rejectedGroups: 2, warnings: [] };
+    }
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  h.doc.getElementById("dedup-start").click();
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  assert.match(h.doc.getElementById("msg").textContent, /没有发现重复文件\(已排除 2 组候选\)/);
+  assert.equal(h.rows().length, 0);
+  assert.ok(h.doc.getElementById("dedup-start").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("confirm").disabled);
+});
+
+test("查重: 定位按钮走 reveal_dedup_file, 参数为源路径+会话+组号+成员下标", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return DEDUP_SCAN_RES;
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  h.doc
+    .querySelector('#rows tr[data-group-id="1"][data-file-index="1"] td:nth-child(5) button')
+    .click();
+  await h.flush();
+  await h.flush();
+  const reveal = h.calls.find((c) => c.cmd === "reveal_dedup_file");
+  assert.ok(reveal, "应调用 reveal_dedup_file");
+  assert.equal(reveal.args.src, "C:\\demo\\data");
+  assert.equal(reveal.args.sessionId, 7);
+  assert.equal(reveal.args.groupId, 1);
+  assert.equal(reveal.args.fileIndex, 1);
+});
+
+test("查重: 切回压缩模式清空源与会话, 显隐复原", async () => {
+  const h = makeHarness(true, ({ cmd }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return DEDUP_SCAN_RES;
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  assert.ok(h.rows().length > 0);
+  h.doc.getElementById("mode-compress").click();
+  await h.flush();
+  assert.equal(h.doc.getElementById("src").value, "");
+  assert.equal(h.rows().length, 0);
+  assert.ok(!h.doc.getElementById("options").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("dedup-row").classList.contains("hidden"));
+  assert.ok(h.doc.getElementById("th-action").classList.contains("hidden"));
+  assert.equal(h.doc.getElementById("table-caption").textContent, "条目列表");
+  assert.equal(
+    h.doc.getElementById("src").placeholder,
+    "点击选择, 或拖入要压缩 / 解压的文件夹"
+  );
+  assert.match(h.doc.getElementById("msg").textContent, /模式已切换/);
+});
+
+test("查重: 设置页改动排除策略后, 关闭设置重跑阶段 1", async () => {
+  const scans = [];
+  const h = makeHarness(true, ({ cmd, args }) => {
+    if (cmd === "load_settings") return { settings: SETTINGS_DEFAULTS, warnings: [] };
+    if (cmd === "save_settings") return args.settings;
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") {
+      scans.push(args.filters);
+      return DEDUP_SCAN_RES;
+    }
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  assert.equal(scans.length, 1);
+  await openSettingsPage(h);
+  h.doc.getElementById("policy-lang-temp").click();
+  await h.flush();
+  h.doc.getElementById("settings-back").click();
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  assert.equal(scans.length, 2, "关闭设置后应重跑阶段 1");
+  jsonEq(scans[1], { enabledPolicies: ["os-hidden"] });
+});
+
+test("查重: 切换语言重渲染结果表/横幅/状态栏", async () => {
+  const h = makeHarness(true, ({ cmd, args, callbacks }) => {
+    if (cmd === "plugin:dialog|open") return "C:\\demo\\data";
+    if (cmd === "dedup_scan") return DEDUP_SCAN_RES;
+    if (cmd === "dedup_compare") {
+      return { sessionId: 7, groups: DEDUP_COMPARED, cancelled: false, rejectedGroups: 0, warnings: [] };
+    }
+    return null;
+  });
+  await dedupMode(h);
+  await pickSource(h);
+  h.doc.getElementById("dedup-start").click();
+  await h.flush();
+  await h.flush();
+  await h.flush();
+  // 勾选待确认组后再切语言, 验证带参数文案的参数化重渲染
+  h.doc
+    .querySelector('#rows tr[data-group-id="2"]:not([data-file-index]) input[type=checkbox]')
+    .click();
+  await h.flush();
+  await switchLang(h, "en");
+  assert.equal(h.doc.getElementById("table-caption").textContent, "Duplicate file groups");
+  assert.deepEqual(dedupGroupBadges(h), ["Identical", "First 10 MB match"]);
+  assert.deepEqual(
+    [...h.doc.querySelectorAll("#rows tr[data-file-index] td:nth-child(4)")].map(
+      (td) => td.textContent
+    ),
+    ["", "", "", "Needs verification", "Needs verification"],
+  );
+  assert.match(
+    h.doc.getElementById("dedup-banner-text").textContent,
+    /1 group of large files match in the first 10 MB; full verification will read 1.0 KB \(2 files\)/
+  );
+  assert.equal(h.doc.getElementById("dedup-verify-selected").textContent, "Verify selected group (1)");
+  assert.match(
+    h.doc.getElementById("msg").textContent,
+    /Found 1 duplicate group · 2 copies · can free 2.0 KB/
+  );
+});
+
+test("查重: 浏览器预览 mock 全流程(扫描 → 比对 → 勾选 → 全量校验)", async () => {
+  const h = makeHarness(false);
+  await dedupMode(h);
+  await pickSource(h);
+  await sleep(1100); // mock 扫描 6 × 120ms
+  await h.flush();
+  assert.match(h.doc.getElementById("dedup-summary").textContent, /找到 2 组可疑文件/);
+  h.doc.getElementById("dedup-start").click();
+  await sleep(900); // mock 比对 2 × 300ms
+  await h.flush();
+  assert.deepEqual(dedupGroupBadges(h), ["完全相同", "前 10 MB 相同"]);
+  h.doc
+    .querySelector('#rows tr[data-group-id="2"]:not([data-file-index]) input[type=checkbox]')
+    .click();
+  await h.flush();
+  h.doc.getElementById("dedup-verify-selected").click();
+  await sleep(600); // mock 校验 1 × 300ms
+  await h.flush();
+  assert.match(h.doc.getElementById("msg").textContent, /找到 2 组重复文件 · 3 个副本 · 可释放 4.9 KB/);
+  assert.deepEqual(dedupGroupBadges(h), ["完全相同", "完全相同"]);
+});

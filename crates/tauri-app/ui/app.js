@@ -27,6 +27,19 @@ const state = {
   saving: false,
   filtersDirty: false, // 当前策略与最近一次压缩扫描不一致
   scanFilters: null, // 最近一次压缩扫描使用的策略 id 快照
+  dedupFilters: null, // 最近一次查重扫描使用的策略 id 快照
+  dedupFiltersDirty: false, // 当前策略与最近一次查重扫描不一致
+  dedup: {
+    sessionId: null, // 壳层 DedupContext 的会话号(planId 同款保鲜机制)
+    groups: [], // DedupGroupDto 列表
+    seq: 0, // 丢弃过期的查重 channel 事件 / await 结果
+    stage: "idle", // idle | scanning | candidates | comparing | results | verifying
+    selectedGroupIds: new Set(), // 待全量校验组的勾选
+    rejectedGroups: 0, // 内容比对失败被排除的候选组数
+    estimatedBytes: 0, // 阶段 1 报告的首轮预计读取量
+    compared: false, // 已做过内容比对(此后说明行不再显示扫描摘要)
+    progress: null, // 最近一次比对/校验进度 { done, total }(取消文案用)
+  },
 };
 
 const DEFAULT_PACKAGING = {
@@ -48,6 +61,10 @@ const DROP_PLACEHOLDER_KEYS = {
   src: "path.srcPlaceholder",
   dst: "path.dstPlaceholder",
 };
+// 源路径占位文案随模式变化(查重模式换成查重文案)
+function srcPlaceholderKey() {
+  return state.mode === "dedup" ? "path.srcPlaceholderDedup" : "path.srcPlaceholder";
+}
 let dropHover = null;
 let dropToken = 0;
 
@@ -103,14 +120,45 @@ function setStatus(key, params = {}) {
   renderStatus();
 }
 
+// 组合状态文案(查重摘要按序拼接多段词条)
+function setStatusParts(parts, params = {}) {
+  lastStatus = { key: null, parts, params };
+  renderStatus();
+}
+
+// 原始文案(壳层错误已是最终可读文本, 如「查重已取消」)
+function setRawStatus(text) {
+  lastStatus = { key: null, parts: null, params: { raw: text } };
+  renderStatus();
+}
+
+// 字节类参数统一格式化(bytes / doneBytes / totalBytes)
+function formatByteParams(params) {
+  if (typeof params.bytes === "number") params.bytes = fmtBytes(params.bytes);
+  if (typeof params.doneBytes === "number") params.doneBytes = fmtBytes(params.doneBytes);
+  if (typeof params.totalBytes === "number") params.totalBytes = fmtBytes(params.totalBytes);
+}
+
 function renderStatus() {
   const p = { ...lastStatus.params };
   const warnings = Array.isArray(p.warnings) ? p.warnings : null;
   delete p.warnings;
-  if (typeof p.bytes === "number") p.bytes = fmtBytes(p.bytes);
-  if (typeof p.doneBytes === "number") p.doneBytes = fmtBytes(p.doneBytes);
-  if (typeof p.totalBytes === "number") p.totalBytes = fmtBytes(p.totalBytes);
-  let text = t(lastStatus.key, p);
+  formatByteParams(p);
+  let text;
+  if (lastStatus.parts) {
+    // 组合文案(查重摘要 = 摘要 + 待确认 + 排除计数): 各段独立翻译, 语言切换可重渲染
+    text = lastStatus.parts
+      .map(({ key, params }) => {
+        const q = { ...params };
+        formatByteParams(q);
+        return t(key, q);
+      })
+      .join("");
+  } else if (lastStatus.key) {
+    text = t(lastStatus.key, p);
+  } else {
+    text = String(p.raw ?? ""); // 壳层错误文本(已是最终文案), 原样展示
+  }
   if (warnings && warnings.length > 0) {
     text += t("status.warnings", { count: warnings.length, first: warnings[0] });
     if (warnings.length > 1) text += "…";
@@ -138,7 +186,9 @@ function syncActionButton() {
     return;
   }
   button.removeAttribute("aria-busy");
-  button.textContent = state.run ? t("header.cancel") : t("header.confirm");
+  // 压缩/解压任务运行中或查重阶段 2/3/4 运行中 → 红色「取消」
+  const cancelling = !!state.run || (state.mode === "dedup" && dedupBusy());
+  button.textContent = cancelling ? t("header.cancel") : t("header.confirm");
 }
 
 const LANG_ITEMS = () => [...$("lang-menu").querySelectorAll("[data-lang]")];
@@ -211,11 +261,14 @@ document.addEventListener("keydown", (e) => {
 
 window.addEventListener("localechange", () => {
   renderStatus();
-  renderTable(state.rows);
+  if (state.mode === "dedup") renderDedupRows();
+  else renderTable(state.rows);
   renderPlanSummary();
   updatePwHint();
   syncActionButton();
   syncLanguageMenu();
+  syncTableCaption();
+  syncConfirm();
   setDropHover(dropHover, true);
 });
 
@@ -248,6 +301,10 @@ function makeChannel() {
 // 扫描流式事件走独立 Channel(onScan 参数): rows 骨架 + 逐条 row 大小
 function makeScanChannel(seq) {
   return new window.__TAURI__.core.Channel((ev) => onScanEvent(seq, ev));
+}
+// 查重进度走独立 Channel(按 seq 丢弃过期会话的事件)
+function makeDedupChannel(seq) {
+  return new window.__TAURI__.core.Channel((ev) => onDedupProgress(seq, ev));
 }
 
 // —— 应用内菜单栏: shadcn/ui Menubar 视觉与交互移植(见 _docs/menu.md) ——
@@ -491,7 +548,7 @@ function clearTable() {
 
 // —— 任务互斥的 UI 侧: 任务期间锁控件(确认钮另行切换成取消) ——
 const LOCK_IDS = [
-  "mode-compress", "mode-extract", "src", "dst",
+  "mode-compress", "mode-extract", "mode-dedup", "src", "dst",
   "opt-split", "opt-merge-below", "opt-bundle-max", "opt-max-entries",
   "opt-smart",
   "opt-password", "opt-random", "opt-force",
@@ -514,7 +571,13 @@ function setLocked(locked) {
 // —— 选项显隐: 模式 + 智能打包开关共同决定(策略行/策略列只在"压缩 + 智能打包"时可见) ——
 function syncOptionVisibility() {
   const compress = state.mode === "compress";
+  const dedup = state.mode === "dedup";
   const smart = compress && state.smartPackaging;
+  // 查重模式: 选项行整体隐藏, 换成查重说明行; 目标目录行与「定位」列随之显隐
+  $("options").classList.toggle("hidden", dedup);
+  $("dedup-row").classList.toggle("hidden", !dedup);
+  $("dst-row").classList.toggle("hidden", dedup);
+  $("th-action").classList.toggle("hidden", !dedup);
   for (const id of ["opt-preset-wrap", "opt-advanced-wrap"]) {
     $(id).classList.toggle("hidden", !compress);
     $(id).classList.toggle("flex", compress);
@@ -561,21 +624,27 @@ function setMode(mode) {
     "px-5 py-1.5 font-medium bg-white text-slate-600 hover:bg-slate-50 transition-colors";
   $("mode-compress").className = mode === "compress" ? on : off;
   $("mode-extract").className = mode === "extract" ? on : off + " border-l border-slate-300";
+  $("mode-dedup").className = mode === "dedup" ? on : off + " border-l border-slate-300";
   syncOptionVisibility();
+  syncTableCaption();
+  // 源占位文案随模式切换(语言切换走 setDropHover(force) 与 languageChanged 监听)
+  $("src").placeholder = t(srcPlaceholderKey());
   if (switched) {
     clearPlan();
-    // 扫描期间切模式: 作废当前扫描(旧 channel/await 结果按 scanSeq 丢弃), 清表清源
-    if (state.scanning) {
+    const wasScanning = state.scanning;
+    const hadDedup = state.dedup.stage !== "idle" || state.dedup.sessionId != null;
+    if (wasScanning) {
+      // 扫描期间切模式: 作废当前扫描(旧 channel/await 结果按各自 seq 丢弃)
       state.scanSeq++;
+      state.dedup.seq++;
       state.scanning = false;
+    }
+    resetDedupSession();
+    if (wasScanning || hadDedup || state.rows.length > 0) {
       $("src").value = "";
       clearTable();
       setStatus("status.modeSwitched");
       syncActionButton();
-    } else if (state.rows.length > 0) {
-      $("src").value = "";
-      clearTable();
-      setStatus("status.modeSwitched");
     }
   }
 }
@@ -662,11 +731,17 @@ function setSettingsBusy(busy) {
 }
 
 function updateFiltersDirty() {
-  if (state.mode !== "compress" || !state.scanFilters) {
+  const policies = currentEnabledPolicies();
+  if (state.mode === "compress" && state.scanFilters) {
+    state.filtersDirty = !samePolicies(policies, state.scanFilters);
+  } else {
     state.filtersDirty = false;
-    return;
   }
-  state.filtersDirty = !samePolicies(currentEnabledPolicies(), state.scanFilters);
+  if (state.mode === "dedup" && state.dedupFilters) {
+    state.dedupFiltersDirty = !samePolicies(policies, state.dedupFilters);
+  } else {
+    state.dedupFiltersDirty = false;
+  }
 }
 
 // 即时保存: 先乐观更新, 失败回滚; 保存中禁用策略开关, 关闭设置页会等它完成
@@ -745,17 +820,21 @@ async function closeSettings() {
   const pending = savePromise;
   if (pending) await pending;
   showView("main");
+  const src = $("src").value.trim();
   const needRescan =
-    state.filtersDirty &&
-    state.mode === "compress" &&
-    state.rows.length > 0 &&
-    $("src").value.trim() !== "";
+    src !== "" &&
+    ((state.mode === "compress" &&
+      state.filtersDirty &&
+      state.rows.length > 0) ||
+      (state.mode === "dedup" && state.dedupFiltersDirty));
   state.filtersDirty = false;
+  state.dedupFiltersDirty = false;
   // 设置入口是菜单栏「设置」: 关闭后把焦点还给菜单触发按钮
   $("menu-settings-trigger").focus();
   if (needRescan) {
     setStatus("status.settingsRescan");
-    doScan($("src").value);
+    if (state.mode === "dedup") doDedupScan(src);
+    else doScan(src);
   }
 }
 
@@ -1346,6 +1425,13 @@ function renderRows() {
   else state.rows.forEach((_, i) => tbody.appendChild(entryRow(i)));
 }
 
+// 表格 caption: 压缩/解压 = 条目列表, 查重 = 重复文件组
+function syncTableCaption() {
+  $("table-caption").textContent = t(
+    state.mode === "dedup" ? "dedup.tableCaption" : "table.caption"
+  );
+}
+
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || event.defaultPrevented) return;
   if (state.view === "settings") {
@@ -1452,7 +1538,9 @@ async function pickFolder(target) {
             ? t(
                 state.mode === "compress"
                   ? "dialog.selectSourceCompress"
-                  : "dialog.selectSourceExtract"
+                  : state.mode === "dedup"
+                    ? "dialog.selectSourceDedup"
+                    : "dialog.selectSourceExtract"
               )
             : t("dialog.selectDst"),
       });
@@ -1469,11 +1557,15 @@ async function pickFolder(target) {
   applyFolder(target, path);
 }
 
-// 落定一个路径: 源路径立即扫描; 目标只保存
+// 落定一个路径: 源路径立即扫描(查重模式走 doDedupScan); 目标只保存
 function applyFolder(target, path) {
   $(target).value = path;
-  if (target === "src") doScan(path);
-  else setStatus("status.dstPicked", { path });
+  if (target === "src") {
+    if (state.mode === "dedup") doDedupScan(path);
+    else doScan(path);
+  } else {
+    setStatus("status.dstPicked", { path });
+  }
 }
 
 // —— 原生拖拽选择文件夹(Tauri drag-drop 事件; 坐标为物理像素) ——
@@ -1490,7 +1582,7 @@ function setDropHover(zone, force = false) {
     input.classList.toggle("bg-blue-50", on);
     input.placeholder = on
       ? t("path.dropRelease")
-      : t(DROP_PLACEHOLDER_KEYS[id]);
+      : t(id === "src" ? srcPlaceholderKey() : DROP_PLACEHOLDER_KEYS[id]);
   }
 }
 
@@ -1596,6 +1688,10 @@ function renderTable(items) {
 }
 
 function syncConfirm() {
+  if (state.mode === "dedup") {
+    syncDedupActions(); // 查重模式: 按钮矩阵完全不同, 见 §4.4
+    return;
+  }
   // 全选框只统计可勾选行(meta/warning 禁用, 不参与)
   const selectable = state.rows.filter((r) => r.status === "pending");
   const n = selectable.filter((r) => r.checked).length;
@@ -1617,6 +1713,19 @@ function syncConfirm() {
 }
 
 $("check-all").addEventListener("change", (e) => {
+  if (state.mode === "dedup") {
+    // 查重模式: 表头全选框 = 全选/取消所有待确认组
+    const ids = state.dedup.selectedGroupIds;
+    if (e.target.checked) {
+      for (const g of state.dedup.groups) {
+        if (g.state === "largePrefixMatched") ids.add(g.id);
+      }
+    } else {
+      ids.clear();
+    }
+    syncConfirm();
+    return;
+  }
   for (const [i, r] of state.rows.entries()) {
     if (r.status === "pending") state.rows[i].checked = e.target.checked;
   }
@@ -1626,6 +1735,14 @@ $("check-all").addEventListener("change", (e) => {
 
 // —— 确认 → 执行 / 运行中 → 取消 ——
 $("confirm").addEventListener("click", async () => {
+  if (state.mode === "dedup") {
+    // 查重: 阶段 1 确认钮是 spinner(禁用), 阶段 2/3/4 = 取消, 其余时刻禁用
+    if (dedupBusy()) {
+      if (hasTauri()) invoke("cancel_current");
+      else mockCancel?.();
+    }
+    return;
+  }
   if (state.run) {
     // 取消: 通知外壳, 当前条目/组完成后停止
     if (hasTauri()) invoke("cancel_current");
@@ -1782,8 +1899,471 @@ $("confirm").addEventListener("click", async () => {
 
 $("mode-compress").addEventListener("click", () => setMode("compress"));
 $("mode-extract").addEventListener("click", () => setMode("extract"));
+$("mode-dedup").addEventListener("click", () => setMode("dedup"));
 $("src").addEventListener("click", () => pickFolder("src"));
 $("dst").addEventListener("click", () => pickFolder("dst"));
+
+// ———— 查重模式(_docs/dedup.md): 阶段 1 选源自动扫描 → 「开始查重」比对 → 勾选大文件全量校验 ————
+// 组状态徽章配色: 候选灰 / 完全相同绿 / 前 10 MB 相同琥珀(与方案提醒条一致的琥珀语义)
+const DEDUP_BADGE = {
+  candidate: "bg-slate-100 text-slate-600",
+  confirmed: "bg-emerald-50 text-emerald-600",
+  largePrefixMatched: "bg-amber-50 text-amber-600",
+};
+const DEDUP_STATE_KEYS = {
+  candidate: "dedup.stateCandidate",
+  confirmed: "dedup.stateConfirmed",
+  largePrefixMatched: "dedup.stateLargePrefix",
+};
+
+// 查重阶段 2/3/4 运行中(阶段 1 是可抢占扫描, 不算 busy)
+function dedupBusy() {
+  return state.dedup.stage === "comparing" || state.dedup.stage === "verifying";
+}
+
+// 清空查重会话与表格(切模式 / 重选源 / 新扫描前); 状态机回到 idle, 不动 seq
+function resetDedupSession() {
+  const d = state.dedup;
+  d.sessionId = null;
+  d.groups = [];
+  d.stage = "idle";
+  d.selectedGroupIds.clear();
+  d.rejectedGroups = 0;
+  d.estimatedBytes = 0;
+  d.compared = false;
+  d.progress = null;
+  $("rows").textContent = "";
+  $("empty").classList.remove("hidden");
+  renderDedupSummary();
+  syncDedupActions();
+}
+
+// 说明行摘要: 仅阶段 1 完成后的候选态显示(比对完成后摘要移到状态栏)
+function renderDedupSummary() {
+  const d = state.dedup;
+  const el = $("dedup-summary");
+  let text = "";
+  if (d.stage === "candidates" && !d.compared) {
+    text =
+      d.groups.length > 0
+        ? t("dedup.foundCandidates", {
+            count: d.groups.length,
+            bytes: fmtBytes(d.estimatedBytes),
+          })
+        : t("dedup.noCandidates");
+  }
+  el.textContent = text;
+  el.title = text;
+}
+
+// 查重按钮矩阵(§4.4): 顶栏确认钮 / 开始钮 / 横幅与全量校验钮 / 表头全选框
+function syncDedupActions() {
+  const d = state.dedup;
+  const pendingGroups = d.groups.filter((g) => g.state === "largePrefixMatched");
+  const hasCandidates = d.groups.some((g) => g.state === "candidate");
+  const busy = dedupBusy();
+
+  // 顶栏确认钮: 阶段 1 = spinner(禁用); 阶段 2/3/4 = 取消; 其余禁用
+  const confirmBtn = $("confirm");
+  confirmBtn.disabled = !busy;
+  confirmBtn.className = busy ? BTN_CANCEL : BTN_CONFIRM;
+  syncActionButton();
+
+  // 「开始查重」: 仅存在候选组时显示; 可用 = 无任务运行
+  const startBtn = $("dedup-start");
+  startBtn.classList.toggle("hidden", !hasCandidates || busy);
+  startBtn.disabled = !hasCandidates || busy;
+
+  // 大文件横幅: 存在待确认组且不在阶段 2/3 运行中(阶段 4 运行时保持显示、按钮禁用)
+  const showBanner = pendingGroups.length > 0 && d.stage !== "comparing";
+  $("dedup-banner").classList.toggle("hidden", !showBanner);
+  if (showBanner) {
+    // 预计读取量 = 选中组内所有文件的完整大小之和
+    const selected = pendingGroups.filter((g) => d.selectedGroupIds.has(g.id));
+    const bytes = selected.reduce(
+      (s, g) => s + g.files.reduce((x, f) => x + f.size, 0),
+      0
+    );
+    const files = selected.reduce((s, g) => s + g.files.length, 0);
+    $("dedup-banner-text").textContent = t("dedup.banner", {
+      count: pendingGroups.length,
+      bytes: fmtBytes(bytes),
+      files,
+    });
+  }
+
+  // 「全量校验选中组」: 勾选非空、无任务运行、勾选仍是待确认组
+  const verifyBtn = $("dedup-verify-selected");
+  const validSelection =
+    d.selectedGroupIds.size > 0 &&
+    [...d.selectedGroupIds].every((id) => pendingGroups.some((g) => g.id === id));
+  verifyBtn.disabled = !showBanner || busy || !validSelection;
+  verifyBtn.textContent = t("dedup.verifySelected", {
+    count: d.selectedGroupIds.size,
+  });
+
+  // 表头全选框: 全选/取消所有待确认组; 无待确认组或运行中禁用
+  const allBox = $("check-all");
+  const selectedCount = pendingGroups.filter((g) =>
+    d.selectedGroupIds.has(g.id)
+  ).length;
+  allBox.checked =
+    pendingGroups.length > 0 && selectedCount === pendingGroups.length;
+  allBox.indeterminate =
+    selectedCount > 0 && selectedCount < pendingGroups.length;
+  allBox.disabled = pendingGroups.length === 0 || busy;
+
+  // 已渲染的组级勾选框跟随 selectedGroupIds(表头全选/取消后 DOM 状态同步)
+  for (const cb of document.querySelectorAll(
+    "#rows tr[data-group-id]:not([data-file-index]) input[type=checkbox]"
+  )) {
+    cb.checked = d.selectedGroupIds.has(Number(cb.closest("tr").dataset.groupId));
+  }
+
+  renderDedupSummary();
+}
+
+// 结果表: 组标题行(勾选框 / 组标题 / 状态徽章) + 成员行(相对路径 / 大小 / 待校验 / 定位)
+function renderDedupRows() {
+  const tbody = $("rows");
+  tbody.textContent = "";
+  const groups = state.dedup.groups;
+  $("empty").classList.toggle("hidden", groups.length > 0);
+  const busy = dedupBusy();
+  for (const g of groups) {
+    tbody.appendChild(dedupGroupRow(g, busy));
+    g.files.forEach((f, fileIndex) => {
+      tbody.appendChild(dedupFileRow(g, fileIndex, f, busy));
+    });
+  }
+}
+
+function dedupGroupRow(g, busy) {
+  const tr = document.createElement("tr");
+  tr.className = GROUP_ROW_CLASS;
+  tr.dataset.groupId = String(g.id);
+  const tdCheck = document.createElement("td");
+  tdCheck.className = "py-2 text-center";
+  if (g.state === "largePrefixMatched") {
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = state.dedup.selectedGroupIds.has(g.id);
+    cb.disabled = busy;
+    cb.setAttribute("aria-label", t("dedup.ariaSelectGroup"));
+    cb.className = "accent-blue-600 align-middle";
+    cb.addEventListener("change", () => {
+      const ids = state.dedup.selectedGroupIds;
+      if (cb.checked) ids.add(g.id);
+      else ids.delete(g.id);
+      syncConfirm(); // 横幅预计读取量与全量校验钮跟随勾选
+    });
+    tdCheck.appendChild(cb);
+  }
+  const tdName = document.createElement("td");
+  tdName.className = "py-2 pr-2 truncate max-w-0";
+  tdName.textContent = t("dedup.groupTitle", {
+    count: g.files.length,
+    bytes: fmtBytes(g.wastedBytes),
+  });
+  const tdSize = document.createElement("td");
+  tdSize.className = "py-2 pr-4";
+  const tdState = document.createElement("td");
+  tdState.className = "py-2 pr-4";
+  const badge = document.createElement("span");
+  badge.className =
+    "inline-block px-2 py-0.5 rounded-full text-xs " +
+    (DEDUP_BADGE[g.state] ?? DEDUP_BADGE.candidate);
+  badge.textContent = t(DEDUP_STATE_KEYS[g.state] ?? DEDUP_STATE_KEYS.candidate);
+  tdState.appendChild(badge);
+  const tdAction = document.createElement("td");
+  tdAction.className = "py-2 pr-2";
+  tr.append(tdCheck, tdName, tdSize, tdState, tdAction);
+  return tr;
+}
+
+function dedupFileRow(g, fileIndex, f, busy) {
+  const tr = document.createElement("tr");
+  tr.className = "border-b border-slate-100 hover:bg-slate-50";
+  tr.dataset.groupId = String(g.id);
+  tr.dataset.fileIndex = String(fileIndex);
+  const tdCheck = document.createElement("td");
+  tdCheck.className = "py-2 text-center";
+  const tdName = document.createElement("td");
+  tdName.className = "py-2 pr-2 truncate max-w-0 pl-4";
+  tdName.textContent = f.relPath;
+  tdName.title = fullDedupPath(f.relPath); // 悬停显示完整路径
+  const tdSize = document.createElement("td");
+  tdSize.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
+  tdSize.textContent = fmtBytes(f.size);
+  const tdState = document.createElement("td");
+  tdState.className = "py-2 pr-4";
+  if (g.state === "largePrefixMatched") {
+    const badge = document.createElement("span");
+    badge.className = "inline-block px-2 py-0.5 rounded-full text-xs " + BADGE.warning;
+    badge.textContent = t("dedup.needVerify");
+    tdState.appendChild(badge);
+  }
+  const tdAction = document.createElement("td");
+  tdAction.className = "py-2 pr-2";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = t("dedup.locate");
+  btn.title = t("dedup.ariaLocate");
+  btn.setAttribute("aria-label", t("dedup.ariaLocate"));
+  btn.disabled = busy;
+  btn.className =
+    "px-2 py-0.5 rounded border border-slate-300 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors";
+  btn.addEventListener("click", () => revealDedupFile(g.id, fileIndex));
+  tdAction.appendChild(btn);
+  tr.append(tdCheck, tdName, tdSize, tdState, tdAction);
+  return tr;
+}
+
+// 完整路径 = 源路径 + 相对路径(源分隔符跟随输入写法)
+function fullDedupPath(relPath) {
+  const src = $("src").value;
+  if (!src) return relPath;
+  const sep = /[\\/]$/.test(src) ? "" : src.includes("\\") ? "\\" : "/";
+  return src + sep + relPath;
+}
+
+// 查重进度事件(按 seq 丢弃过期会话; 阶段不符的事件也丢弃)
+function onDedupProgress(seq, ev) {
+  const d = state.dedup;
+  if (seq !== d.seq) return;
+  if (ev?.phase === "dedupScanning") {
+    if (d.stage !== "scanning") return;
+    setStatus("dedup.scanning", { count: ev.done });
+  } else if (ev?.phase === "dedupComparing") {
+    if (d.stage !== "comparing") return;
+    d.progress = { done: ev.done, total: ev.total };
+    setStatus("dedup.comparing", {
+      done: ev.done,
+      total: ev.total,
+      bytes: ev.doneBytes,
+    });
+  } else if (ev?.phase === "dedupVerifying") {
+    if (d.stage !== "verifying") return;
+    d.progress = { done: ev.done, total: ev.total };
+    setStatus("dedup.verifying", {
+      done: ev.done,
+      total: ev.total,
+      bytes: ev.doneBytes,
+    });
+  }
+}
+
+// 比对/校验结束(含取消)后的状态栏汇总: 摘要 + 待确认 + 排除计数, 告警统一追加
+function setDedupResultStatus(warnings, cancelled) {
+  const d = state.dedup;
+  if (cancelled) {
+    setStatus("dedup.cancelled", {
+      done: d.progress?.done ?? 0,
+      total: d.progress?.total ?? 0,
+      warnings,
+    });
+    return;
+  }
+  const confirmed = d.groups.filter((g) => g.state === "confirmed");
+  const pending = d.groups.filter((g) => g.state === "largePrefixMatched").length;
+  if (confirmed.length === 0 && pending === 0) {
+    setStatus("dedup.noDuplicates", { count: d.rejectedGroups, warnings });
+    return;
+  }
+  const copies = confirmed.reduce((s, g) => s + g.files.length - 1, 0);
+  const bytes = confirmed.reduce((s, g) => s + g.wastedBytes, 0);
+  const parts = [
+    { key: "dedup.summary", params: { count: confirmed.length, copies, bytes } },
+  ];
+  if (pending > 0) {
+    parts.push({ key: "dedup.summaryPending", params: { count: pending } });
+  }
+  if (d.rejectedGroups > 0) {
+    parts.push({ key: "dedup.rejected", params: { count: d.rejectedGroups } });
+  }
+  setStatusParts(parts, { warnings });
+}
+
+// 从勾选中移除已不存在或已不是待确认的 ID(整表重绘后调用)
+function pruneDedupSelection() {
+  const pending = new Set(
+    state.dedup.groups
+      .filter((g) => g.state === "largePrefixMatched")
+      .map((g) => g.id)
+  );
+  for (const id of [...state.dedup.selectedGroupIds]) {
+    if (!pending.has(id)) state.dedup.selectedGroupIds.delete(id);
+  }
+}
+
+// 阶段 1: 选源后自动调用; 可被换源/切模式抢占(旧结果按 seq 丢弃)
+async function doDedupScan(path) {
+  await settingsReady;
+  const d = state.dedup;
+  const seq = ++d.seq;
+  resetDedupSession();
+  d.stage = "scanning";
+  state.scanning = true; // 只锁确认钮(spinner), 其余控件可用
+  setStatus("status.scanningStart");
+  syncActionButton();
+  syncConfirm();
+  const policies = currentEnabledPolicies();
+  try {
+    const res = hasTauri()
+      ? await invoke("dedup_scan", {
+          src: path,
+          filters: { enabledPolicies: policies },
+          onProgress: makeDedupChannel(seq),
+        })
+      : await mockDedupScan(seq);
+    if (seq !== d.seq) return; // 过期(换源/切模式/新扫描)
+    state.scanning = false;
+    d.sessionId = res.sessionId;
+    d.groups = res.groups;
+    d.estimatedBytes = res.estimatedFirstPassBytes;
+    d.rejectedGroups = 0;
+    d.stage = "candidates";
+    state.dedupFilters = policies;
+    renderDedupRows();
+    syncConfirm();
+    if (res.groups.length === 0) {
+      setStatus("dedup.noCandidates");
+    } else {
+      setStatus("dedup.foundCandidates", {
+        count: res.groups.length,
+        bytes: res.estimatedFirstPassBytes,
+        warnings: res.warnings,
+      });
+    }
+  } catch (e) {
+    if (seq !== d.seq) return;
+    // 阶段 1 失败/取消: 清空表格进空态, 源路径保留, 状态栏错误(含「查重已取消」)
+    state.scanning = false;
+    d.stage = "idle";
+    d.groups = [];
+    d.sessionId = null;
+    renderDedupRows();
+    syncConfirm();
+    setRawStatus(String(e));
+  }
+}
+
+// 阶段 2/3: 用户点「开始查重」; 壳层严格忙闲互斥, UI 锁全部输入(确认钮变取消)
+async function dedupCompare() {
+  const d = state.dedup;
+  if (dedupBusy() || d.stage !== "candidates") return;
+  const seq = ++d.seq;
+  d.stage = "comparing";
+  d.compared = true;
+  d.progress = {
+    done: 0,
+    total: d.groups.filter((g) => g.state === "candidate").length,
+  };
+  d.selectedGroupIds.clear();
+  setLocked(true);
+  syncConfirm();
+  renderDedupRows();
+  const src = $("src").value;
+  try {
+    const res = hasTauri()
+      ? await invoke("dedup_compare", {
+          src,
+          sessionId: d.sessionId,
+          filters: { enabledPolicies: currentEnabledPolicies() },
+          onProgress: makeDedupChannel(seq),
+        })
+      : await mockDedupCompare(seq);
+    if (seq !== d.seq) return; // 过期(切模式/重选源)
+    d.sessionId = res.sessionId;
+    d.groups = res.groups;
+    d.rejectedGroups = res.rejectedGroups ?? 0;
+    pruneDedupSelection();
+    d.stage = d.groups.some((g) => g.state === "candidate")
+      ? "candidates"
+      : "results";
+    setDedupResultStatus(res.warnings, !!res.cancelled);
+  } catch (e) {
+    if (seq !== d.seq) return;
+    // 失败: 保留已有结果(以最后一次成功返回为准), 状态栏错误
+    d.stage = d.groups.some((g) => g.state === "candidate")
+      ? "candidates"
+      : "results";
+    setRawStatus(String(e));
+  } finally {
+    setLocked(false);
+    syncConfirm();
+    renderDedupRows();
+  }
+}
+
+// 阶段 4: 勾选待确认组后点「全量校验选中组」; 壳层严格互斥
+async function dedupVerify() {
+  const d = state.dedup;
+  if (dedupBusy() || d.selectedGroupIds.size === 0) return;
+  const groupIds = [...d.selectedGroupIds];
+  const seq = ++d.seq;
+  d.stage = "verifying";
+  d.compared = true;
+  d.progress = { done: 0, total: groupIds.length };
+  setLocked(true);
+  syncConfirm();
+  renderDedupRows();
+  const src = $("src").value;
+  try {
+    const res = hasTauri()
+      ? await invoke("dedup_verify", {
+          src,
+          sessionId: d.sessionId,
+          groupIds,
+          onProgress: makeDedupChannel(seq),
+        })
+      : await mockDedupVerify(seq);
+    if (seq !== d.seq) return;
+    d.sessionId = res.sessionId;
+    d.groups = res.groups;
+    pruneDedupSelection();
+    d.stage = d.groups.some((g) => g.state === "candidate")
+      ? "candidates"
+      : "results";
+    setDedupResultStatus(res.warnings, !!res.cancelled);
+  } catch (e) {
+    if (seq !== d.seq) return;
+    d.stage = d.groups.some((g) => g.state === "candidate")
+      ? "candidates"
+      : "results";
+    setRawStatus(String(e));
+  } finally {
+    setLocked(false);
+    syncConfirm();
+    renderDedupRows();
+  }
+}
+
+// 定位: 壳层校验 (groupId, fileIndex) 后调系统文件管理器; 失败只写状态栏, 不影响结果表
+async function revealDedupFile(groupId, fileIndex) {
+  const d = state.dedup;
+  const g = d.groups.find((x) => x.id === groupId);
+  const f = g?.files[fileIndex];
+  if (!f) return;
+  if (!hasTauri()) {
+    // 浏览器预览: 只写状态栏提示
+    setRawStatus(`${t("dedup.locate")}: ${fullDedupPath(f.relPath)}`);
+    return;
+  }
+  try {
+    await invoke("reveal_dedup_file", {
+      src: $("src").value,
+      sessionId: d.sessionId,
+      groupId,
+      fileIndex,
+    });
+  } catch (e) {
+    setRawStatus(String(e));
+  }
+}
+
+$("dedup-start").addEventListener("click", () => dedupCompare());
+$("dedup-verify-selected").addEventListener("click", () => dedupVerify());
 
 // —— 压缩模式预设与高级微调 ——
 $("preset-compat").addEventListener("click", () => applyPreset("compat"));
@@ -1926,6 +2506,137 @@ function mockRun(names) {
     mockCancel = () => {
       clearInterval(timer);
       resolve({ cancelled: true, entries: [], packages: [], groups: [], warnings: [] });
+    };
+  });
+}
+
+// —— 查重浏览器预览 mock: 候选 → 比对(小文件确认 / 大文件待确认) → 勾选 → 全量校验 ——
+function mockDedupScan(seq) {
+  const groups = [
+    {
+      id: 1,
+      state: "candidate",
+      size: 1024,
+      wastedBytes: 2048,
+      files: [
+        { relPath: "photos/a.jpg", size: 1024 },
+        { relPath: "backup/photos/a.jpg", size: 1024 },
+        { relPath: "copy/a.jpg", size: 1024 },
+      ],
+    },
+    {
+      id: 2,
+      state: "candidate",
+      size: 3000,
+      wastedBytes: 3000,
+      files: [
+        { relPath: "video/big.mp4", size: 3000 },
+        { relPath: "backup/video/big.mp4", size: 3000 },
+      ],
+    },
+  ];
+  return new Promise((resolve, reject) => {
+    let scanned = 0;
+    const timer = setInterval(() => {
+      scanned += 7;
+      onDedupProgress(seq, {
+        phase: "dedupScanning",
+        done: scanned,
+        total: 0,
+        entry: "",
+        doneBytes: 0,
+        totalBytes: 0,
+      });
+      if (scanned >= 42) {
+        clearInterval(timer);
+        resolve({
+          sessionId: 1,
+          groups,
+          filesScanned: scanned,
+          estimatedFirstPassBytes: groups.reduce(
+            (s, g) => s + g.files.length * Math.min(g.size, 1024 * 1024),
+            0
+          ),
+          warnings: [],
+        });
+      }
+    }, 120);
+    mockCancel = () => {
+      clearInterval(timer);
+      reject("查重已取消");
+    };
+  });
+}
+
+function mockDedupCompare(seq) {
+  const d = state.dedup;
+  const total = d.groups.filter((g) => g.state === "candidate").length;
+  return new Promise((resolve, reject) => {
+    let done = 0;
+    let bytes = 0;
+    const timer = setInterval(() => {
+      done += 1;
+      bytes += 4096;
+      onDedupProgress(seq, {
+        phase: "dedupComparing",
+        done,
+        total,
+        entry: "",
+        doneBytes: bytes,
+        totalBytes: 0,
+      });
+      if (done >= total) {
+        clearInterval(timer);
+        // 模拟: 小文件(< 2048)直接确认, 大文件进「前 10 MB 相同」待确认
+        const groups = d.groups.map((g) =>
+          g.state === "candidate"
+            ? { ...g, state: g.size >= 2048 ? "largePrefixMatched" : "confirmed" }
+            : g
+        );
+        resolve({
+          sessionId: d.sessionId,
+          groups,
+          cancelled: false,
+          rejectedGroups: 0,
+          warnings: [],
+        });
+      }
+    }, 300);
+    mockCancel = () => {
+      clearInterval(timer);
+      reject("查重已取消");
+    };
+  });
+}
+
+function mockDedupVerify(seq) {
+  const d = state.dedup;
+  const total = d.selectedGroupIds.size;
+  return new Promise((resolve, reject) => {
+    let done = 0;
+    let bytes = 0;
+    const timer = setInterval(() => {
+      done += 1;
+      bytes += 6000;
+      onDedupProgress(seq, {
+        phase: "dedupVerifying",
+        done,
+        total,
+        entry: "",
+        doneBytes: bytes,
+        totalBytes: 0,
+      });
+      if (done >= total) {
+        clearInterval(timer);
+        const groups = d.groups.map((g) =>
+          d.selectedGroupIds.has(g.id) ? { ...g, state: "confirmed" } : g
+        );
+        resolve({ sessionId: d.sessionId, groups, cancelled: false, warnings: [] });
+      }
+    }, 300);
+    mockCancel = () => {
+      clearInterval(timer);
+      reject("查重已取消");
     };
   });
 }

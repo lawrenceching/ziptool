@@ -116,6 +116,13 @@
         >
           解压
         </button>
+        <button
+          id="mode-dedup"
+          data-i18n="header.dedup"
+          class="px-5 py-1.5 font-medium bg-white text-slate-600 hover:bg-slate-50 transition-colors border-l border-slate-300"
+        >
+          查重
+        </button>
       </div>
       <div class="flex items-center gap-2">
         <button
@@ -141,7 +148,7 @@
           placeholder="点击选择, 或拖入要压缩 / 解压的文件夹"
         />
       </div>
-      <div class="flex items-center gap-3 rounded-md" data-drop="dst">
+      <div id="dst-row" class="flex items-center gap-3 rounded-md" data-drop="dst">
         <label for="dst" data-i18n="path.dst" class="w-20 shrink-0 text-slate-500">目标文件夹</label>
         <input
           id="dst"
@@ -317,10 +324,41 @@
     <!-- 方案提醒(条目超限等): 有提醒时才显示, 与表格同一屏 -->
     <div id="plan-warnings" class="hidden bg-amber-50 px-4 py-1.5 text-xs text-amber-700"></div>
 
+    <!-- 查重说明行: 固定策略文案 + 实时摘要 + 开始按钮; 仅查重模式显示(替代选项行) -->
+    <div
+      id="dedup-row"
+      class="hidden px-4 py-2 bg-white border-b border-slate-200 flex items-center gap-x-4 gap-y-1.5 flex-wrap text-xs text-slate-500"
+    >
+      <span data-i18n="dedup.strategyLine" class="font-medium text-slate-600">比对策略: 前 1 MB → 小文件全量 BLAKE3 / ≥500 MB 先比前 10 MB</span>
+      <span id="dedup-summary" role="status" aria-live="polite" class="text-slate-600"></span>
+      <button
+        id="dedup-start"
+        data-i18n="dedup.start"
+        disabled
+        class="hidden px-3 py-1 rounded-md bg-blue-600 text-white text-xs font-medium enabled:hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+      >
+        开始查重
+      </button>
+    </div>
+
+    <!-- 大文件横幅: 存在前 10 MB 相同的待确认组时显示(琥珀色, 与方案提醒条一致); 文案与按钮文字由 JS 按 count 动态生成 -->
+    <div id="dedup-banner" class="hidden bg-amber-50 px-4 py-1.5 text-xs text-amber-700">
+      <div class="flex items-center gap-x-4 gap-y-1.5 flex-wrap">
+        <span id="dedup-banner-text"></span>
+        <button
+          id="dedup-verify-selected"
+          disabled
+          class="px-3 py-1 rounded-md bg-amber-600 text-white text-xs font-medium enabled:hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          全量校验选中组 (0)
+        </button>
+      </div>
+    </div>
+
     <!-- 条目表格: 通栏铺满剩余空间 -->
     <div class="flex-1 min-h-0 overflow-auto">
       <table class="w-full">
-        <caption class="sr-only" data-i18n="table.caption">条目列表</caption>
+        <caption id="table-caption" class="sr-only" data-i18n="table.caption">条目列表</caption>
         <thead class="sticky top-0 bg-slate-50 text-slate-500 text-xs">
           <tr class="border-b border-slate-200">
             <th class="w-10 py-2">
@@ -337,6 +375,7 @@
             <th data-i18n="table.size" class="py-2 pr-4 text-right font-medium">大小</th>
             <th id="th-strategy" data-i18n="table.strategy" class="hidden w-24 py-2 pr-2 text-left font-medium">策略</th>
             <th data-i18n="table.status" class="w-24 py-2 pr-4 text-left font-medium">状态</th>
+            <th id="th-action" data-i18n="dedup.locate" class="hidden w-16 py-2 pr-2 text-left font-medium">定位</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>

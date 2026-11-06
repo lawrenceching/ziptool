@@ -7,7 +7,8 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "confirm": "確認",
       "cancel": "取消",
       "language": "語言",
-      "scanning": "掃描中…"
+      "scanning": "掃描中…",
+      "dedup": "查重"
     },
     "lang": {
       "system": "跟隨系統"
@@ -25,7 +26,8 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
       "srcPlaceholder": "點擊選擇, 或拖入要壓縮 / 解壓的資料夾",
       "dst": "目標資料夾",
       "dstPlaceholder": "點擊選擇, 或拖入目標資料夾",
-      "dropRelease": "放開滑鼠以選擇此資料夾"
+      "dropRelease": "放開滑鼠以選擇此資料夾",
+      "srcPlaceholderDedup": "點擊選擇, 或拖入要查重的資料夾"
     },
     "options": {
       "split": "分卷",
@@ -96,6 +98,31 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
         "tooManyEntries": "{{name}} 項目數 {{count}} 超過上限 {{limit}}, 已改為直接壓縮"
       }
     },
+    "dedup": {
+      "strategyLine": "比對策略: 前 1 MB → 小檔案全量 BLAKE3 / ≥500 MB 先比前 10 MB",
+      "start": "開始查重",
+      "noCandidates": "未發現可疑檔案",
+      "stateCandidate": "候選",
+      "stateConfirmed": "完全相同",
+      "stateLargePrefix": "前 10 MB 相同",
+      "needVerify": "待校驗",
+      "locate": "定位",
+      "ariaSelectGroup": "選擇此組進行全量校驗",
+      "ariaLocate": "在檔案總管中顯示",
+      "tableCaption": "重複檔案組",
+      "comparing": "正在比對 {{done}}/{{total}} 組 · 已讀 {{bytes}}",
+      "verifying": "正在全量校驗 {{done}}/{{total}} 組 · 已讀 {{bytes}}",
+      "cancelled": "已取消: 已完成 {{done}}/{{total}} 組",
+      "scanning_other": "正在掃描檔案 {{count}} 個…",
+      "foundCandidates_other": "找到 {{count}} 組可疑檔案 · 首輪預計讀取 {{bytes}}",
+      "summary_other": "找到 {{count}} 組重複檔案 · {{copies}} 個副本 · 可釋放 {{bytes}}",
+      "summaryPending_other": "; 另有 {{count}} 組待確認",
+      "noDuplicates_other": "沒有發現重複檔案(已排除 {{count}} 組候選)",
+      "banner_other": "{{count}} 組大檔案前 10 MB 相同, 全量校驗預計讀取 {{bytes}}({{files}} 個檔案)",
+      "verifySelected_other": "全量校驗所選組 ({{count}})",
+      "groupTitle_other": "{{count}} 個檔案 · 可釋放 {{bytes}}",
+      "rejected_other": "; 已排除 {{count}} 組候選"
+    },
     "settings": {
       "title": "設定",
       "back": "返回",
@@ -149,7 +176,8 @@ window.__ZIPTOOL_LOCALES__["zh-HK"] = {
     "dialog": {
       "selectSourceCompress": "選擇要壓縮的資料夾",
       "selectSourceExtract": "選擇要解壓的資料夾",
-      "selectDst": "選擇目標資料夾"
+      "selectDst": "選擇目標資料夾",
+      "selectSourceDedup": "選擇要查重的資料夾"
     },
     "status": {
       "ready": "就緒",

@@ -7,7 +7,8 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "confirm": "Confirm",
       "cancel": "Cancel",
       "language": "Language",
-      "scanning": "Scanning…"
+      "scanning": "Scanning…",
+      "dedup": "Duplicates"
     },
     "lang": {
       "system": "Follow system"
@@ -25,7 +26,8 @@ window.__ZIPTOOL_LOCALES__["en"] = {
       "srcPlaceholder": "Click to select, or drop the folder to compress / extract",
       "dst": "Destination folder",
       "dstPlaceholder": "Click to select, or drop the destination folder",
-      "dropRelease": "Release to choose this folder"
+      "dropRelease": "Release to choose this folder",
+      "srcPlaceholderDedup": "Click to select, or drop the folder to scan for duplicates"
     },
     "options": {
       "split": "Split",
@@ -96,6 +98,40 @@ window.__ZIPTOOL_LOCALES__["en"] = {
         "tooManyEntries": "{{name}} has {{count}} entries, over the limit {{limit}}; changed to direct compression"
       }
     },
+    "dedup": {
+      "strategyLine": "Strategy: compare the first 1 MB → full BLAKE3 for small files / first 10 MB for files ≥ 500 MB",
+      "start": "Start dedup",
+      "noCandidates": "No suspicious files",
+      "stateCandidate": "Candidate",
+      "stateConfirmed": "Identical",
+      "stateLargePrefix": "First 10 MB match",
+      "needVerify": "Needs verification",
+      "locate": "Reveal",
+      "ariaSelectGroup": "Select this group for full verification",
+      "ariaLocate": "Show in File Explorer",
+      "tableCaption": "Duplicate file groups",
+      "comparing": "Comparing {{done}}/{{total}} groups · {{bytes}} read",
+      "verifying": "Verifying {{done}}/{{total}} groups · {{bytes}} read",
+      "cancelled": "Cancelled: {{done}}/{{total}} groups done",
+      "scanning_one": "Scanning file {{count}}…",
+      "scanning_other": "Scanning {{count}} files…",
+      "foundCandidates_one": "Found {{count}} suspicious group · first pass will read {{bytes}}",
+      "foundCandidates_other": "Found {{count}} suspicious groups · first pass will read {{bytes}}",
+      "summary_one": "Found {{count}} duplicate group · {{copies}} copies · can free {{bytes}}",
+      "summary_other": "Found {{count}} duplicate groups · {{copies}} copies · can free {{bytes}}",
+      "summaryPending_one": "; {{count}} more group pending verification",
+      "summaryPending_other": "; {{count}} more groups pending verification",
+      "noDuplicates_one": "No duplicate files ({{count}} candidate group rejected)",
+      "noDuplicates_other": "No duplicate files ({{count}} candidate groups rejected)",
+      "banner_one": "{{count}} group of large files match in the first 10 MB; full verification will read {{bytes}} ({{files}} files)",
+      "banner_other": "{{count}} groups of large files match in the first 10 MB; full verification will read {{bytes}} ({{files}} files)",
+      "verifySelected_one": "Verify selected group ({{count}})",
+      "verifySelected_other": "Verify selected groups ({{count}})",
+      "groupTitle_one": "{{count}} file · can free {{bytes}}",
+      "groupTitle_other": "{{count}} files · can free {{bytes}}",
+      "rejected_one": "; {{count}} candidate group rejected",
+      "rejected_other": "; {{count}} candidate groups rejected"
+    },
     "settings": {
       "title": "Settings",
       "back": "Back",
@@ -149,7 +185,8 @@ window.__ZIPTOOL_LOCALES__["en"] = {
     "dialog": {
       "selectSourceCompress": "Select folder to compress",
       "selectSourceExtract": "Select folder to extract",
-      "selectDst": "Select destination folder"
+      "selectDst": "Select destination folder",
+      "selectSourceDedup": "Select folder to scan for duplicates"
     },
     "status": {
       "ready": "Ready",
