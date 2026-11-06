@@ -7,3 +7,7 @@ edition.workspace = true
 blake3.workspace = true
 # 压缩通过外部命令完成 (Linux: zip / Windows: 7z)
 # 实现功能时可能再加: rand —— 随机包名
+
+# 测试目录联接(junction)用: std 没有创建 junction 的 API, symlink_dir 需要特权
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"

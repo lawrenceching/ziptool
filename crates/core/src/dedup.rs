@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::CancelFlag;
@@ -172,15 +172,33 @@ pub fn scan_candidates(
         });
     }
 
-    // 第二遍: 只收集 size 在候选集合中的文件(路径按字典序, 保证组内顺序稳定)
+    // 第二遍: 只收集 size 在候选集合中的文件(路径按字典序, 保证组内顺序稳定);
+    // 进度继续走同一节流器与累计计数, 大目录时状态栏不再停顿
     let mut files: Vec<(String, u64)> = Vec::new();
+    let mut second_seen = 0u64;
     let more = walk_files(input, &patterns, cancel, &mut |rel, size| {
         if candidate_sizes.contains(&size) {
             files.push((rel.to_string(), size));
         }
+        second_seen += 1;
+        if throttle.due() {
+            on_progress(&Progress {
+                phase: Phase::DedupScanning,
+                done: (files_seen + second_seen) as usize,
+                total: 0,
+                done_bytes: 0,
+                total_bytes: 0,
+                entry: rel.to_string(),
+            });
+        }
         Ok(())
     })?;
-    warnings.extend(more);
+    // 第二遍告警与第一遍可能指向同一目录, 去重避免 UI 重复报数
+    for w in more {
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
     files.sort();
 
     let groups = group_by_size(files);
@@ -383,7 +401,7 @@ fn compare_one(
     group: &DedupGroup,
     opts: &DedupOptions,
     cancel: &CancelFlag,
-    buf: &mut Vec<u8>,
+    buf: &mut [u8],
     warnings: &mut Vec<String>,
     on_bytes: &mut dyn FnMut(u64, &str),
 ) -> Option<Vec<DedupGroup>> {
@@ -402,8 +420,26 @@ fn compare_one(
     let mut results: Vec<DedupGroup> = Vec::new();
     for part in matched {
         if size <= prefix {
-            // 前缀已覆盖全文件 → 直接确认
-            results.push(make_group(part, size, DedupGroupState::Confirmed));
+            // 前缀已覆盖全文件 → 直接确认。
+            // 但扫描后文件可能已增长(共享原前缀、尾部多出内容)或缩短,
+            // 直接确认会误报; 先重校验实际大小, 有变化的桶落回全量哈希(读到 EOF)重新裁决
+            let stable = part.iter().all(|f| {
+                fs::metadata(input.join(&f.rel_path))
+                    .map(|m| m.len() == f.size)
+                    .unwrap_or(false)
+            });
+            if stable {
+                results.push(make_group(part, size, DedupGroupState::Confirmed));
+                continue;
+            }
+            let confirmed = hash_buckets(hash_files(
+                input, part, None, cancel, buf, warnings, on_bytes,
+            )?);
+            results.extend(
+                confirmed
+                    .into_iter()
+                    .map(|files| make_group(files, size, DedupGroupState::Confirmed)),
+            );
         } else if size < opts.large_threshold {
             // 阶段 3: 小文件全量 BLAKE3 → Confirmed 分桶
             let confirmed = hash_buckets(hash_files(
@@ -481,7 +517,7 @@ fn hash_files(
     files: Vec<DedupFile>,
     limit: Option<u64>,
     cancel: &CancelFlag,
-    buf: &mut Vec<u8>,
+    buf: &mut [u8],
     warnings: &mut Vec<String>,
     on_bytes: &mut dyn FnMut(u64, &str),
 ) -> Option<Vec<(DedupFile, blake3::Hash)>> {
@@ -864,8 +900,8 @@ mod tests {
         assert_eq!(rep.files_scanned, 3);
         assert_eq!(
             rep.estimated_first_pass_bytes,
-            2 * 5.min(64),
-            "Σ min(size, prefix)"
+            2 * 5,
+            "Σ min(size, prefix); 5 < 前缀 64, 每文件读全量"
         );
     }
 
@@ -973,6 +1009,84 @@ mod tests {
         std::os::unix::fs::symlink(root.join("real.txt"), root.join("real.txt.lnk")).unwrap();
         let rep = scan(&root);
         assert!(rep.groups.is_empty(), "链接与其目标不算重复: {rep:?}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_junction_not_traversed() {
+        // 目录联接(junction)不下钻: 若跟随, 同一批文件会被数两遍产生假重复
+        // junction 不需要特权即可创建(std 无此 API, 用 junction crate); 走 is_reparse_dir 同一跳过路径
+        let root = unique_temp("dedup-junction");
+        write(&root, "real/a.txt", b"junction-test");
+        write(&root, "real/b.txt", b"junction-test");
+        junction::create(root.join("real"), root.join("link")).unwrap();
+        let rep = scan(&root);
+        assert_eq!(rep.groups.len(), 1, "{rep:?}");
+        assert_eq!(rep.groups[0].files.len(), 2, "junction 里的文件不重复参与");
+        assert_eq!(rep.files_scanned, 2, "只统计 real/ 下的 2 个文件");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_dir_symlink_not_traversed() {
+        // 目录符号链接同样不下钻, 与 Windows junction 走同一 reparse/链接跳过路径
+        let root = unique_temp("dedup-dirlink");
+        write(&root, "real/a.txt", b"dirlink-test");
+        write(&root, "real/b.txt", b"dirlink-test");
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let rep = scan(&root);
+        assert_eq!(rep.groups.len(), 1, "{rep:?}");
+        assert_eq!(rep.groups[0].files.len(), 2, "链接目录里的文件不重复参与");
+        assert_eq!(rep.files_scanned, 2, "只统计 real/ 下的 2 个文件");
+    }
+
+    #[test]
+    fn grown_file_after_scan_falls_back_to_full_hash() {
+        // 扫描后文件增长: 共享原前缀但尾部多出内容 → 不得直接确认(全量哈希裁决后淘汰)
+        let root = unique_temp("dedup-grown");
+        write(&root, "a.txt", b"identical-content-32-bytes!!!!");
+        write(&root, "b.txt", b"identical-content-32-bytes!!!!");
+        let scan = scan(&root);
+        assert_eq!(scan.groups.len(), 1);
+        // 扫描后 a.txt 增长(模拟扫描与比对之间文件被写入)
+        let mut grown = fs::read(root.join("a.txt")).unwrap();
+        grown.extend_from_slice(b"-appended-tail");
+        fs::write(root.join("a.txt"), &grown).unwrap();
+        let rep = compare(&root, scan.groups);
+        assert!(
+            rep.groups.is_empty(),
+            "增长文件与原文件不再相同, 不产生误报: {rep:?}"
+        );
+        assert_eq!(rep.rejected_groups, 1);
+    }
+
+    #[test]
+    fn grown_files_both_appended_still_confirmed() {
+        // 两份文件同步增长且内容仍一致 → 重校验后照常确认
+        let root = unique_temp("dedup-grown-same");
+        write(&root, "a.txt", b"identical-content-32-bytes!!!!");
+        write(&root, "b.txt", b"identical-content-32-bytes!!!!");
+        let scan = scan(&root);
+        for name in ["a.txt", "b.txt"] {
+            let mut grown = fs::read(root.join(name)).unwrap();
+            grown.extend_from_slice(b"-same-tail");
+            fs::write(root.join(name), &grown).unwrap();
+        }
+        let rep = compare(&root, scan.groups);
+        assert_eq!(rep.groups.len(), 1, "{rep:?}");
+        assert_eq!(rep.groups[0].state, DedupGroupState::Confirmed);
+    }
+
+    #[test]
+    fn shrunken_file_after_scan_not_misconfirmed() {
+        // 扫描后文件缩短: 按扫描 size 限制读取会提前 EOF, 重校验大小后落回全量哈希淘汰
+        let root = unique_temp("dedup-shrunk");
+        write(&root, "a.txt", b"identical-content-32-bytes!!!!");
+        write(&root, "b.txt", b"identical-content-32-bytes!!!!");
+        let scan = scan(&root);
+        fs::write(root.join("a.txt"), b"short").unwrap();
+        let rep = compare(&root, scan.groups);
+        assert!(rep.groups.is_empty(), "缩短文件不再相同: {rep:?}");
     }
 
     #[test]
