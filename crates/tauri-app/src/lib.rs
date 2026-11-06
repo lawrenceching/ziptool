@@ -1087,11 +1087,8 @@ async fn dedup_compare(
     acquire_busy(&state.busy, "dedup-compare")?;
     // 校验 + 克隆缓存(纯内存; 锁在 await 前释放)
     let cloned = match lock_dedup(&state) {
-        Ok(guard) => {
-            let r = validate_dedup_session(guard.as_ref(), &src, session_id, Some(&rules))
-                .map(|()| guard.as_ref().map(|c| c.groups.clone()).unwrap_or_default());
-            r
-        }
+        Ok(guard) => validate_dedup_session(guard.as_ref(), &src, session_id, Some(&rules))
+            .map(|()| guard.as_ref().map(|c| c.groups.clone()).unwrap_or_default()),
         Err(e) => Err(e),
     };
     let groups = match cloned {
@@ -1243,6 +1240,10 @@ fn reveal_dedup_file(
     let ctx = guard.as_ref().ok_or_else(|| DEDUP_EXPIRED.to_string())?;
     validate_dedup_session(Some(ctx), &src, session_id, None)?;
     let path = resolve_dedup_path(ctx, group_id, file_index)?;
+    // 文件可能已被用户删除: 不预检时 explorer/open 可能静默成功, 给出可读错误
+    if !path.exists() {
+        return Err(format!("文件不存在或已被移动: {}", path.display()));
+    }
     desktop::reveal_path(&path).map_err(|e| format!("无法定位文件: {e}"))
 }
 
