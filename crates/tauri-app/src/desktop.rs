@@ -47,14 +47,25 @@ fn reap_in_background(mut child: std::process::Child) {
     });
 }
 
+/// 构造 explorer /select 的参数(配合 raw_arg 原样传递, 不经 Rust 再加引号):
+/// 带空格的路径若整包进引号(`"/select,C:\a b\c.txt"`), explorer 不识别开关,
+/// 会退回打开「文档」; 只有「仅引路径」的规范形态才能在父目录中选中文件。
+/// Windows 文件名不允许含引号, 直接包裹无需转义。
+#[cfg(target_os = "windows")]
+fn explorer_select_arg(path: &Path) -> String {
+    format!("/select,\"{}\"", path.display())
+}
+
 /// 在系统文件管理器中定位文件(查重「定位」动作): Windows 资源管理器选中文件,
 /// macOS Finder reveal, Linux 打开父目录(xdg-open 无「选中」语义)。
 /// 只负责启动, 不等待文件管理器退出(其退出码不可靠); 子进程后台回收。
 #[cfg(target_os = "windows")]
 pub fn reveal_path(path: &Path) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
     // explorer 是 GUI 程序, 不加 CREATE_NO_WINDOW
     let child = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
+        .raw_arg(explorer_select_arg(path))
         .spawn()?;
     reap_in_background(child);
     Ok(())
@@ -81,4 +92,22 @@ pub fn reveal_path(path: &Path) -> io::Result<()> {
 #[cfg(not(any(windows, unix)))]
 pub fn reveal_path(_path: &Path) -> io::Result<()> {
     Err(io::Error::other("当前平台不支持定位文件"))
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_select_arg_quotes_only_the_path() {
+        // 带空格路径: 引号必须只包路径, /select, 开关露在外面(否则 explorer 打开「文档」)
+        let p = std::path::Path::new(r"C:\my dir\sub\target file.txt");
+        assert_eq!(
+            explorer_select_arg(p),
+            r#"/select,"C:\my dir\sub\target file.txt""#
+        );
+        // 无空格路径同样保持规范形态, 不依赖 explorer 对裸参数的解析差异
+        let p = std::path::Path::new(r"C:\plain\a.txt");
+        assert_eq!(explorer_select_arg(p), r#"/select,"C:\plain\a.txt""#);
+    }
 }
