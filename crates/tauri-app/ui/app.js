@@ -1256,7 +1256,7 @@ function nameCell(name, tip, { indent = false } = {}) {
 
 function sizeCell(size) {
   const td = document.createElement("td");
-  td.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
+  td.className = "w-28 whitespace-nowrap py-2 pr-4 text-right tabular-nums text-slate-600";
   td.dataset.cell = "size";
   if (size == null) {
     // 扫描流式骨架: 大小未知, 先显示小 spinner(收到 row 事件后原地替换)
@@ -2093,9 +2093,7 @@ function dedupFileRow(g, fileIndex, f, busy) {
   tdName.className = "py-2 pr-2 truncate max-w-0 pl-4";
   tdName.textContent = f.relPath;
   tdName.title = fullDedupPath(f.relPath); // 悬停显示完整路径
-  const tdSize = document.createElement("td");
-  tdSize.className = "py-2 pr-4 text-right tabular-nums text-slate-600";
-  tdSize.textContent = fmtBytes(f.size);
+  const tdSize = sizeCell(f.size);
   const tdState = document.createElement("td");
   tdState.className = "py-2 pr-4";
   if (g.state === "largePrefixMatched") {
